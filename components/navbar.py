@@ -1,9 +1,10 @@
 import dash_bootstrap_components as dbc
-from dash import html
+from dash import html, dcc
+from flask_login import current_user
 
-# Crea el menu de navegacion
+# Crea la barra de navegación
 def create_navbar(pathname):
-    
+   
     # Definir la estructura de enlaces de navegación
     nav_items = [
         dbc.NavItem(
@@ -29,15 +30,26 @@ def create_navbar(pathname):
         ),
     ]
     
-    # Agregar enlace de logout
+    # Agregar información de usuario y botón de logout
     nav_right = dbc.Nav(
         [
             dbc.NavItem(
-                dbc.NavLink(
-                    "Log Out", 
-                    href="/logout"
+                html.Span(
+                    f"User: {current_user.id}" if current_user.is_authenticated else "",
+                    className="navbar-text text-light mr-3"
                 )
             ),
+            dbc.NavItem(
+                dbc.Button(
+                    "Logout", 
+                    id="logout-button",
+                    color="danger",
+                    size="sm",
+                    className="mr-1"
+                )
+            ),
+            # Location para manejar el logout
+            dcc.Location(id="logout-trigger", refresh=True)
         ],
         className="ml-auto",
         navbar=True

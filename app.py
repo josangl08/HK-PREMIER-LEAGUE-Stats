@@ -1,9 +1,8 @@
 import os
 import dash
-from dash import html
+from dash import html, dcc
 import dash_bootstrap_components as dbc
-from flask_login import LoginManager, login_required
-from flask import redirect, url_for
+from flask_login import LoginManager, current_user
 from dotenv import load_dotenv
 
 # Cargar variables de entorno
@@ -12,8 +11,12 @@ load_dotenv()
 # Importar componentes propios
 from components.navbar import create_navbar
 from layouts.home import layout as home_layout
+from layouts.login import create_login_layout
 from layouts.not_found import layout as not_found_layout
 from utils.auth import User, load_user
+
+# Importar callbacks - esto registrará los callbacks automáticamente
+from callbacks import auth_callbacks
 
 # Inicializar la aplicación Dash con tema Bootstrap
 app = dash.Dash(
@@ -41,33 +44,48 @@ def load_user_from_id(user_id):
 
 # Definir layout de la app con enrutamiento
 app.layout = html.Div([
-    dash.dcc.Location(id='url', refresh=False),
+    dcc.Location(id='url', refresh=False),
     html.Div(id='navbar-container'),
-    html.Div(id='page-content')
+    html.Div(id='page-content'),
+    
+    # Store para estado de login
+    dcc.Store(id='login-status', storage_type='session'),
 ])
 
-# Callback para enrutamiento
+# Callback para enrutamiento y protección de rutas
 @app.callback(
     [dash.Output('page-content', 'children'),
      dash.Output('navbar-container', 'children')],
     [dash.Input('url', 'pathname')]
 )
 def display_page(pathname):
-    # Mostrar navbar en todas las páginas excepto en login
-    navbar = create_navbar(pathname)
+    # Comprobar si el usuario está autenticado
+    is_authenticated = current_user.is_authenticated if current_user else False
     
-    # Enrutamiento básico
+    # Rutas que no requieren autenticación
+    public_paths = ['/login']
+    
+    # Si la ruta requiere autenticación y el usuario no está autenticado, redirigir a login
+    if pathname not in public_paths and not is_authenticated:
+        return create_login_layout(), html.Div()
+    
+    # Mostrar navbar en todas las páginas excepto en login cuando el usuario está autenticado
+    navbar = create_navbar(pathname) if is_authenticated else html.Div()
+    
+    # Enrutamiento basado en la ruta solicitada
     if pathname == '/':
+        if not is_authenticated:
+            return create_login_layout(), html.Div()
         return home_layout, navbar
     elif pathname == '/performance':
-        # Esta página se implementará más tarde
         return html.Div("Dashboard de Performance (Por implementar)"), navbar
-    elif pathname == '/noncompetitive':
-        # Esta página se implementará más tarde
+    elif pathname == '/injuries':
         return html.Div("Dashboard de Área No Competitiva (Por implementar)"), navbar
     elif pathname == '/login':
-        # No mostrar navbar en la página de login
-        return html.Div("Página de login (Por implementar)"), html.Div()
+        if is_authenticated:
+            # Si ya está autenticado, redirigir a home
+            return home_layout, navbar
+        return create_login_layout(), html.Div()
     else:
         return not_found_layout, navbar
 
