@@ -1,21 +1,14 @@
 from dash import html, dcc
 import dash_bootstrap_components as dbc
 
+# Crea el layout de la página de login
 def create_login_layout(login_status=None):
-    """
-    Crea el layout de la página de login
     
-    Args:
-        login_status: Estado del intento de login previo (None, 'success', o 'failed')
-        
-    Returns:
-        Componente de layout para la página de login
-    """
     # Mensaje de error condicionado al estado de login
     error_message = None
     if login_status == 'failed':
         error_message = dbc.Alert(
-            "Usuario o contraseña incorrectos. Inténtalo de nuevo.",
+            "Incorrect username or password. Please try again.",
             color="danger",
             dismissable=True,
             className="mb-3"
@@ -26,7 +19,7 @@ def create_login_layout(login_status=None):
         dbc.Row([
             dbc.Col([
                 html.Div([
-                    html.H2("Iniciar Sesión", className="text-center mb-4"),
+                    html.H2("Login", className="text-center mb-4"),
                     html.Hr(),
                     
                     # Mensaje de error (si existe)
@@ -36,11 +29,11 @@ def create_login_layout(login_status=None):
                     dbc.Form([
                         dbc.Row([
                             dbc.Col([
-                                dbc.Label("Usuario", html_for="username-input"),
+                                dbc.Label("User", html_for="username-input"),
                                 dbc.Input(
                                     type="text",
                                     id="username-input",
-                                    placeholder="Ingresa tu usuario",
+                                    placeholder="Enter your username",
                                     className="mb-3",
                                     autoComplete="username"
                                 ),
@@ -49,11 +42,11 @@ def create_login_layout(login_status=None):
                         
                         dbc.Row([
                             dbc.Col([
-                                dbc.Label("Contraseña", html_for="password-input"),
+                                dbc.Label("Password", html_for="password-input"),
                                 dbc.Input(
                                     type="password",
                                     id="password-input",
-                                    placeholder="Ingresa tu contraseña",
+                                    placeholder="Enter your password",
                                     className="mb-4",
                                     autoComplete="current-password"
                                 ),
@@ -61,7 +54,7 @@ def create_login_layout(login_status=None):
                         ], className="mb-3"),
                         
                         dbc.Button(
-                            "Iniciar Sesión", 
+                            "Login", 
                             id="login-button", 
                             color="primary", 
                             className="w-100 mt-3"
@@ -73,7 +66,7 @@ def create_login_layout(login_status=None):
                     
                     html.Div([
                         html.P([
-                            "Credenciales de demostración: ",
+                            "Demostration Credentials: ",
                             html.Strong("admin / admin")
                         ], className="text-muted small text-center mt-4")
                     ])
