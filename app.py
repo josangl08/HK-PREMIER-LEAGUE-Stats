@@ -14,6 +14,7 @@ from layouts.home import layout as home_layout
 from layouts.login import create_login_layout
 from layouts.not_found import layout as not_found_layout
 from utils.auth import User, load_user
+from utils.cache import init_cache
 
 # Importar callbacks - esto registrará los callbacks automáticamente
 from callbacks import auth_callbacks
@@ -32,6 +33,9 @@ app = dash.Dash(
 app.title = "Sports Dashboard"
 server = app.server
 server.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "clave_secreta_predeterminada")
+
+# Inicializar el caché
+cache = init_cache(app)
 
 # Configurar autenticación con Flask-Login
 login_manager = LoginManager()
@@ -52,12 +56,6 @@ app.layout = html.Div([
     dcc.Store(id='login-status', storage_type='session'),
 ])
 
-# Callback para enrutamiento y protección de rutas
-@app.callback(
-    [dash.Output('page-content', 'children'),
-     dash.Output('navbar-container', 'children')],
-    [dash.Input('url', 'pathname')]
-)
 def display_page(pathname):
     # Comprobar si el usuario está autenticado
     is_authenticated = current_user.is_authenticated if current_user else False

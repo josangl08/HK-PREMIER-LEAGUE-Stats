@@ -3,3 +3,4 @@
 
 # Importar callbacks específicos
 from callbacks.auth_callbacks import *
+from callbacks.navigation_callbacks import *
