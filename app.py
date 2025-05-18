@@ -40,7 +40,6 @@ cache = init_cache(app)
 # Configurar autenticación con Flask-Login
 login_manager = LoginManager()
 login_manager.init_app(server)
-login_manager.login_view = "/login"
 
 @login_manager.user_loader
 def load_user_from_id(user_id):
