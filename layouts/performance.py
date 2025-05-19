@@ -5,6 +5,7 @@ from datetime import datetime, date
 def create_performance_layout():
     """
     Crea el layout del dashboard de performance.
+    Versión simplificada con filtros mejorados.
     
     Returns:
         Layout del dashboard de performance
@@ -23,7 +24,7 @@ def create_performance_layout():
             ])
         ]),
         
-        # Panel de control / Filtros
+        # Panel de control / Filtros simplificado
         dbc.Row([
             dbc.Col([
                 dbc.Card([
@@ -32,40 +33,40 @@ def create_performance_layout():
                     ]),
                     dbc.CardBody([
                         dbc.Row([
-                            # Selector de nivel de análisis
+                            # Selector de temporada
                             dbc.Col([
-                                dbc.Label("Nivel de Análisis:", html_for="analysis-level"),
+                                dbc.Label("Temporada:", html_for="season-selector"),
                                 dcc.Dropdown(
-                                    id="analysis-level",
+                                    id="season-selector",
                                     options=[
-                                        {"label": "🏆 Liga Completa", "value": "league"},
-                                        {"label": "⚽ Equipo Específico", "value": "team"},
-                                        {"label": "👤 Jugador Individual", "value": "player"}
+                                        {"label": "2024-25", "value": "2024-25"},
+                                        {"label": "2023-24", "value": "2023-24"},
+                                        {"label": "2022-23", "value": "2022-23"}
                                     ],
-                                    value="league",
+                                    value="2024-25",
                                     className="mb-3"
                                 )
                             ], md=4),
                             
-                            # Selector de equipo (condicional)
+                            # Selector de equipo
                             dbc.Col([
                                 dbc.Label("Equipo:", html_for="team-selector"),
                                 dcc.Dropdown(
                                     id="team-selector",
-                                    placeholder="Selecciona un equipo...",
+                                    placeholder="Todos los equipos...",
                                     className="mb-3",
-                                    disabled=True
+                                    clearable=True
                                 )
                             ], md=4),
                             
-                            # Selector de jugador (condicional)
+                            # Selector de jugador
                             dbc.Col([
                                 dbc.Label("Jugador:", html_for="player-selector"),
                                 dcc.Dropdown(
                                     id="player-selector",
-                                    placeholder="Selecciona un jugador...",
+                                    placeholder="Todos los jugadores...",
                                     className="mb-3",
-                                    disabled=True
+                                    clearable=True
                                 )
                             ], md=4)
                         ]),

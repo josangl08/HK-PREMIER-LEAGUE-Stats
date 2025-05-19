@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Tuple
 class HongKongDataProcessor:
     """
     Procesador específico para datos de jugadores de la Liga de Hong Kong.
-    Limpia y transforma estadísticas individuales de jugadores.
+    Versión corregida para manejar mejor posiciones y equipos.
     """
     
     def __init__(self):
@@ -48,7 +48,7 @@ class HongKongDataProcessor:
         
         # Columnas críticas que deben estar presentes
         self.required_columns = [
-            'Player', 'Team', 'Position', 'Age', 'Matches played'
+            'Player', 'Team within selected timeframe', 'Primary position', 'Age', 'Matches played'
         ]
         
         # Columnas numéricas para convertir
@@ -67,13 +67,7 @@ class HongKongDataProcessor:
     def process_season_data(self, df: pd.DataFrame, season: str) -> pd.DataFrame:
         """
         Procesa datos de jugadores de una temporada.
-        
-        Args:
-            df: DataFrame crudo con datos de jugadores
-            season: Temporada (ej: "2024-25")
-            
-        Returns:
-            DataFrame procesado y limpio
+     
         """
         if df.empty:
             print("DataFrame vacío, no hay datos para procesar")
@@ -94,16 +88,19 @@ class HongKongDataProcessor:
         # 3. Procesar datos numéricos
         df_clean = self._process_numeric_data(df_clean)
         
-        # 4. Limpiar posiciones
-        df_clean = self._process_positions(df_clean)
+        # 4. Limpiar posiciones 
+        df_clean = self._process_positions_improved(df_clean)
         
-        # 5. Limpiar información personal
+        # 5. Limpiar equipos 
+        df_clean = self._process_teams_improved(df_clean)
+        
+        # 6. Limpiar información personal
         df_clean = self._process_personal_info(df_clean)
         
-        # 6. Agregar columnas calculadas (crear un nuevo DataFrame para evitar fragmentación)
+        # 7. Agregar columnas calculadas
         df_clean = self._add_calculated_columns(df_clean, season)
         
-        # 7. Validación final
+        # 8. Validación final
         df_clean = self._final_validation(df_clean)
         
         print(f"Datos procesados: {len(df_clean)} jugadores, {len(df_clean.columns)} columnas")
@@ -138,11 +135,8 @@ class HongKongDataProcessor:
         
         # Limpiar nombres de jugadores solo si la columna existe
         if 'Player' in df.columns:
-            # Convertir a string y limpiar - crear nueva serie para evitar warnings
-            player_clean = df['Player'].astype(str).str.strip()
-            # Crear DataFrame nuevo para evitar warnings de copia
             df = df.copy()
-            df['Player'] = player_clean
+            df['Player'] = df['Player'].astype(str).str.strip()
             
             # Eliminar jugadores sin nombre válido
             initial_count = len(df)
@@ -157,26 +151,158 @@ class HongKongDataProcessor:
             if len(df) < initial_count:
                 print(f"Eliminados {initial_count - len(df)} jugadores sin nombre válido")
         
-        # Limpiar nombres de equipos solo si la columna existe
-        if 'Team' in df.columns:
-            # Convertir a string y limpiar - crear nueva serie para evitar warnings
-            team_clean = df['Team'].astype(str).str.strip()
-            df['Team'] = team_clean
-            
-            # Eliminar jugadores sin equipo válido
-            initial_count = len(df)
-            mask = (
-                df['Team'].notna() & 
-                (df['Team'] != '') & 
-                (df['Team'] != 'nan') & 
-                (df['Team'] != 'None')
-            )
-            df = df[mask].copy()
-            
-            if len(df) < initial_count:
-                print(f"Eliminados {initial_count - len(df)} jugadores sin equipo válido")
-        
         return df
+    
+    def _process_teams_improved(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Procesa equipos usando 'Team within selected timeframe' 
+        como equipo principal de Hong Kong.
+        """
+        
+        # Crear diccionario para las nuevas columnas de equipo
+        team_columns = {}
+        
+        # Procesar equipo de Hong Kong (Team within selected timeframe)
+        if 'Team within selected timeframe' in df.columns:
+            # Este es el equipo principal para el análisis de la liga
+            team_hk = df['Team within selected timeframe'].astype(str).str.strip()
+            team_hk = team_hk.replace({'nan': '', 'None': '', '': None})
+            team_columns['Team_HK'] = team_hk
+            
+            # También crear una versión limpia
+            team_hk_clean = team_hk.fillna('Sin equipo HK')
+            team_columns['Team_HK_Clean'] = team_hk_clean
+        
+        # Procesar equipo actual
+        if 'Team' in df.columns:
+            team_current = df['Team'].astype(str).str.strip()
+            team_current = team_current.replace({'nan': '', 'None': '', '': None})
+            team_columns['Team_Current'] = team_current
+            
+            # Crear versión limpia
+            team_current_clean = team_current.fillna('Sin equipo actual')
+            team_columns['Team_Current_Clean'] = team_current_clean
+        
+        # Para compatibilidad con el resto del código, usar Team_HK como 'Team' principal
+        if 'Team_HK' in team_columns:
+            team_columns['Team'] = team_columns['Team_HK_Clean']
+        
+        # Agregar todas las columnas de equipo de una vez
+        if team_columns:
+            new_df = pd.concat([df, pd.DataFrame(team_columns, index=df.index)], axis=1)
+            
+            # Eliminar jugadores sin equipo de Hong Kong válido
+            if 'Team' in new_df.columns:
+                initial_count = len(new_df)
+                mask = (
+                    new_df['Team'].notna() & 
+                    (new_df['Team'] != 'Sin equipo HK') &
+                    (new_df['Team'].str.strip() != '')
+                )
+                new_df = new_df[mask].copy()
+                
+                if len(new_df) < initial_count:
+                    print(f"Eliminados {initial_count - len(new_df)} jugadores sin equipo HK válido")
+            
+            return new_df
+        else:
+            return df
+    
+    def _process_positions_improved(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Procesa posiciones manejando.
+        Primary, Secondary, Third position y sus porcentajes.
+        """
+        
+        # Crear diccionario para las nuevas columnas de posición
+        position_columns = {}
+        
+        # Procesar posición primaria
+        if 'Primary position' in df.columns:
+            primary_pos = df['Primary position'].astype(str).str.strip()
+            primary_pos = primary_pos.replace({'nan': '', 'None': '', '': None})
+            
+            # Limpiar y mapear a nombres completos
+            primary_clean = primary_pos.fillna('Unknown')
+            primary_full = primary_clean.map(self.position_mapping).fillna(primary_clean)
+            primary_group = primary_clean.apply(self._get_position_group)
+            
+            position_columns['Position_Primary'] = primary_clean
+            position_columns['Position_Primary_Full'] = primary_full
+            position_columns['Position_Primary_Group'] = primary_group
+        
+        # Procesar posición secundaria
+        if 'Secondary position' in df.columns:
+            secondary_pos = df['Secondary position'].astype(str).str.strip()
+            secondary_pos = secondary_pos.replace({'nan': '', 'None': '', '': None})
+            secondary_clean = secondary_pos.fillna('')
+            position_columns['Position_Secondary'] = secondary_clean
+        
+        # Procesar posición terciaria
+        if 'Third position' in df.columns:
+            third_pos = df['Third position'].astype(str).str.strip()
+            third_pos = third_pos.replace({'nan': '', 'None': '', '': None})
+            third_clean = third_pos.fillna('')
+            position_columns['Position_Third'] = third_clean
+        
+        # Procesar porcentajes de posición
+        if 'Primary position, %' in df.columns:
+            primary_pct = pd.to_numeric(df['Primary position, %'], errors='coerce').fillna(0)
+            position_columns['Position_Primary_Pct'] = primary_pct
+        
+        if 'Secondary position, %' in df.columns:
+            secondary_pct = pd.to_numeric(df['Secondary position, %'], errors='coerce').fillna(0)
+            position_columns['Position_Secondary_Pct'] = secondary_pct
+        
+        if 'Third position, %' in df.columns:
+            third_pct = pd.to_numeric(df['Third position, %'], errors='coerce').fillna(0)
+            position_columns['Position_Third_Pct'] = third_pct
+        
+        # Crear posición dominante basada en porcentajes
+        if all(col in position_columns for col in ['Position_Primary_Pct', 'Position_Secondary_Pct', 'Position_Third_Pct']):
+            # Comparar porcentajes para determinar posición dominante
+            def get_dominant_position(row):
+                positions = [
+                    (row.get('Position_Primary', ''), row.get('Position_Primary_Pct', 0)),
+                    (row.get('Position_Secondary', ''), row.get('Position_Secondary_Pct', 0)),
+                    (row.get('Position_Third', ''), row.get('Position_Third_Pct', 0))
+                ]
+                # Filtrar posiciones vacías y obtener la de mayor porcentaje
+                valid_positions = [(pos, pct) for pos, pct in positions if pos and pos != '']
+                if valid_positions:
+                    dominant = max(valid_positions, key=lambda x: x[1])
+                    return dominant[0] if dominant[1] > 0 else row.get('Position_Primary', 'Unknown')
+                return row.get('Position_Primary', 'Unknown')
+            
+            # Aplicar a un DataFrame temporal para calcular la posición dominante
+            temp_df = pd.DataFrame(position_columns)
+            position_columns['Position_Dominant'] = temp_df.apply(get_dominant_position, axis=1)
+            
+            # Crear grupo de posición dominante
+            position_columns['Position_Dominant_Group'] = position_columns['Position_Dominant'].apply(self._get_position_group)
+        
+        # Para compatibilidad con el resto del código
+        if 'Position_Primary' in position_columns:
+            position_columns['Position_Clean'] = position_columns['Position_Primary']
+            position_columns['Position_Full'] = position_columns['Position_Primary_Full']
+            position_columns['Position_Group'] = position_columns['Position_Primary_Group']
+        
+        # Agregar todas las columnas de posición de una vez
+        if position_columns:
+            new_df = pd.concat([df, pd.DataFrame(position_columns, index=df.index)], axis=1)
+            return new_df
+        else:
+            return df
+    
+    def _get_position_group(self, position):
+        """Determina el grupo de posición (Goalkeeper, Defender, etc.)."""
+        if not position or position == '' or position == 'Unknown':
+            return 'Unknown'
+        
+        for group, positions in self.position_groups.items():
+            if position in positions:
+                return group
+        return 'Unknown'
     
     def _process_numeric_data(self, df: pd.DataFrame) -> pd.DataFrame:
         """Procesa y limpia datos numéricos."""
@@ -184,7 +310,7 @@ class HongKongDataProcessor:
         # Convertir columnas numéricas básicas
         for col in self.numeric_columns:
             if col in df.columns:
-                # Limpiar valores especiales - no modificar inplace
+                # Limpiar valores especiales
                 series_clean = df[col].astype(str).str.replace(',', '')
                 
                 # Manejar Market value especial (puede tener 'K', 'M')
@@ -213,7 +339,7 @@ class HongKongDataProcessor:
         # Limpiar columnas de porcentaje
         for col in self.percentage_columns:
             if col in df.columns:
-                # Convertir porcentajes a decimal (ej: "50.0" -> 0.5)
+                # Convertir porcentajes a decimal (mantener como porcentaje 0-100)
                 series_numeric = pd.to_numeric(df[col], errors='coerce')
                 series_numeric = series_numeric.fillna(0)
                 # Asegurar que estén entre 0 y 100
@@ -258,49 +384,6 @@ class HongKongDataProcessor:
                 return float(value)
             except:
                 return 0
-    
-    def _process_positions(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Procesa y estandariza información de posiciones."""
-        
-        # Crear diccionario para las nuevas columnas de posición
-        position_columns = {}
-        
-        # Limpiar posición principal
-        if 'Position' in df.columns:
-            # Extraer primera posición si hay múltiples
-            position_clean = df['Position'].astype(str).str.split(',').str[0].str.strip()
-            
-            # Remover caracteres extra y normalizar
-            position_clean = position_clean.str.replace('"', '').str.strip()
-            
-            # Mapear a nombres completos
-            position_full = position_clean.map(self.position_mapping)
-            position_full = position_full.fillna(position_clean)
-            
-            position_columns['Position_Clean'] = position_clean
-            position_columns['Position_Full'] = position_full
-            position_columns['Position_Group'] = position_clean.apply(self._get_position_group)
-        
-        # Procesar Primary position
-        if 'Primary position' in df.columns:
-            primary_clean = df['Primary position'].astype(str).str.strip()
-            primary_full = primary_clean.map(self.position_mapping)
-            primary_full = primary_full.fillna(primary_clean)
-            position_columns['Primary_Position_Full'] = primary_full
-        
-        # Agregar todas las columnas de posición de una vez usando pd.concat
-        if position_columns:
-            new_df = pd.concat([df, pd.DataFrame(position_columns, index=df.index)], axis=1)
-            return new_df
-        else:
-            return df
-    
-    def _get_position_group(self, position):
-        """Determina el grupo de posición (Goalkeeper, Defender, etc.)."""
-        for group, positions in self.position_groups.items():
-            if position in positions:
-                return group
-        return 'Unknown'
     
     def _process_personal_info(self, df: pd.DataFrame) -> pd.DataFrame:
         """Procesa información personal de los jugadores."""
@@ -408,12 +491,15 @@ class HongKongDataProcessor:
         if 'Matches played' in df.columns:
             # Asumiendo máximo de 30 partidos en la temporada
             max_matches = df['Matches played'].max()
-            new_columns['Playing_Time_Category'] = pd.cut(
-                df['Matches played'],
-                bins=[0, max_matches*0.25, max_matches*0.5, max_matches*0.75, max_matches],
-                labels=['Rarely plays', 'Occasional', 'Regular', 'Key player'],
-                include_lowest=True
-            )
+            if max_matches > 0:
+                new_columns['Playing_Time_Category'] = pd.cut(
+                    df['Matches played'],
+                    bins=[0, max_matches*0.25, max_matches*0.5, max_matches*0.75, max_matches],
+                    labels=['Rarely plays', 'Occasional', 'Regular', 'Key player'],
+                    include_lowest=True
+                )
+            else:
+                new_columns['Playing_Time_Category'] = 'No data'
         
         # Calcular eficiencia de gol
         if all(col in df.columns for col in ['Goals', 'Shots']):
@@ -423,23 +509,19 @@ class HongKongDataProcessor:
                 0
             )
         
-        # Indicador de versatilidad (si juega múltiples posiciones)
-        position_cols = ['Primary position', 'Secondary position', 'Third position']
-        available_pos_cols = [col for col in position_cols if col in df.columns]
+        # Indicador de versatilidad (contando posiciones válidas)
+        versatility_count = 0
+        if 'Position_Primary' in df.columns:
+            versatility_count += (df['Position_Primary'].notna() & (df['Position_Primary'] != '')).astype(int)
+        if 'Position_Secondary' in df.columns:
+            versatility_count += (df['Position_Secondary'].notna() & (df['Position_Secondary'] != '')).astype(int)
+        if 'Position_Third' in df.columns:
+            versatility_count += (df['Position_Third'].notna() & (df['Position_Third'] != '')).astype(int)
         
-        if len(available_pos_cols) > 1:
-            # Contar posiciones no vacías
-            versatility_count = 0
-            for col in available_pos_cols:
-                versatility_count += (
-                    df[col].notna() & 
-                    (df[col] != '') & 
-                    (df[col] != '0') & 
-                    (df[col] != 'nan')
-                ).astype(int)
+        if isinstance(versatility_count, pd.Series):
             new_columns['Position_Versatility'] = versatility_count
         
-        # Indicador de juventud del equipo (para análisis posterior)
+        # Indicador de juventud del equipo
         if 'Team' in df.columns and 'Age' in df.columns:
             team_avg_age = df.groupby('Team')['Age'].mean()
             new_columns['Team_Avg_Age'] = df['Team'].map(team_avg_age)
@@ -517,7 +599,7 @@ class HongKongDataProcessor:
         
         # Top performers (solo si las columnas necesarias existen)
         if all(col in df.columns for col in ['Goals', 'Player', 'Team']) and len(df) > 0:
-            top_scorers_df = df.nlargest(5, 'Goals')[['Player', 'Team', 'Goals']]
+            top_scorers_df = df.nlargest(10, 'Goals')[['Player', 'Team', 'Goals']]
             # Convertir explícitamente a lista de diccionarios
             top_scorers_list = []
             for _, row in top_scorers_df.iterrows():
@@ -526,14 +608,13 @@ class HongKongDataProcessor:
                     'Team': str(row['Team']),
                     'Goals': int(row['Goals']) if pd.notna(row['Goals']) else 0
                 })
-            # Crear un diccionario con la estructura esperada
             summary['top_scorers'] = {
                 'count': len(top_scorers_list),
                 'players': top_scorers_list
             }
         
         if all(col in df.columns for col in ['Assists', 'Player', 'Team']) and len(df) > 0:
-            top_assisters_df = df.nlargest(5, 'Assists')[['Player', 'Team', 'Assists']]
+            top_assisters_df = df.nlargest(10, 'Assists')[['Player', 'Team', 'Assists']]
             # Convertir explícitamente a lista de diccionarios
             top_assisters_list = []
             for _, row in top_assisters_df.iterrows():
@@ -542,7 +623,6 @@ class HongKongDataProcessor:
                     'Team': str(row['Team']),
                     'Assists': int(row['Assists']) if pd.notna(row['Assists']) else 0
                 })
-            # Crear un diccionario con la estructura esperada
             summary['top_assisters'] = {
                 'count': len(top_assisters_list),
                 'players': top_assisters_list

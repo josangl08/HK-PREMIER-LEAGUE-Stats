@@ -7,7 +7,7 @@ import json
 class HongKongStatsAggregator:
     """
     Agregador de estadísticas para la Liga de Hong Kong.
-    Genera estadísticas a nivel Liga, Equipo y Jugador para el dashboard.
+    Versión corregida para mejor manejo de filtros y top performers.
     """
     
     def __init__(self, processed_data: pd.DataFrame):
@@ -38,54 +38,98 @@ class HongKongStatsAggregator:
             'Yellow cards', 'Red cards', 'Duels won, %'
         ]
     
-    def get_league_statistics(self) -> Dict:
+    def apply_filters(self, df: pd.DataFrame, position_filter: Optional[str] = None, age_range: Optional[List[int]] = None) -> pd.DataFrame:
         """
-        Genera estadísticas generales de toda la liga.
+        Aplica filtros de posición y edad al DataFrame.
         
+        Args:
+            df: DataFrame a filtrar
+            position_filter: Filtro de posición ('all', 'Goalkeeper', etc.)
+            age_range: Lista con [min_age, max_age]
+            
+        Returns:
+            DataFrame filtrado
+        """
+        filtered_df = df.copy()
+        
+        # Aplicar filtro de posición
+        if position_filter and position_filter != 'all':
+            if 'Position_Group' in filtered_df.columns:
+                filtered_df = filtered_df[filtered_df['Position_Group'] == position_filter]
+            elif 'Position_Primary_Group' in filtered_df.columns:
+                filtered_df = filtered_df[filtered_df['Position_Primary_Group'] == position_filter]
+        
+        # Aplicar filtro de edad
+        if age_range and len(age_range) == 2 and 'Age' in filtered_df.columns:
+            min_age, max_age = age_range
+            filtered_df = filtered_df[
+                (filtered_df['Age'] >= min_age) & 
+                (filtered_df['Age'] <= max_age)
+            ]
+        
+        return filtered_df
+    
+    def get_league_statistics(self, position_filter: Optional[str] = None, age_range: Optional[List[int]] = None) -> Dict:
+        """
+        Genera estadísticas generales de toda la liga con filtros aplicados.
+        
+        Args:
+            position_filter: Filtro de posición
+            age_range: Rango de edad [min, max]
+            
         Returns:
             Diccionario con estadísticas de la liga
         """
-        cache_key = 'league_stats'
+        cache_key = f'league_stats_{position_filter}_{age_range}'
         if cache_key in self._cache:
             return self._cache[cache_key]
         
+        # Aplicar filtros
+        filtered_data = self.apply_filters(self.data, position_filter, age_range)
+        
         stats = {
-            'overview': self._get_league_overview(),
-            'top_performers': self._get_top_performers(),
-            'position_analysis': self._get_position_analysis(),
-            'age_distribution': self._get_age_distribution(),
-            'team_comparison': self._get_team_comparison_summary()
+            'overview': self._get_league_overview(filtered_data),
+            'top_performers': self._get_top_performers(filtered_data),
+            'position_analysis': self._get_position_analysis(filtered_data),
+            'age_distribution': self._get_age_distribution(filtered_data),
+            'team_comparison': self._get_team_comparison_summary(filtered_data)
         }
         
         self._cache[cache_key] = stats
         return stats
     
-    def get_team_statistics(self, team_name: str) -> Dict:
+    def get_team_statistics(self, team_name: str, position_filter: Optional[str] = None, age_range: Optional[List[int]] = None) -> Dict:
         """
-        Genera estadísticas específicas de un equipo.
+        Genera estadísticas específicas de un equipo con filtros aplicados.
         
         Args:
             team_name: Nombre del equipo
+            position_filter: Filtro de posición
+            age_range: Rango de edad [min, max]
             
         Returns:
             Diccionario con estadísticas del equipo
         """
-        cache_key = f'team_stats_{team_name}'
+        cache_key = f'team_stats_{team_name}_{position_filter}_{age_range}'
         if cache_key in self._cache:
             return self._cache[cache_key]
         
+        # Filtrar por equipo primero
         team_data = self.data[self.data['Team'] == team_name]
         
         if team_data.empty:
             return {'error': f'No se encontraron datos para el equipo {team_name}'}
         
+        # Aplicar filtros adicionales
+        filtered_data = self.apply_filters(team_data, position_filter, age_range)
+        
         stats = {
-            'overview': self._get_team_overview(team_data, team_name),
-            'squad_analysis': self._get_squad_analysis(team_data),
-            'top_players': self._get_team_top_players(team_data),
-            'position_breakdown': self._get_team_position_breakdown(team_data),
-            'performance_metrics': self._get_team_performance_metrics(team_data),
-            'league_comparison': self._get_team_league_comparison(team_name, team_data)
+            'overview': self._get_team_overview(filtered_data, team_name),
+            'squad_analysis': self._get_squad_analysis(filtered_data),
+            'top_players': self._get_team_top_players(filtered_data),
+            'position_breakdown': self._get_team_position_breakdown(filtered_data),
+            'performance_metrics': self._get_team_performance_metrics(filtered_data),
+            'league_comparison': self._get_team_league_comparison(team_name, filtered_data)
         }
         
         self._cache[cache_key] = stats
@@ -128,19 +172,19 @@ class HongKongStatsAggregator:
         self._cache[cache_key] = stats
         return stats
     
-    def _get_league_overview(self) -> Dict:
+    def _get_league_overview(self, data: pd.DataFrame) -> Dict:
         """Estadísticas generales de la liga."""
-        total_players = len(self.data)
-        total_teams = self.data['Team'].nunique()
+        total_players = len(data)
+        total_teams = data['Team'].nunique()
         
         # Estadísticas agregadas
-        total_goals = self.data['Goals'].sum() if 'Goals' in self.data.columns else 0
-        total_assists = self.data['Assists'].sum() if 'Assists' in self.data.columns else 0
-        total_matches = self.data['Matches played'].sum() if 'Matches played' in self.data.columns else 0
-        total_minutes = self.data['Minutes played'].sum() if 'Minutes played' in self.data.columns else 0
+        total_goals = data['Goals'].sum() if 'Goals' in data.columns else 0
+        total_assists = data['Assists'].sum() if 'Assists' in data.columns else 0
+        total_matches = data['Matches played'].sum() if 'Matches played' in data.columns else 0
+        total_minutes = data['Minutes played'].sum() if 'Minutes played' in data.columns else 0
         
         # Promedios
-        avg_age = self.data['Age'].mean() if 'Age' in self.data.columns else 0
+        avg_age = data['Age'].mean() if 'Age' in data.columns else 0
         avg_goals_per_player = total_goals / total_players if total_players > 0 else 0
         avg_assists_per_player = total_assists / total_players if total_players > 0 else 0
         
@@ -157,53 +201,68 @@ class HongKongStatsAggregator:
             'avg_assists_per_player': round(avg_assists_per_player, 2)
         }
     
-    def _get_top_performers(self) -> Dict:
-        """Top performers de la liga en diferentes categorías."""
+    def _get_top_performers(self, data: pd.DataFrame) -> Dict:
+        """Top performers de la liga en diferentes categorías - CORREGIDO para mostrar 10."""
         performers = {}
         
-        # Top scorers
-        if 'Goals' in self.data.columns:
-            top_scorers = self.data.nlargest(10, 'Goals')[['Player', 'Team', 'Goals', 'Position_Group']].to_dict('records')
+        # Top scorers - TOP 10
+        if 'Goals' in data.columns:
+            top_scorers = data.nlargest(10, 'Goals')[['Player', 'Team', 'Goals', 'Position_Group']].to_dict('records')
+            # Limpiar registros
+            for player in top_scorers:
+                player['Position_Group'] = player.get('Position_Group', 'Unknown')
             performers['top_scorers'] = top_scorers
         
-        # Top assisters
-        if 'Assists' in self.data.columns:
-            top_assisters = self.data.nlargest(10, 'Assists')[['Player', 'Team', 'Assists', 'Position_Group']].to_dict('records')
+        # Top assisters - TOP 10
+        if 'Assists' in data.columns:
+            top_assisters = data.nlargest(10, 'Assists')[['Player', 'Team', 'Assists', 'Position_Group']].to_dict('records')
+            # Limpiar registros
+            for player in top_assisters:
+                player['Position_Group'] = player.get('Position_Group', 'Unknown')
             performers['top_assisters'] = top_assisters
         
-        # Most played minutes
-        if 'Minutes played' in self.data.columns:
-            most_played = self.data.nlargest(10, 'Minutes played')[['Player', 'Team', 'Minutes played', 'Matches played']].to_dict('records')
+        # Most played minutes - TOP 10
+        if 'Minutes played' in data.columns:
+            most_played = data.nlargest(10, 'Minutes played')[['Player', 'Team', 'Minutes played', 'Matches played']].to_dict('records')
             performers['most_minutes'] = most_played
         
-        # Best passing accuracy (min 10 matches)
-        if all(col in self.data.columns for col in ['Accurate passes, %', 'Matches played']):
-            best_passers = self.data[self.data['Matches played'] >= 10].nlargest(10, 'Accurate passes, %')[
-                ['Player', 'Team', 'Accurate passes, %', 'Passes per 90']
-            ].to_dict('records')
-            performers['best_passers'] = best_passers
+        # Best passing accuracy (min 10 matches) - TOP 10
+        if all(col in data.columns for col in ['Accurate passes, %', 'Matches played']):
+            eligible_passers = data[data['Matches played'] >= 10]
+            if len(eligible_passers) > 0:
+                best_passers = eligible_passers.nlargest(10, 'Accurate passes, %')[
+                    ['Player', 'Team', 'Accurate passes, %', 'Passes per 90']
+                ].to_dict('records')
+                performers['best_passers'] = best_passers
         
-        # Best dribblers
-        if 'Successful dribbles, %' in self.data.columns:
-            best_dribblers = self.data[self.data['Matches played'] >= 10].nlargest(10, 'Successful dribbles, %')[
-                ['Player', 'Team', 'Successful dribbles, %', 'Dribbles per 90']
-            ].to_dict('records')
-            performers['best_dribblers'] = best_dribblers
+        # Best dribblers - TOP 10
+        if 'Successful dribbles, %' in data.columns:
+            eligible_dribblers = data[data['Matches played'] >= 10]
+            if len(eligible_dribblers) > 0:
+                best_dribblers = eligible_dribblers.nlargest(10, 'Successful dribbles, %')[
+                    ['Player', 'Team', 'Successful dribbles, %', 'Dribbles per 90']
+                ].to_dict('records')
+                performers['best_dribblers'] = best_dribblers
         
         return performers
     
-    def _get_position_analysis(self) -> Dict:
+    def _get_position_analysis(self, data: pd.DataFrame) -> Dict:
         """Análisis por posición."""
-        if 'Position_Group' not in self.data.columns:
-            return {}
+        position_column = 'Position_Group'
+        if position_column not in data.columns:
+            # Fallback a otras columnas de posición
+            if 'Position_Primary_Group' in data.columns:
+                position_column = 'Position_Primary_Group'
+            else:
+                return {}
         
         position_stats = {}
         
-        for position in self.data['Position_Group'].unique():
-            if pd.isna(position):
+        for position in data[position_column].unique():
+            if pd.isna(position) or position == 'Unknown':
                 continue
                 
-            pos_data = self.data[self.data['Position_Group'] == position]
+            pos_data = data[data[position_column] == position]
             
             position_stats[position] = {
                 'player_count': len(pos_data),
@@ -217,54 +276,56 @@ class HongKongStatsAggregator:
             if position in self.position_metrics:
                 for metric in self.position_metrics[position]:
                     if metric in pos_data.columns:
-                        position_stats[position][f'avg_{metric.lower().replace(" ", "_").replace(",", "").replace("%", "pct")}'] = round(pos_data[metric].mean(), 2)
+                        avg_value = pos_data[metric].mean()
+                        clean_key = metric.lower().replace(" ", "_").replace(",", "").replace("%", "pct")
+                        position_stats[position][f'avg_{clean_key}'] = round(avg_value, 2)
         
         return position_stats
     
-    def _get_age_distribution(self) -> Dict:
+    def _get_age_distribution(self, data: pd.DataFrame) -> Dict:
         """Distribución de edades en la liga."""
-        if 'Age' not in self.data.columns:
+        if 'Age' not in data.columns or len(data) == 0:
             return {}
         
         # Crear bins de edad
         age_bins = [0, 21, 23, 25, 28, 32, 100]
         age_labels = ['U21', '21-22', '23-24', '25-27', '28-31', '32+']
         
-        age_groups = pd.cut(self.data['Age'], bins=age_bins, labels=age_labels, include_lowest=True)
+        age_groups = pd.cut(data['Age'], bins=age_bins, labels=age_labels, include_lowest=True)
         age_distribution = age_groups.value_counts().to_dict()
         
         # Obtener índices de extremos de manera segura
-        min_age_idx = self.data['Age'].idxmin()
-        max_age_idx = self.data['Age'].idxmax()
+        min_age_idx = data['Age'].idxmin()
+        max_age_idx = data['Age'].idxmax()
         
         # Estadísticas adicionales
         stats = {
             'distribution': age_distribution,
             'youngest_player': {
-                'name': str(self._extract_scalar_value(self.data.loc[min_age_idx, 'Player'])),
-                'age': int(self._extract_scalar_value(self.data.loc[min_age_idx, 'Age'])),
-                'team': str(self._extract_scalar_value(self.data.loc[min_age_idx, 'Team']))
+                'name': str(self._extract_scalar_value(data.loc[min_age_idx, 'Player'])),
+                'age': int(self._extract_scalar_value(data.loc[min_age_idx, 'Age'])),
+                'team': str(self._extract_scalar_value(data.loc[min_age_idx, 'Team']))
             },
             'oldest_player': {
-                'name': str(self._extract_scalar_value(self.data.loc[max_age_idx, 'Player'])),
-                'age': int(self._extract_scalar_value(self.data.loc[max_age_idx, 'Age'])),
-                'team': str(self._extract_scalar_value(self.data.loc[max_age_idx, 'Team']))
+                'name': str(self._extract_scalar_value(data.loc[max_age_idx, 'Player'])),
+                'age': int(self._extract_scalar_value(data.loc[max_age_idx, 'Age'])),
+                'team': str(self._extract_scalar_value(data.loc[max_age_idx, 'Team']))
             },
-            'median_age': self.data['Age'].median(),
-            'avg_age_by_position': self.data.groupby('Position_Group')['Age'].mean().round(1).to_dict() if 'Position_Group' in self.data.columns else {}
+            'median_age': data['Age'].median(),
+            'avg_age_by_position': data.groupby('Position_Group')['Age'].mean().round(1).to_dict() if 'Position_Group' in data.columns else {}
         }
         
         return stats
     
-    def _get_team_comparison_summary(self) -> Dict:
+    def _get_team_comparison_summary(self, data: pd.DataFrame) -> Dict:
         """Resumen de comparación entre equipos."""
-        if 'Team' not in self.data.columns:
+        if 'Team' not in data.columns:
             return {}
         
         team_stats = []
         
-        for team in self.data['Team'].unique():
-            team_data = self.data[self.data['Team'] == team]
+        for team in data['Team'].unique():
+            team_data = data[data['Team'] == team]
             
             team_summary = {
                 'team': team,
@@ -311,8 +372,11 @@ class HongKongStatsAggregator:
         analysis = {}
         
         # Distribución por posición
-        if 'Position_Group' in team_data.columns:
-            analysis['position_distribution'] = team_data['Position_Group'].value_counts().to_dict()
+        position_column = 'Position_Group'
+        if position_column in team_data.columns:
+            analysis['position_distribution'] = team_data[position_column].value_counts().to_dict()
+        elif 'Position_Primary_Group' in team_data.columns:
+            analysis['position_distribution'] = team_data['Position_Primary_Group'].value_counts().to_dict()
         
         # Distribución por edad
         if 'Age_Category' in team_data.columns:
@@ -337,12 +401,6 @@ class HongKongStatsAggregator:
     def _extract_scalar_value(self, value: Union[pd.Series, Any]) -> Any:
         """
         Extrae valor escalar de una Serie de pandas o devuelve el valor tal como está.
-        
-        Args:
-            value: Valor que puede ser Serie de pandas o escalar
-            
-        Returns:
-            Valor escalar
         """
         if hasattr(value, 'iloc') and len(value) > 0:
             return value.iloc[0]
@@ -411,16 +469,21 @@ class HongKongStatsAggregator:
     
     def _get_team_position_breakdown(self, team_data: pd.DataFrame) -> Dict:
         """Desglose detallado por posición del equipo."""
-        if 'Position_Group' not in team_data.columns:
-            return {}
+        position_column = 'Position_Group'
+        if position_column not in team_data.columns:
+            # Fallback
+            if 'Position_Primary_Group' in team_data.columns:
+                position_column = 'Position_Primary_Group'
+            else:
+                return {}
         
         breakdown = {}
         
-        for position in team_data['Position_Group'].unique():
-            if pd.isna(position):
+        for position in team_data[position_column].unique():
+            if pd.isna(position) or position == 'Unknown':
                 continue
                 
-            pos_players = team_data[team_data['Position_Group'] == position]
+            pos_players = team_data[team_data[position_column] == position]
             
             breakdown[position] = {
                 'count': len(pos_players),
@@ -434,7 +497,9 @@ class HongKongStatsAggregator:
             if position in self.position_metrics:
                 for metric in self.position_metrics[position]:
                     if metric in pos_players.columns:
-                        breakdown[position][f'avg_{metric.lower().replace(" ", "_").replace(",", "").replace("%", "pct")}'] = round(pos_players[metric].mean(), 2)
+                        avg_value = pos_players[metric].mean()
+                        clean_key = metric.lower().replace(" ", "_").replace(",", "").replace("%", "pct")
+                        breakdown[position][f'avg_{clean_key}'] = round(avg_value, 2)
         
         return breakdown
     
@@ -447,9 +512,11 @@ class HongKongStatsAggregator:
         metrics['offensive'] = {}
         for metric in offensive_metrics:
             if metric in team_data.columns:
+                total_val = team_data[metric].sum()
+                avg_val = team_data[metric].mean()
                 metrics['offensive'][metric] = {
-                    'total': team_data[metric].sum(),
-                    'average': round(team_data[metric].mean(), 2),
+                    'total': total_val,
+                    'average': round(avg_val, 2),
                     'top_player': team_data.loc[team_data[metric].idxmax(), 'Player'] if team_data[metric].max() > 0 else None
                 }
         
@@ -458,8 +525,9 @@ class HongKongStatsAggregator:
         metrics['defensive'] = {}
         for metric in defensive_metrics:
             if metric in team_data.columns:
+                avg_val = team_data[metric].mean()
                 metrics['defensive'][metric] = {
-                    'average': round(team_data[metric].mean(), 2),
+                    'average': round(avg_val, 2),
                     'top_player': team_data.loc[team_data[metric].idxmax(), 'Player'] if team_data[metric].max() > 0 else None
                 }
         
@@ -468,8 +536,9 @@ class HongKongStatsAggregator:
         metrics['passing'] = {}
         for metric in passing_metrics:
             if metric in team_data.columns:
+                avg_val = team_data[metric].mean()
                 metrics['passing'][metric] = {
-                    'average': round(team_data[metric].mean(), 2),
+                    'average': round(avg_val, 2),
                     'top_player': team_data.loc[team_data[metric].idxmax(), 'Player'] if team_data[metric].max() > 0 else None
                 }
         
@@ -522,6 +591,9 @@ class HongKongStatsAggregator:
             'age': 'Age',
             'position': 'Position_Clean',
             'position_group': 'Position_Group',
+            'position_primary': 'Position_Primary',
+            'position_secondary': 'Position_Secondary',
+            'position_third': 'Position_Third',
             'height': 'Height',
             'weight': 'Weight',
             'foot': 'Foot',
@@ -590,7 +662,14 @@ class HongKongStatsAggregator:
         # Datos para comparación
         league_data = self.data
         team_data = self.data[self.data['Team'] == team]
-        position_data = self.data[self.data['Position_Group'] == position_group] if position_group != 'Unknown' else pd.DataFrame()
+        
+        # Usar column apropiada para posición
+        position_column = 'Position_Group'
+        if position_column not in self.data.columns and 'Position_Primary_Group' in self.data.columns:
+            position_column = 'Position_Primary_Group'
+            position_group = player_record.get('Position_Primary_Group', 'Unknown')
+        
+        position_data = self.data[self.data[position_column] == position_group] if position_group != 'Unknown' else pd.DataFrame()
         
         # Métricas para comparar
         compare_metrics = ['Goals', 'Assists', 'Minutes played', 'Age']
@@ -615,8 +694,13 @@ class HongKongStatsAggregator:
         position_group = player_record.get('Position_Group', 'Unknown')
         
         # Usar datos de la misma posición para percentiles más relevantes
+        position_column = 'Position_Group'
+        if position_column not in self.data.columns and 'Position_Primary_Group' in self.data.columns:
+            position_column = 'Position_Primary_Group'
+            position_group = player_record.get('Position_Primary_Group', 'Unknown')
+        
         if position_group != 'Unknown':
-            comparison_data = self.data[self.data['Position_Group'] == position_group]
+            comparison_data = self.data[self.data[position_column] == position_group]
         else:
             comparison_data = self.data
         
@@ -685,8 +769,15 @@ class HongKongStatsAggregator:
             }
         
         # Datos para gráfico de posiciones
-        if 'Position_Group' in self.data.columns:
-            pos_counts = self.data['Position_Group'].value_counts()
+        position_column = 'Position_Group'
+        if position_column in self.data.columns:
+            pos_counts = self.data[position_column].value_counts()
+            data['position_distribution'] = {
+                'positions': pos_counts.index.tolist(),
+                'counts': pos_counts.values.tolist()
+            }
+        elif 'Position_Primary_Group' in self.data.columns:
+            pos_counts = self.data['Position_Primary_Group'].value_counts()
             data['position_distribution'] = {
                 'positions': pos_counts.index.tolist(),
                 'counts': pos_counts.values.tolist()
@@ -747,24 +838,30 @@ class HongKongStatsAggregator:
         data = {}
         
         # Datos para gráfico de radar del jugador vs posición
-        position_group = player_record.get('Position_Group', 'Unknown')
+        position_column = 'Position_Group'
+        position_group = player_record.get(position_column, 'Unknown')
+        
+        # Fallback si no existe Position_Group
+        if position_group == 'Unknown' and 'Position_Primary_Group' in player_record.index:
+            position_column = 'Position_Primary_Group'
+            position_group = player_record.get(position_column, 'Unknown')
         
         if position_group != 'Unknown' and position_group in self.position_metrics:
-            position_data = self.data[self.data['Position_Group'] == position_group]
+            position_data = self.data[self.data[position_column] == position_group]
             
             player_metrics = {}
-            position_metrics = {}
+            position_metrics_avg = {}
             
             for metric in self.position_metrics[position_group]:
                 if metric in player_record.index and metric in position_data.columns:
                     player_metrics[metric] = player_record[metric]
-                    position_metrics[metric] = position_data[metric].mean()
+                    position_metrics_avg[metric] = position_data[metric].mean()
             
             if player_metrics:
                 data['player_vs_position_radar'] = {
                     'metrics': list(player_metrics.keys()),
                     'player_values': list(player_metrics.values()),
-                    'position_avg': list(position_metrics.values())
+                    'position_avg': list(position_metrics_avg.values())
                 }
         
         # Datos para comparación de percentiles
@@ -795,7 +892,7 @@ class HongKongStatsAggregator:
             team_name: Filtrar por equipo específico
             
         Returns:
-            Lista de nombres de jugadores
+            Lista de nombres de jugadores ordenada alfabéticamente
         """
         if 'Player' not in self.data.columns:
             return []
