@@ -15,88 +15,105 @@ from data import HongKongDataManager
 # Inicializar el gestor de datos globalmente
 data_manager = HongKongDataManager()
 
-# Callback para manejar la habilitación de selectores
+# Callback para actualizar opciones de selectores basado en temporada
 @callback(
-    [Output('team-selector', 'disabled'),
-    Output('player-selector', 'disabled'),
-    Output('team-selector', 'options'),
-    Output('player-selector', 'options'),
-    Output('team-selector', 'value'),
-    Output('player-selector', 'value')],
-    [Input('analysis-level', 'value'),
-    Input('team-selector', 'value')]
-)
-def update_selector_states(analysis_level, selected_team):
-    """Actualiza el estado de los selectores según el nivel de análisis."""
-    
-    # Estados de los selectores
-    team_disabled = analysis_level == 'league'
-    player_disabled = analysis_level != 'player'
-    
-    # Opciones de equipos
-    teams = data_manager.get_available_teams()
-    team_options = [{"label": team, "value": team} for team in teams]
-    
-    # Opciones de jugadores (basado en el equipo seleccionado)
-    if selected_team and analysis_level == 'player':
-        players = data_manager.get_available_players(selected_team)
-        player_options = [{"label": player, "value": player} for player in players]
-    else:
-        players = data_manager.get_available_players()
-        player_options = [{"label": player, "value": player} for player in players]
-    
-    # Valores de los selectores
-    team_value = None if team_disabled else selected_team
-    player_value = None if player_disabled else None
-    
-    return (team_disabled, player_disabled, team_options, player_options, 
-            team_value, player_value)
-
-# Callback principal para cargar datos
-@callback(
-    [Output('performance-data-store', 'data'),
-    Output('chart-data-store', 'data'),
-    Output('current-filters-store', 'data'),
-    Output('status-alerts', 'children')],
-    [Input('analysis-level', 'value'),
-    Input('team-selector', 'value'),
-    Input('player-selector', 'value'),
-    Input('position-filter', 'value'),
-    Input('age-range', 'value'),
-    Input('refresh-button', 'n_clicks')],
+    [Output('team-selector', 'options'),
+     Output('player-selector', 'options')],
+    [Input('season-selector', 'value'),
+     Input('team-selector', 'value')],
     prevent_initial_call=False
 )
-def load_performance_data(analysis_level, team, player, position_filter, age_range, n_clicks):
+def update_selector_options(season, selected_team):
+    """Actualiza las opciones de equipos y jugadores según la temporada y equipo seleccionado."""
+    
+    # Actualizar temporada si es necesaria
+    if season != data_manager.current_season:
+        data_manager.refresh_data(season)
+    
+    # Opciones de equipos (siempre disponibles)
+    teams = data_manager.get_available_teams()
+    team_options = [{"label": f"🏆 {team}", "value": team} for team in teams]
+    
+    # Opciones de jugadores (basado en el equipo seleccionado)
+    if selected_team:
+        # Jugadores del equipo seleccionado
+        players = data_manager.get_available_players(selected_team)
+        player_options = [{"label": f"👤 {player}", "value": player} for player in players]
+    else:
+        # Todos los jugadores ordenados alfabéticamente
+        players = data_manager.get_available_players()
+        player_options = [{"label": f"👤 {player}", "value": player} for player in players]
+    
+    return team_options, player_options
+
+# Callback principal para cargar datos con filtros aplicados
+@callback(
+    [Output('performance-data-store', 'data'),
+     Output('chart-data-store', 'data'),
+     Output('current-filters-store', 'data'),
+     Output('status-alerts', 'children')],
+    [Input('season-selector', 'value'),
+     Input('team-selector', 'value'),
+     Input('player-selector', 'value'),
+     Input('position-filter', 'value'),
+     Input('age-range', 'value'),
+     Input('refresh-button', 'n_clicks')],
+    prevent_initial_call=False
+)
+def load_performance_data(season, team, player, position_filter, age_range, n_clicks):
     """Carga los datos de performance según los filtros seleccionados."""
     
     try:
+        # Cambiar temporada si es necesario
+        if season != data_manager.current_season:
+            data_manager.refresh_data(season)
+        
         # Guardar filtros actuales
         current_filters = {
-            'analysis_level': analysis_level,
+            'season': season,
             'team': team,
             'player': player,
             'position_filter': position_filter,
             'age_range': age_range
         }
         
-        # Obtener datos según el nivel
-        if analysis_level == 'league':
-            performance_data = data_manager.get_league_overview()
-            chart_data = data_manager.get_chart_data('league')
-        elif analysis_level == 'team' and team:
-            performance_data = data_manager.get_team_overview(team)
-            chart_data = data_manager.get_chart_data('team', team)
-        elif analysis_level == 'player' and player:
+        # Determinar nivel de análisis basado en filtros
+        if player:
+            # Análisis de jugador específico
+            analysis_level = 'player'
             performance_data = data_manager.get_player_overview(player, team)
             chart_data = data_manager.get_chart_data('player', player)
+        elif team:
+            # Análisis de equipo específico (con filtros aplicados)
+            analysis_level = 'team'
+            # Obtener datos del agregador directamente para aplicar filtros
+            if data_manager.aggregator:
+                performance_data = data_manager.aggregator.get_team_statistics(
+                    team, position_filter, age_range
+                )
+                chart_data = data_manager.get_chart_data('team', team)
+            else:
+                performance_data = {"error": "Aggregator not initialized"}
+                chart_data = {}
         else:
-            # Estado inicial o filtros incompletos
-            performance_data = {"info": "Selecciona filtros para ver datos"}
-            chart_data = {}
+            # Análisis de toda la liga (con filtros aplicados)
+            analysis_level = 'league'
+            # Obtener datos del agregador directamente para aplicar filtros
+            if data_manager.aggregator:
+                performance_data = data_manager.aggregator.get_league_statistics(
+                    position_filter, age_range
+                )
+                chart_data = data_manager.get_chart_data('league')
+            else:
+                performance_data = {"error": "Aggregator not initialized"}
+                chart_data = {}
+        
+        # Agregar nivel de análisis a filtros
+        current_filters['analysis_level'] = analysis_level
         
         # Alert de éxito
         status_alert = dbc.Alert(
-            "✅ Datos cargados exitosamente",
+            f"✅ Datos cargados exitosamente - {analysis_level.title()}",
             color="success",
             dismissable=True,
             duration=3000
@@ -116,9 +133,9 @@ def load_performance_data(analysis_level, team, player, position_filter, age_ran
 # Callback para actualizar KPIs principales
 @callback(
     [Output('kpi-title', 'children'),
-    Output('main-kpis', 'children')],
+     Output('main-kpis', 'children')],
     [Input('performance-data-store', 'data'),
-    Input('current-filters-store', 'data')]
+     Input('current-filters-store', 'data')]
 )
 def update_main_kpis(performance_data, filters):
     """Actualiza los KPIs principales según los datos."""
@@ -127,11 +144,21 @@ def update_main_kpis(performance_data, filters):
         return "Sin datos disponibles", html.Div("Selecciona filtros válidos")
     
     analysis_level = filters.get('analysis_level', 'league')
+    season = filters.get('season', 'N/A')
+    
+    # Aplicar filtros en el título
+    filter_info = []
+    if filters.get('position_filter') and filters.get('position_filter') != 'all':
+        filter_info.append(f"Pos: {filters['position_filter']}")
+    if filters.get('age_range') and filters['age_range'] != [15, 45]:
+        filter_info.append(f"Edad: {filters['age_range'][0]}-{filters['age_range'][1]}")
+    
+    filter_suffix = f" ({', '.join(filter_info)})" if filter_info else ""
     
     # KPIs para la liga
     if analysis_level == 'league' and 'overview' in performance_data:
         overview = performance_data['overview']
-        title = f"Liga de Hong Kong - Temporada {overview.get('season', 'N/A')}"
+        title = f"Liga de Hong Kong - {season}{filter_suffix}"
         
         kpis = dbc.Row([
             dbc.Col([
@@ -189,7 +216,7 @@ def update_main_kpis(performance_data, filters):
     # KPIs para equipo
     elif analysis_level == 'team' and 'overview' in performance_data:
         overview = performance_data['overview']
-        title = f"{overview.get('team_name', 'Equipo')} - Temporada {overview.get('season', 'N/A')}"
+        title = f"{overview.get('team_name', 'Equipo')} - {season}{filter_suffix}"
         
         kpis = dbc.Row([
             dbc.Col([
@@ -293,7 +320,7 @@ def update_main_kpis(performance_data, filters):
 @callback(
     Output('main-chart-container', 'children'),
     [Input('chart-data-store', 'data'),
-    Input('current-filters-store', 'data')]
+     Input('current-filters-store', 'data')]
 )
 def update_main_chart(chart_data, filters):
     """Actualiza el gráfico principal según los datos."""
@@ -380,7 +407,7 @@ def update_main_chart(chart_data, filters):
 @callback(
     Output('secondary-chart-container', 'children'),
     [Input('chart-data-store', 'data'),
-    Input('current-filters-store', 'data')]
+     Input('current-filters-store', 'data')]
 )
 def update_secondary_chart(chart_data, filters):
     """Actualiza el gráfico secundario según los datos."""
@@ -436,14 +463,14 @@ def update_secondary_chart(chart_data, filters):
     except Exception as e:
         return html.Div(f"Error generando gráfico: {str(e)}", className="text-center p-4 text-danger")
 
-# Callback para top performers
+# Callback para top performers - CORREGIDO para mostrar top 10
 @callback(
     Output('top-performers-container', 'children'),
     [Input('performance-data-store', 'data'),
-    Input('current-filters-store', 'data')]
+     Input('current-filters-store', 'data')]
 )
 def update_top_performers(performance_data, filters):
-    """Actualiza la sección de top performers."""
+    """Actualiza la sección de top performers - TOP 10."""
     
     if not performance_data:
         return html.Div("No hay datos disponibles", className="text-center p-4")
@@ -451,7 +478,7 @@ def update_top_performers(performance_data, filters):
     analysis_level = filters.get('analysis_level', 'league')
     
     try:
-        if analysis_level == 'league' and 'top_performers' in performance_data:
+        if analysis_level in ['league', 'team'] and 'top_performers' in performance_data:
             performers = performance_data['top_performers']
             
             # Crear tabs para diferentes categorías
@@ -459,7 +486,7 @@ def update_top_performers(performance_data, filters):
             
             if 'top_scorers' in performers:
                 tab_content = []
-                for i, player in enumerate(performers['top_scorers'][:5], 1):
+                for i, player in enumerate(performers['top_scorers'][:10], 1):  # TOP 10
                     tab_content.append(
                         html.Tr([
                             html.Td(f"{i}°"),
@@ -491,7 +518,7 @@ def update_top_performers(performance_data, filters):
             
             if 'top_assisters' in performers:
                 tab_content = []
-                for i, player in enumerate(performers['top_assisters'][:5], 1):
+                for i, player in enumerate(performers['top_assisters'][:10], 1):  # TOP 10
                     tab_content.append(
                         html.Tr([
                             html.Td(f"{i}°"),
@@ -522,43 +549,7 @@ def update_top_performers(performance_data, filters):
                 )
             
             return dbc.Tabs(tabs, active_tab="scorers")
-        
-        elif analysis_level == 'team' and 'top_players' in performance_data:
-            top_players = performance_data['top_players']
             
-            content = []
-            if 'top_scorer' in top_players:
-                player = top_players['top_scorer']
-                content.append(
-                    dbc.ListGroupItem([
-                        html.H6("🥅 Máximo Goleador", className="mb-1"),
-                        html.P(f"{player['name']} - {player['goals']} goles", className="mb-1"),
-                        html.Small(f"Posición: {player.get('position', 'N/A')}", className="text-muted")
-                    ])
-                )
-            
-            if 'top_assister' in top_players:
-                player = top_players['top_assister']
-                content.append(
-                    dbc.ListGroupItem([
-                        html.H6("🎯 Máximo Asistente", className="mb-1"),
-                        html.P(f"{player['name']} - {player['assists']} asistencias", className="mb-1"),
-                        html.Small(f"Posición: {player.get('position', 'N/A')}", className="text-muted")
-                    ])
-                )
-            
-            if 'most_played' in top_players:
-                player = top_players['most_played']
-                content.append(
-                    dbc.ListGroupItem([
-                        html.H6("⏱️ Más Minutos", className="mb-1"),
-                        html.P(f"{player['name']} - {player['minutes']} min", className="mb-1"),
-                        html.Small(f"Partidos: {player.get('matches', 'N/A')}", className="text-muted")
-                    ])
-                )
-            
-            return dbc.ListGroup(content, flush=True)
-        
         else:
             return html.Div("Top performers no disponible para este nivel", className="text-center p-4")
             
@@ -569,7 +560,7 @@ def update_top_performers(performance_data, filters):
 @callback(
     Output('position-analysis-container', 'children'),
     [Input('performance-data-store', 'data'),
-    Input('current-filters-store', 'data')]
+     Input('current-filters-store', 'data')]
 )
 def update_position_analysis(performance_data, filters):
     """Actualiza el análisis por posición."""
@@ -627,7 +618,7 @@ def update_position_analysis(performance_data, filters):
 # Callback para controlar visibilidad del gráfico de comparación
 @callback(
     [Output('comparison-card', 'style'),
-    Output('comparison-chart-title', 'children')],
+     Output('comparison-chart-title', 'children')],
     [Input('current-filters-store', 'data')]
 )
 def toggle_comparison_chart(filters):
@@ -645,7 +636,7 @@ def toggle_comparison_chart(filters):
     Output('download-performance-pdf', 'data'),
     [Input('export-pdf-button', 'n_clicks')],
     [State('performance-data-store', 'data'),
-    State('current-filters-store', 'data')],
+     State('current-filters-store', 'data')],
     prevent_initial_call=True
 )
 def export_performance_pdf(n_clicks, performance_data, filters):
@@ -670,13 +661,14 @@ def export_performance_pdf(n_clicks, performance_data, filters):
         
         # Determinar análisis level y filename
         analysis_level = filters.get('analysis_level', 'league')
+        season = filters.get('season', 'unknown')
         
         if analysis_level == 'team':
-            filename = f"reporte_performance_{filters.get('team', 'equipo')}_{timestamp}.pdf"
+            filename = f"reporte_performance_{filters.get('team', 'equipo')}_{season}_{timestamp}.pdf"
         elif analysis_level == 'player':
-            filename = f"reporte_performance_{filters.get('player', 'jugador')}_{timestamp}.pdf"
+            filename = f"reporte_performance_{filters.get('player', 'jugador')}_{season}_{timestamp}.pdf"
         else:
-            filename = f"reporte_performance_liga_{timestamp}.pdf"
+            filename = f"reporte_performance_liga_{season}_{timestamp}.pdf"
         
         # Generar PDF
         pdf_generator = SportsPDFGenerator()

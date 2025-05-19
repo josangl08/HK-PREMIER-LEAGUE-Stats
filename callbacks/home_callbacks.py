@@ -7,7 +7,7 @@ import logging
 # Configurar logging
 logger = logging.getLogger(__name__)
 
-# Callback para mostrar estado del sistema
+# Callback para mostrar estado del sistema - VERSIÓN MEJORADA
 @callback(
     Output('system-status-info', 'children'),
     [Input('refresh-data-button', 'n_clicks')],
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 def update_system_status(n_clicks):
     """
     Callback que actualiza la información del estado del sistema.
-    Se ejecuta al cargar la página y cuando se hace click en el botón de actualizar.
+    Versión mejorada para mostrar información de equipos y posiciones.
     """
     try:
         # Inicializar el data manager (sin cargar automáticamente los datos)
@@ -34,7 +34,10 @@ def update_system_status(n_clicks):
             dbc.ListGroupItem([
                 html.Div([
                     html.Strong("🗓️ Temporada actual: "),
-                    html.Span(status.get('current_season', 'N/A'))
+                    html.Span(status.get('current_season', 'N/A')),
+                    html.Br(),
+                    html.Small(f"Temporadas disponibles: {', '.join(status.get('available_seasons', []))}", 
+                              className="text-muted")
                 ])
             ])
         )
@@ -71,14 +74,24 @@ def update_system_status(n_clicks):
             ])
         )
         
-        # Estadísticas de datos (si están disponibles)
+        # Estadísticas de datos (si están disponibles) - MEJORADO
         if 'data_stats' in status and data_available:
             stats = status['data_stats']
+            teams_info = ""
+            
+            # Información de equipos de Hong Kong
+            if 'hong_kong_teams' in status and status['hong_kong_teams']:
+                teams_list = status['hong_kong_teams']
+                teams_info = f" | Equipos HK: {', '.join(teams_list[:3])}{'...' if len(teams_list) > 3 else ''}"
+            
             status_items.append(
                 dbc.ListGroupItem([
                     html.Div([
                         html.Strong("📊 Estadísticas: "),
-                        html.Span(f"{stats.get('total_players', 0)} jugadores, {stats.get('total_teams', 0)} equipos")
+                        html.Span(f"{stats.get('total_players', 0)} jugadores, {stats.get('total_teams', 0)} equipos"),
+                        html.Br(),
+                        html.Small(f"Temporadas en cache: {', '.join(status.get('cached_seasons', []))}{teams_info}", 
+                            className="text-muted")
                     ])
                 ])
             )
@@ -108,11 +121,20 @@ def update_system_status(n_clicks):
         # Si se hizo click en el botón, intentar refrescar los datos
         if n_clicks and n_clicks > 0:
             try:
-                refresh_success = data_manager.refresh_data()
+                refresh_success = data_manager.refresh_data(force_download=True)
                 if refresh_success:
+                    # Obtener estadísticas actualizadas
+                    updated_status = data_manager.get_data_status()
+                    teams_count = updated_status.get('data_stats', {}).get('total_teams', 0)
+                    players_count = updated_status.get('data_stats', {}).get('total_players', 0)
+                    
                     status_items.append(
                         dbc.ListGroupItem([
-                            dbc.Alert("✅ Datos actualizados exitosamente", color="success", className="mb-0")
+                            dbc.Alert([
+                                html.Strong("✅ Datos actualizados exitosamente"),
+                                html.Br(),
+                                html.Small(f"Cargados {players_count} jugadores de {teams_count} equipos")
+                            ], color="success", className="mb-0")
                         ])
                     )
                 else:
@@ -137,7 +159,10 @@ def update_system_status(n_clicks):
             [
                 html.H6("❌ Error del Sistema", className="alert-heading"),
                 html.P(f"No se pudo obtener el estado del sistema: {str(e)}"),
-                html.Small("Verifica que el sistema de datos esté configurado correctamente.", className="text-muted")
+                html.Hr(),
+                html.Small("Verifica que el sistema de datos esté configurado correctamente.", className="text-muted"),
+                html.Br(),
+                html.Small("Tip: Verifica que los archivos de datos estén disponibles en GitHub.", className="text-muted")
             ],
             color="danger"
         )
