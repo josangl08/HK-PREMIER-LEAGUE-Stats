@@ -12,13 +12,19 @@ Flask-Login==0.6.3
 pandas==2.1.1
 numpy==1.26.0
 
+# Web scraping
+requests==2.31.0
+beautifulsoup4==4.12.2
+lxml==4.9.3
+
 # Utilities
 python-dotenv==1.0.0
-requests==2.31.0
 
 # Caching
 Flask-Caching==2.1.0
 
 # PDF generation
-reportlab==4.0.9
+reportlab==4.4.1
 
+# Logging and debugging (optional but recommended)
+colorlog==6.7.0

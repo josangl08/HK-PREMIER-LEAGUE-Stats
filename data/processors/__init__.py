@@ -6,10 +6,12 @@ datos crudos de jugadores.
 """
 
 from .hong_kong_processor import HongKongDataProcessor
+from .transfermarkt_processor import TransfermarktProcessor
 
 # Exportar las clases principales
 __all__ = [
-    'HongKongDataProcessor',
+'HongKongDataProcessor',
+'TransfermarktProcessor'
 ]
 
 # Metadatos del módulo
