@@ -127,10 +127,10 @@ def run_app(debug=None, host=None, port=None):
 ║                    SPORTS DASHBOARD                          ║
 ║                Liga de Hong Kong                             ║
 ╠══════════════════════════════════════════════════════════════╣
-║  🌐 URL: http://{host_address}:{port_number}                             ║
+║  🌐 URL: http://{host_address}:{port_number}                 ║
 ║  🔒 Usuario: admin                                           ║
 ║  🔑 Contraseña: admin                                        ║
-║  🐞 Debug: {'Activado' if debug_mode else 'Desactivado'}                                        ║
+║  🐞 Debug: {'Activado' if debug_mode else 'Desactivado'}     ║
 ╚══════════════════════════════════════════════════════════════╝
     """)
     
@@ -140,7 +140,9 @@ def run_app(debug=None, host=None, port=None):
             host=host_address,
             port=port_number,
             dev_tools_ui=debug_mode,
-            dev_tools_props_check=debug_mode
+            dev_tools_props_check=debug_mode,
+            dev_tools_hot_reload=False,  
+            use_reloader=False       
         )
     except Exception as e:
         print(f"❌ Error al iniciar la aplicación: {e}")

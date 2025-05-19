@@ -8,6 +8,7 @@ import pandas as pd
 from typing import Dict, List, Optional, Union
 from datetime import datetime
 import logging
+import threading
 
 # Importar componentes
 from data.extractors.hong_kong_extractor import HongKongDataExtractor
@@ -25,12 +26,13 @@ class HongKongDataManager:
     Versión corregida para mejor manejo de equipos y temporadas.
     """
     
-    def __init__(self, auto_load: bool = True):
+    def __init__(self, auto_load: bool = True, background_preload: bool = False):
         """
         Inicializa el gestor de datos.
         
         Args:
             auto_load: Si debe cargar automáticamente los datos al inicializar
+            background_preload: Si debe pre-cargar otras temporadas en background
         """
         
         self.extractor = HongKongDataExtractor()
@@ -48,7 +50,11 @@ class HongKongDataManager:
         
         if auto_load:
             self.refresh_data()
-    
+
+            # Iniciar pre-carga en background después de cargar la principal
+            if background_preload:
+                self.start_background_preload()
+            
     def refresh_data(self, season: Optional[str] = None, force_download: bool = False) -> bool:
         """
         Refresca todos los datos (extrae, procesa y prepara agregador).
@@ -311,9 +317,9 @@ class HongKongDataManager:
         for _, player in matches.iterrows():
             # Usar la posición más relevante
             position = (player.get('Position_Group') or 
-                       player.get('Position_Primary_Group') or 
-                       player.get('Position_Clean') or 
-                       'Unknown')
+                player.get('Position_Primary_Group') or 
+                player.get('Position_Clean') or 
+                'Unknown')
             
             results.append({
                 'name': player['Player'],
@@ -566,6 +572,33 @@ class HongKongDataManager:
             logger.info(f"Cache cleared for season {season}")
         except Exception as e:
             logger.error(f"Error clearing cache for season {season}: {str(e)}")
+    
+    def start_background_preload(self):
+        """Inicia la pre-carga de temporadas en background."""
+        def background_preload():
+            available_seasons = self.get_available_seasons()
+            # Excluir la temporada actual que ya está cargada
+            seasons_to_load = [s for s in available_seasons if s != self.current_season]
+            
+            logger.info(f"🔄 Iniciando pre-carga en background de {len(seasons_to_load)} temporadas...")
+            
+            for i, season in enumerate(seasons_to_load, 1):
+                try:
+                    logger.info(f"📥 Cargando en background: {season} ({i}/{len(seasons_to_load)})")
+                    success = self.refresh_data(season)
+                    if success:
+                        logger.info(f"✅ Background: {season} cargada exitosamente")
+                    else:
+                        logger.warning(f"⚠️ Background: Error cargando {season}")
+                except Exception as e:
+                    logger.warning(f"❌ Background: Error cargando {season}: {e}")
+            
+            logger.info(f"🎉 Pre-carga en background completada. {len(self.data_cache)} temporadas disponibles.")
+        
+        # Iniciar en un hilo separado
+        thread = threading.Thread(target=background_preload, daemon=True, name="SeasonPreloader")
+        thread.start()
+        logger.info("🚀 Pre-carga en background iniciada...")
     
     def get_teams_summary(self) -> Dict:
         """

@@ -13,8 +13,22 @@ from datetime import datetime
 from data import HongKongDataManager
 
 # Inicializar el gestor de datos globalmente
-data_manager = HongKongDataManager()
+data_manager = HongKongDataManager(auto_load=True, background_preload=True)
 
+# Agregar esta función helper al inicio del archivo (después de los imports):
+def format_season_short(season):
+    """Convierte '2024-25' a '24/25'"""
+    if not season or '-' not in season:
+        return season
+    
+    try:
+        year1, year2 = season.split('-')
+        short_year1 = year1[-2:]  # Últimos 2 dígitos
+        short_year2 = year2[-2:]  # Últimos 2 dígitos
+        return f"{short_year1}/{short_year2}"
+    except:
+        return season
+    
 # Callback para actualizar opciones de selectores basado en temporada
 @callback(
     [Output('team-selector', 'options'),
@@ -51,7 +65,8 @@ def update_selector_options(season, selected_team):
     [Output('performance-data-store', 'data'),
      Output('chart-data-store', 'data'),
      Output('current-filters-store', 'data'),
-     Output('status-alerts', 'children')],
+     Output('status-alerts', 'children'),
+     Output('season-selector', 'options')],  # AGREGAR ESTE OUTPUT
     [Input('season-selector', 'value'),
      Input('team-selector', 'value'),
      Input('player-selector', 'value'),
@@ -64,6 +79,13 @@ def load_performance_data(season, team, player, position_filter, age_range, n_cl
     """Carga los datos de performance según los filtros seleccionados."""
     
     try:
+        # Generar opciones de temporadas dinámicamente
+        available_seasons = data_manager.get_available_seasons()
+        season_options = [
+            {"label": format_season_short(s), "value": s} 
+            for s in available_seasons
+        ]
+        
         # Cambiar temporada si es necesario
         if season != data_manager.current_season:
             data_manager.refresh_data(season)
@@ -113,13 +135,13 @@ def load_performance_data(season, team, player, position_filter, age_range, n_cl
         
         # Alert de éxito
         status_alert = dbc.Alert(
-            f"✅ Datos cargados exitosamente - {analysis_level.title()}",
+            f"✅ Datos cargados exitosamente - {analysis_level.title()} ({format_season_short(season)})",
             color="success",
             dismissable=True,
             duration=3000
         )
         
-        return performance_data, chart_data, current_filters, status_alert
+        return performance_data, chart_data, current_filters, status_alert, season_options
         
     except Exception as e:
         # Alert de error
@@ -128,7 +150,15 @@ def load_performance_data(season, team, player, position_filter, age_range, n_cl
             color="danger",
             dismissable=True
         )
-        return {}, {}, {}, error_alert
+        
+        # Opciones por defecto en caso de error
+        default_seasons = [
+            {"label": "24/25", "value": "2024-25"},
+            {"label": "23/24", "value": "2023-24"},
+            {"label": "22/23", "value": "2022-23"}
+        ]
+        
+        return {}, {}, {}, error_alert, default_seasons
 
 # Callback para actualizar KPIs principales
 @callback(
@@ -142,6 +172,10 @@ def update_main_kpis(performance_data, filters):
     
     if not performance_data or 'error' in performance_data:
         return "Sin datos disponibles", html.Div("Selecciona filtros válidos")
+    
+    # VALIDAR QUE FILTERS NO SEA None
+    if filters is None or not isinstance(filters, dict):
+        filters = {'analysis_level': 'league', 'season': 'N/A'}
     
     analysis_level = filters.get('analysis_level', 'league')
     season = filters.get('season', 'N/A')
@@ -328,6 +362,10 @@ def update_main_chart(chart_data, filters):
     if not chart_data:
         return html.Div("No hay datos disponibles para mostrar", className="text-center p-4")
     
+    # VALIDAR QUE FILTERS NO SEA None
+    if filters is None or not isinstance(filters, dict):
+        filters = {'analysis_level': 'league'}
+    
     analysis_level = filters.get('analysis_level', 'league')
     
     try:
@@ -415,6 +453,10 @@ def update_secondary_chart(chart_data, filters):
     if not chart_data:
         return html.Div("No hay datos disponibles", className="text-center p-4")
     
+    # VALIDAR QUE FILTERS NO SEA None
+    if filters is None or not isinstance(filters, dict):
+        filters = {'analysis_level': 'league'}
+    
     analysis_level = filters.get('analysis_level', 'league')
     
     try:
@@ -463,7 +505,7 @@ def update_secondary_chart(chart_data, filters):
     except Exception as e:
         return html.Div(f"Error generando gráfico: {str(e)}", className="text-center p-4 text-danger")
 
-# Callback para top performers - CORREGIDO para mostrar top 10
+# Callback para top performers
 @callback(
     Output('top-performers-container', 'children'),
     [Input('performance-data-store', 'data'),
@@ -474,6 +516,10 @@ def update_top_performers(performance_data, filters):
     
     if not performance_data:
         return html.Div("No hay datos disponibles", className="text-center p-4")
+    
+    # VALIDAR QUE FILTERS NO SEA None
+    if filters is None or not isinstance(filters, dict):
+        filters = {'analysis_level': 'league'}
     
     analysis_level = filters.get('analysis_level', 'league')
     
@@ -568,6 +614,10 @@ def update_position_analysis(performance_data, filters):
     if not performance_data:
         return html.Div("No hay datos disponibles", className="text-center p-4")
     
+    # VALIDAR QUE FILTERS NO SEA None
+    if filters is None or not isinstance(filters, dict):
+        filters = {'analysis_level': 'league'}
+    
     analysis_level = filters.get('analysis_level', 'league')
     
     try:
@@ -619,10 +669,15 @@ def update_position_analysis(performance_data, filters):
 @callback(
     [Output('comparison-card', 'style'),
      Output('comparison-chart-title', 'children')],
-    [Input('current-filters-store', 'data')]
+    [Input('current-filters-store', 'data')],
+    prevent_initial_call=True  # AGREGAR ESTO PARA EVITAR EJECUCIÓN CON DATOS VACÍOS
 )
 def toggle_comparison_chart(filters):
     """Controla la visibilidad del gráfico de comparación."""
+    
+    # VALIDAR QUE FILTERS NO SEA None
+    if filters is None or not isinstance(filters, dict):
+        return {"display": "none"}, ""
     
     analysis_level = filters.get('analysis_level', 'league')
     
