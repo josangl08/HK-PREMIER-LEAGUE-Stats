@@ -34,10 +34,13 @@ def create_navbar(pathname):
     nav_right = dbc.Nav(
         [
             dbc.NavItem(
-                html.Span(
-                    f"User: {current_user.id}" if current_user.is_authenticated else "",
-                    className="navbar-text text-light mr-3"
-                )
+                [
+                    html.Span(
+                        f"User: {current_user.id}" if current_user.is_authenticated else "",
+                        className="navbar-text text-light me-3"
+                    )
+                ],
+                className="me-4"
             ),
             dbc.NavItem(
                 dbc.Button(
@@ -45,13 +48,12 @@ def create_navbar(pathname):
                     id="logout-button",
                     color="danger",
                     size="sm",
-                    className="mr-1"
+                    className="me-1"
                 )
             ),
             # Location para manejar el logout
             dcc.Location(id="logout-trigger", refresh=True)
         ],
-        className="ml-auto",
         navbar=True
     )
     
@@ -63,8 +65,8 @@ def create_navbar(pathname):
                     html.A(
                         dbc.Row(
                             [
-                                dbc.Col(html.Img(src="/assets/logo.png", height="30px", className="ml-2"), width="auto"),
-                                dbc.Col(dbc.NavbarBrand("Sports Dashboard", className="ml-2"), width="auto"),
+                                dbc.Col(html.Img(src="/assets/logo.png", height="30px", className="ms-3 me-3"), width="auto"),
+                                dbc.Col(dbc.NavbarBrand("HK Premier League Dashboard", className="ms-2"), width="auto"),
                             ],
                             align="center",
                             className="g-0",
@@ -74,7 +76,7 @@ def create_navbar(pathname):
                     ),
                     dbc.NavbarToggler(id="navbar-toggler", n_clicks=0),
                     dbc.Collapse(
-                        [dbc.Nav(nav_items, className="mr-auto", navbar=True), nav_right],
+                        [dbc.Nav(nav_items, className="me-auto", navbar=True), nav_right],
                         id="navbar-collapse",
                         navbar=True,
                         is_open=False

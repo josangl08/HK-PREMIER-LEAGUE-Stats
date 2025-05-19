@@ -1,13 +1,24 @@
+# Core Dash and web framework
 dash==2.14.1
 dash-bootstrap-components==1.5.0
-dash-core-components==2.0.0
-dash-html-components==2.0.0
-dash-table==5.0.0
 plotly==5.18.0
-Flask-Login==0.6.3
+Flask==2.3.3
 gunicorn==21.2.0
+
+# Authentication
+Flask-Login==0.6.3
+
+# Data processing and analysis
 pandas==2.1.1
 numpy==1.26.0
+
+# Utilities
 python-dotenv==1.0.0
+requests==2.31.0
+
+# Caching
 Flask-Caching==2.1.0
+
+# PDF generation
 reportlab==4.0.9
+

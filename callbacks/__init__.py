@@ -4,3 +4,6 @@
 # Importar callbacks específicos
 from callbacks.auth_callbacks import *
 from callbacks.navigation_callbacks import *
+from callbacks.home_callbacks import *
+from callbacks.performance_callbacks import *
+from callbacks.injuries_callbacks import *
