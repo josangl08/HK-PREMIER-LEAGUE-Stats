@@ -74,7 +74,13 @@ h3 {
 .card-body {
     padding: 1.5rem;
 }
+#main-kpis .card {
+    background-color: #6ea4da;
+}
+#position-analysis-container .card{
+    background-color: #6ea4da;
 
+}
 /* Personalización del navbar */
 .navbar {
     box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
@@ -151,8 +157,20 @@ h3 {
     border-radius: var(--border-radius) !important;
     box-shadow: none !important;
     transition: var(--transition) !important;
+
+}
+/* Color del texto del valor seleccionado */
+.VirtualizedSelectOption {
+    color: #2c3e50 !important; /* Color del texto en las opciones */
+    background-color: white !important;
+    padding: 8px 12px !important;
 }
 
+/* Color cuando pasas el mouse sobre una opción */
+.VirtualizedSelectOption:hover {
+    color: #ffffff !important; /* Texto blanco al hacer hover */
+    background-color: var(--primary-color) !important; /* Fondo azul al hacer hover */
+}
 .Select-control:hover {
     border-color: var(--secondary-color) !important;
 }
@@ -161,7 +179,43 @@ h3 {
     border-color: var(--secondary-color) !important;
     box-shadow: 0 0 0 1px var(--secondary-color) !important;
 }
+/* Asegurar que los contenedores padre no interfieran */
+.card,
+.card-body,
+dbc-card,
+.container-fluid {
+    position: relative !important;
+    /* z-index: auto !important; */
+}
 
+/* Specific para contenedores de filtros */
+.mb-4 .card,
+.performance-filters {
+    overflow: visible !important;
+    position: static !important;
+}
+
+/* Contenedor principal del dashboard */
+.container-fluid,
+.container {
+    overflow: visible !important;
+}
+
+/* Filas y columnas */
+.row {
+    overflow: visible !important;
+}
+
+.col,
+[class*="col-"] {
+    overflow: visible !important;
+}
+/* Todo el contenedor de filtros con posición */
+div[class*="row"]:nth-child(2) .card {
+    overflow: visible !important;
+    z-index: 2000 !important;
+    position: relative !important;
+}
 /* Tablas mejoradas */
 .dash-table-container table {
     border-collapse: collapse;
