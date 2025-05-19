@@ -1,5 +1,6 @@
 from dash import Input, Output, State, callback, html, dash_table, dcc
 import dash_bootstrap_components as dbc
+from dash.dcc.express import send_bytes, send_string
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -17,13 +18,13 @@ data_manager = HongKongDataManager()
 # Callback para manejar la habilitación de selectores
 @callback(
     [Output('team-selector', 'disabled'),
-     Output('player-selector', 'disabled'),
-     Output('team-selector', 'options'),
-     Output('player-selector', 'options'),
-     Output('team-selector', 'value'),
-     Output('player-selector', 'value')],
+    Output('player-selector', 'disabled'),
+    Output('team-selector', 'options'),
+    Output('player-selector', 'options'),
+    Output('team-selector', 'value'),
+    Output('player-selector', 'value')],
     [Input('analysis-level', 'value'),
-     Input('team-selector', 'value')]
+    Input('team-selector', 'value')]
 )
 def update_selector_states(analysis_level, selected_team):
     """Actualiza el estado de los selectores según el nivel de análisis."""
@@ -54,15 +55,15 @@ def update_selector_states(analysis_level, selected_team):
 # Callback principal para cargar datos
 @callback(
     [Output('performance-data-store', 'data'),
-     Output('chart-data-store', 'data'),
-     Output('current-filters-store', 'data'),
-     Output('status-alerts', 'children')],
+    Output('chart-data-store', 'data'),
+    Output('current-filters-store', 'data'),
+    Output('status-alerts', 'children')],
     [Input('analysis-level', 'value'),
-     Input('team-selector', 'value'),
-     Input('player-selector', 'value'),
-     Input('position-filter', 'value'),
-     Input('age-range', 'value'),
-     Input('refresh-button', 'n_clicks')],
+    Input('team-selector', 'value'),
+    Input('player-selector', 'value'),
+    Input('position-filter', 'value'),
+    Input('age-range', 'value'),
+    Input('refresh-button', 'n_clicks')],
     prevent_initial_call=False
 )
 def load_performance_data(analysis_level, team, player, position_filter, age_range, n_clicks):
@@ -115,9 +116,9 @@ def load_performance_data(analysis_level, team, player, position_filter, age_ran
 # Callback para actualizar KPIs principales
 @callback(
     [Output('kpi-title', 'children'),
-     Output('main-kpis', 'children')],
+    Output('main-kpis', 'children')],
     [Input('performance-data-store', 'data'),
-     Input('current-filters-store', 'data')]
+    Input('current-filters-store', 'data')]
 )
 def update_main_kpis(performance_data, filters):
     """Actualiza los KPIs principales según los datos."""
@@ -292,7 +293,7 @@ def update_main_kpis(performance_data, filters):
 @callback(
     Output('main-chart-container', 'children'),
     [Input('chart-data-store', 'data'),
-     Input('current-filters-store', 'data')]
+    Input('current-filters-store', 'data')]
 )
 def update_main_chart(chart_data, filters):
     """Actualiza el gráfico principal según los datos."""
@@ -379,7 +380,7 @@ def update_main_chart(chart_data, filters):
 @callback(
     Output('secondary-chart-container', 'children'),
     [Input('chart-data-store', 'data'),
-     Input('current-filters-store', 'data')]
+    Input('current-filters-store', 'data')]
 )
 def update_secondary_chart(chart_data, filters):
     """Actualiza el gráfico secundario según los datos."""
@@ -439,7 +440,7 @@ def update_secondary_chart(chart_data, filters):
 @callback(
     Output('top-performers-container', 'children'),
     [Input('performance-data-store', 'data'),
-     Input('current-filters-store', 'data')]
+    Input('current-filters-store', 'data')]
 )
 def update_top_performers(performance_data, filters):
     """Actualiza la sección de top performers."""
@@ -568,7 +569,7 @@ def update_top_performers(performance_data, filters):
 @callback(
     Output('position-analysis-container', 'children'),
     [Input('performance-data-store', 'data'),
-     Input('current-filters-store', 'data')]
+    Input('current-filters-store', 'data')]
 )
 def update_position_analysis(performance_data, filters):
     """Actualiza el análisis por posición."""
@@ -626,7 +627,7 @@ def update_position_analysis(performance_data, filters):
 # Callback para controlar visibilidad del gráfico de comparación
 @callback(
     [Output('comparison-card', 'style'),
-     Output('comparison-chart-title', 'children')],
+    Output('comparison-chart-title', 'children')],
     [Input('current-filters-store', 'data')]
 )
 def toggle_comparison_chart(filters):
@@ -644,7 +645,7 @@ def toggle_comparison_chart(filters):
     Output('download-performance-pdf', 'data'),
     [Input('export-pdf-button', 'n_clicks')],
     [State('performance-data-store', 'data'),
-     State('current-filters-store', 'data')],
+    State('current-filters-store', 'data')],
     prevent_initial_call=True
 )
 def export_performance_pdf(n_clicks, performance_data, filters):
@@ -653,13 +654,23 @@ def export_performance_pdf(n_clicks, performance_data, filters):
     if n_clicks is None:
         raise PreventUpdate
     
+    # Variables para debugging
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    
     try:
+        # Verificar datos básicos
+        if not performance_data:
+            raise ValueError("No hay datos de performance disponibles")
+        
+        if not filters:
+            filters = {"analysis_level": "league"}  # Valor por defecto
+        
+        # Importar generador
         from utils.pdf_generator import SportsPDFGenerator
         
+        # Determinar análisis level y filename
         analysis_level = filters.get('analysis_level', 'league')
         
-        # Generar nombre de archivo
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         if analysis_level == 'team':
             filename = f"reporte_performance_{filters.get('team', 'equipo')}_{timestamp}.pdf"
         elif analysis_level == 'player':
@@ -671,23 +682,29 @@ def export_performance_pdf(n_clicks, performance_data, filters):
         pdf_generator = SportsPDFGenerator()
         pdf_buffer = pdf_generator.create_performance_report(performance_data, filters)
         
-        return {
-            'content': pdf_buffer.getvalue(),
-            'filename': filename,
-            'type': 'application/pdf'
-        }
+        # Usar send_bytes para manejar automáticamente los bytes
+        return send_bytes(pdf_buffer.getvalue(), filename)
         
     except Exception as e:
-        # En caso de error, devolver un archivo de texto con la información
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        content = f"ERROR GENERANDO PDF\n\n"
-        content += f"Reporte de Performance - {analysis_level}\n"
-        content += f"Generado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-        content += f"Error: {str(e)}\n\n"
-        content += json.dumps(performance_data, indent=2, ensure_ascii=False)
+        # En caso de error, crear un archivo de texto con información de debug
+        error_content = f"""ERROR GENERANDO PDF
+========================
+
+Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+Error: {str(e)}
+Tipo de error: {type(e).__name__}
+
+Información de debug:
+- Performance data disponible: {performance_data is not None}
+- Performance data type: {type(performance_data)}
+- Filters: {filters}
+- Analysis level: {filters.get('analysis_level') if filters else 'No filters'}
+
+Performance data keys: {list(performance_data.keys()) if isinstance(performance_data, dict) else 'No es dict'}
+
+Traceback completo:
+{str(e)}
+"""
         
-        return {
-            'content': content,
-            'filename': f"reporte_performance_error_{timestamp}.txt",
-            'type': 'text/plain'
-        }
+        # Crear archivo de error usando dcc.send_string
+        return send_string(error_content, f"error_export_{timestamp}.txt")
