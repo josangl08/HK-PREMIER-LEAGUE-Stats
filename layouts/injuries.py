@@ -13,13 +13,9 @@ def create_injuries_layout():
         dbc.Row([
             dbc.Col([
                 html.H1(
-                    "Dashboard de Injuries", 
+                    "Injuries Dashboard", 
                     className="text-center mb-4",
                     style={'color': '#f39c12'}
-                ),
-                html.P(
-                    "Gestión y análisis de lesiones y condición física",
-                    className="text-center text-muted mb-4"
                 ),
                 html.Hr()
             ])
@@ -94,7 +90,7 @@ def create_injuries_layout():
                                         color="success",
                                         size="sm"
                                     )
-                                ])
+                                ], className="d-grid gap-2")
                             ], md=3)
                         ])
                     ])

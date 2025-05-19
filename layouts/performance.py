@@ -16,9 +16,9 @@ def create_performance_layout():
         dbc.Row([
             dbc.Col([
                 html.H1(
-                    "Dashboard de Performance", 
+                    "Performance Dashboard", 
                     className="text-center mb-4",
-                    style={'color': '#2c3e50'}
+                    style={'color': '#27ae60'}
                 ),
                 html.Hr()
             ])
