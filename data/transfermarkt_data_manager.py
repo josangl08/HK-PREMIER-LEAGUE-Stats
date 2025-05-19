@@ -1,5 +1,5 @@
 """
-Gestor integrado de datos de lesiones desde Transfermarkt.
+Gestor integrado de datos de lesiones desde Transfermarkt - VERSIÓN CORREGIDA.
 Combina extracción, procesamiento y cache en una interfaz unificada.
 """
 
@@ -16,7 +16,7 @@ from data.processors.transfermarkt_processor import TransfermarktProcessor
 
 class TransfermarktDataManager:
     """
-    Gestor integral para datos de lesiones de Transfermarkt.
+    Gestor integral para datos de lesiones de Transfermarkt - VERSIÓN CORREGIDA.
     """
     
     def __init__(self, cache_dir: str = "data/cache", auto_load: bool = False):
@@ -27,6 +27,7 @@ class TransfermarktDataManager:
             cache_dir: Directorio para cache de datos
             auto_load: Si debe cargar datos automáticamente al inicializar
         """
+        
         self.extractor = TransfermarktExtractor(cache_dir)
         self.processor = TransfermarktProcessor()
         
@@ -75,28 +76,50 @@ class TransfermarktDataManager:
             
             # 3. Procesar datos
             self.logger.info("Procesando datos...")
-            df_processed = self.processor.process_injuries_data(self.raw_injuries)
-            
-            if df_processed.empty:
-                self.logger.error("No se pudieron procesar los datos")
-                return False
-            
-            # Convertir a formato compatible con el dashboard existente
-            self.processed_injuries = self._convert_to_dashboard_format(df_processed)
-            
-            self.logger.info(f"Procesadas {len(self.processed_injuries)} lesiones")
-            
-            # 4. Guardar en cache procesado
-            self._save_to_processed_cache()
-            
-            # 5. Actualizar timestamp
-            self.last_update = datetime.now()
-            
-            self.logger.info("Actualización de datos completada exitosamente")
-            return True
+            try:
+                df_processed = self.processor.process_injuries_data(self.raw_injuries)
+                
+                if df_processed.empty:
+                    self.logger.error("No se pudieron procesar los datos - DataFrame vacío")
+                    return False
+                
+                self.logger.info(f"Procesadas {len(df_processed)} lesiones exitosamente")
+                
+                # Debug: mostrar columnas disponibles
+                self.logger.debug(f"Columnas en DataFrame procesado: {list(df_processed.columns)}")
+                
+                # 4. Convertir a formato compatible con el dashboard
+                self.logger.info("Convirtiendo a formato dashboard...")
+                self.processed_injuries = self._convert_to_dashboard_format(df_processed)
+                
+                if not self.processed_injuries:
+                    self.logger.error("Error convirtiendo a formato dashboard")
+                    return False
+                
+                self.logger.info(f"Convertidas {len(self.processed_injuries)} lesiones al formato dashboard")
+                
+                # 5. Guardar en cache procesado
+                self._save_to_processed_cache()
+                
+                # 6. Actualizar timestamp
+                self.last_update = datetime.now()
+                
+                self.logger.info("Actualización de datos completada exitosamente")
+                return True
+                
+            except Exception as processing_error:
+                self.logger.error(f"Error durante el procesamiento: {processing_error}")
+                # Log de debug más detallado
+                self.logger.debug(f"Tipo de error: {type(processing_error)}")
+                if self.raw_injuries:
+                    self.logger.debug(f"Muestra de datos crudos: {self.raw_injuries[0] if self.raw_injuries else 'Vacío'}")
+                raise processing_error
             
         except Exception as e:
             self.logger.error(f"Error actualizando datos: {e}")
+            self.logger.debug(f"Detalles del error: {type(e).__name__}: {str(e)}")
+            import traceback
+            self.logger.debug(f"Traceback: {traceback.format_exc()}")
             return False
     
     def get_injuries_data(self) -> List[Dict]:
@@ -176,10 +199,10 @@ class TransfermarktDataManager:
             'active_injuries': len(df[df['status'] == 'En tratamiento']),
             'recovered_injuries': len(df[df['status'] == 'Recuperado']),
             'chronic_injuries': len(df[df['status'] == 'Crónico']),
-            'avg_recovery_days': df['recovery_days'].mean(),
-            'most_common_injury': df['injury_type'].mode().iloc[0] if len(df) > 0 else 'N/A',
-            'most_affected_part': df['body_part'].mode().iloc[0] if len(df) > 0 else 'N/A',
-            'teams_with_injuries': df['team'].nunique(),
+            'avg_recovery_days': float(df['recovery_days'].mean()) if 'recovery_days' in df.columns else 0,
+            'most_common_injury': df['injury_type'].mode().iloc[0] if len(df) > 0 and 'injury_type' in df.columns else 'N/A',
+            'most_affected_part': df['body_part'].mode().iloc[0] if len(df) > 0 and 'body_part' in df.columns else 'N/A',
+            'teams_with_injuries': df['team'].nunique() if 'team' in df.columns else 0,
             'last_update': self.last_update.isoformat() if self.last_update else None
         }
         
@@ -232,6 +255,7 @@ class TransfermarktDataManager:
     def _convert_to_dashboard_format(self, df: pd.DataFrame) -> List[Dict]:
         """
         Convierte DataFrame procesado al formato esperado por el dashboard.
+        VERSIÓN CORREGIDA - Maneja columnas faltantes sin errores.
         
         Args:
             df: DataFrame procesado
@@ -241,25 +265,75 @@ class TransfermarktDataManager:
         """
         injuries = []
         
-        for _, row in df.iterrows():
-            injury = {
-                'id': str(row.name),  # Usar índice como ID
-                'player_name': row['player_name'],
-                'team': row['team'],
-                'injury_type': row['injury_type'],
-                'body_part': row['body_part'],
-                'severity': row['severity'],
-                'injury_date': row['injury_date'].strftime('%Y-%m-%d') if pd.notna(row['injury_date']) else None,
-                'return_date': row['return_date'].strftime('%Y-%m-%d') if pd.notna(row['return_date']) else None,
-                'recovery_days': int(row['recovery_days']) if pd.notna(row['recovery_days']) else 0,
-                'status': row['status'],
-                'position': row['position'],
-                'age': int(row['age']) if pd.notna(row['age']) else 0,
-                'matches_missed': int(row['matches_missed']) if pd.notna(row['matches_missed']) else 0,
-                'market_value': int(row['market_value']) if pd.notna(row['market_value']) else 0
-            }
-            injuries.append(injury)
+        for i, row in df.iterrows():
+            injury = {}
+            
+            # Procesar cada campo con manejo de errores
+            try:
+                # ID único
+                injury['id'] = str(i)
+                
+                # Información básica del jugador
+                injury['player_name'] = str(row.get('player_name', 'Desconocido'))
+                injury['team'] = str(row.get('team', 'Desconocido'))
+                injury['position'] = str(row.get('position', 'Desconocida'))
+                injury['age'] = int(row.get('age', 0)) if pd.notna(row.get('age')) else 0
+                
+                # Información de la lesión
+                injury['injury_type'] = str(row.get('injury_type', 'Desconocida'))
+                injury['body_part'] = str(row.get('body_part', 'Otros'))
+                injury['severity'] = str(row.get('severity', 'Moderada'))
+                injury['status'] = str(row.get('status', 'En tratamiento'))
+                
+                # Fechas (manejar diferentes tipos)
+                injury_date = row.get('injury_date')
+                if pd.notna(injury_date):
+                    if hasattr(injury_date, 'strftime'):
+                        injury['injury_date'] = injury_date.strftime('%Y-%m-%d')
+                    else:
+                        try:
+                            injury['injury_date'] = pd.to_datetime(injury_date).strftime('%Y-%m-%d')
+                        except:
+                            injury['injury_date'] = None
+                else:
+                    injury['injury_date'] = None
+                
+                return_date = row.get('return_date')
+                if pd.notna(return_date):
+                    if hasattr(return_date, 'strftime'):
+                        injury['return_date'] = return_date.strftime('%Y-%m-%d')
+                    else:
+                        try:
+                            injury['return_date'] = pd.to_datetime(return_date).strftime('%Y-%m-%d')
+                        except:
+                            injury['return_date'] = None
+                else:
+                    injury['return_date'] = None
+                
+                # Datos numéricos
+                injury['recovery_days'] = int(row.get('recovery_days', 0)) if pd.notna(row.get('recovery_days')) else 0
+                injury['market_value'] = int(row.get('market_value', 0)) if pd.notna(row.get('market_value')) else 0
+                
+                # Matches missed - verificar si la columna existe
+                if 'matches_missed' in df.columns:
+                    injury['matches_missed'] = int(row.get('matches_missed', 0)) if pd.notna(row.get('matches_missed')) else 0
+                else:
+                    # Si no existe, calcular una estimación basada en días de recuperación
+                    recovery_days = injury['recovery_days']
+                    if recovery_days > 0:
+                        # Estimación: 1 partido cada 7 días aproximadamente
+                        injury['matches_missed'] = max(1, recovery_days // 7)
+                    else:
+                        injury['matches_missed'] = 0
+                
+                injuries.append(injury)
+                
+            except Exception as e:
+                self.logger.warning(f"Error procesando lesión {i}: {e}")
+                # Continuar con la siguiente lesión
+                continue
         
+        self.logger.info(f"Convertidas {len(injuries)} lesiones al formato dashboard")
         return injuries
     
     def _has_recent_processed_cache(self, max_age_hours: int = 4) -> bool:
@@ -296,6 +370,9 @@ class TransfermarktDataManager:
                 'total_injuries': len(self.processed_injuries) if self.processed_injuries is not None else 0,
                 'injuries': self.processed_injuries
             }
+            
+            # Crear directorio si no existe
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
             
             with open(self.processed_cache_file, 'w', encoding='utf-8') as f:
                 json.dump(cache_data, f, ensure_ascii=False, indent=2)
