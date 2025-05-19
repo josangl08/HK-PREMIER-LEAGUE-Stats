@@ -654,30 +654,40 @@ def export_performance_pdf(n_clicks, performance_data, filters):
         raise PreventUpdate
     
     try:
-        # Aquí implementaremos la generación de PDF
-        # Por ahora retornamos un mensaje placeholder
+        from utils.pdf_generator import SportsPDFGenerator
         
         analysis_level = filters.get('analysis_level', 'league')
         
         # Generar nombre de archivo
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         if analysis_level == 'team':
-            filename = f"performance_report_{filters.get('team', 'team')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+            filename = f"reporte_performance_{filters.get('team', 'equipo')}_{timestamp}.pdf"
         elif analysis_level == 'player':
-            filename = f"performance_report_{filters.get('player', 'player')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+            filename = f"reporte_performance_{filters.get('player', 'jugador')}_{timestamp}.pdf"
         else:
-            filename = f"performance_report_league_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+            filename = f"reporte_performance_liga_{timestamp}.pdf"
         
-        # TODO: Implementar generación real de PDF
-        # Por ahora, simulamos devolviendo un archivo de texto
-        content = f"Reporte de Performance - {analysis_level}\n"
-        content += f"Generado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-        content += json.dumps(performance_data, indent=2)
+        # Generar PDF
+        pdf_generator = SportsPDFGenerator()
+        pdf_buffer = pdf_generator.create_performance_report(performance_data, filters)
         
         return {
-            'content': content,
+            'content': pdf_buffer.getvalue(),
             'filename': filename,
-            'type': 'text/plain'
+            'type': 'application/pdf'
         }
         
     except Exception as e:
-        raise PreventUpdate
+        # En caso de error, devolver un archivo de texto con la información
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        content = f"ERROR GENERANDO PDF\n\n"
+        content += f"Reporte de Performance - {analysis_level}\n"
+        content += f"Generado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        content += f"Error: {str(e)}\n\n"
+        content += json.dumps(performance_data, indent=2, ensure_ascii=False)
+        
+        return {
+            'content': content,
+            'filename': f"reporte_performance_error_{timestamp}.txt",
+            'type': 'text/plain'
+        }

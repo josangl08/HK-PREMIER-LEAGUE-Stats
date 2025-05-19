@@ -94,10 +94,10 @@ def create_performance_layout():
                                 dbc.Label("Rango de Edad:", html_for="age-range"),
                                 dcc.RangeSlider(
                                     id="age-range",
-                                    min=16,
-                                    max=40,
-                                    value=[16, 40],
-                                    marks={16: '16', 20: '20', 25: '25', 30: '30', 35: '35', 40: '40'},
+                                    min=15,
+                                    max=45,
+                                    value=[15, 45],
+                                    marks={15: '15', 20: '20', 25: '25', 30: '30', 35: '35', 40: '40', 45: '45'},
                                     tooltip={"placement": "bottom", "always_visible": True},
                                     className="mb-3"
                                 )

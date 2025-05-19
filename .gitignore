@@ -32,7 +32,6 @@ MANIFEST
 *.manifest
 *.spec
 
-
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt
@@ -95,28 +94,12 @@ ipython_config.py
 #   install all needed dependencies.
 #Pipfile.lock
 
-# UV
-#   Similar to Pipfile.lock, it is generally recommended to include uv.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
+# UV & Poetry
 #uv.lock
-
-# poetry
-#   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-#   https://python-poetry.org/docs/basic-usage/#commit-your-poetrylock-file-to-version-control
 #poetry.lock
-
-# pdm
-#   Similar to Pipfile.lock, it is generally recommended to include pdm.lock in version control.
-#pdm.lock
-#   pdm stores project-wide configurations in .pdm.toml, but it is recommended to not include it
-#   in version control.
-#   https://pdm.fming.dev/latest/usage/project/#working-with-version-control
-.pdm.toml
-.pdm-python
-.pdm-build/
+#.pdm.toml
+#.pdm-python
+#.pdm-build/
 
 # PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
 __pypackages__/
@@ -174,8 +157,57 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 
-# Data
+# Archivos específicos del proyecto
+# =================================
+
+# Cache de datos
 data/cache/
+cache/
+
+# Logs
+logs/
+*.log
+
+# Exports y reportes generados
+data/exports/
+exports/
+reports/
+
+# Archivos de configuración sensibles
+.env
+secrets.json
+
+# Datos temporales y de prueba
+temp/
+tmp/
+test_data/
+
+# Archivos IDE específicos
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Archivos específicos del OS
+.DS_Store
+Thumbs.db
+
+# Archivos de backup
+*.bak
+*.backup
+*~
+
+# Archivos de debug
+debug/
+*.debug
+
+# Archivos de profiling
+*.prof
+
+# Data
+.QUICK_START.md
+.DESARROLLO.md
+.setup.py
 data/test_aggregator.py
 data/test_extractor.py
 data/test_player_processor.py
