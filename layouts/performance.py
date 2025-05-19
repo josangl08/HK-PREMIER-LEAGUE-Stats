@@ -5,7 +5,7 @@ from datetime import datetime, date
 def create_performance_layout():
     """
     Crea el layout del dashboard de performance.
-    Versión simplificada con filtros mejorados.
+    Versión corregida con mejor espaciado.
     
     Returns:
         Layout del dashboard de performance
@@ -24,7 +24,7 @@ def create_performance_layout():
             ])
         ]),
         
-        # Panel de control / Filtros simplificado
+        # Panel de control / Filtros mejorado - MÁS ESPACIADO
         dbc.Row([
             dbc.Col([
                 dbc.Card([
@@ -32,17 +32,14 @@ def create_performance_layout():
                         html.H4("Filtros de Análisis", className="mb-0")
                     ]),
                     dbc.CardBody([
+                        # Primera fila de filtros
                         dbc.Row([
                             # Selector de temporada
                             dbc.Col([
                                 dbc.Label("Temporada:", html_for="season-selector"),
                                 dcc.Dropdown(
                                     id="season-selector",
-                                    options=[
-                                        {"label": "2024-25", "value": "2024-25"},
-                                        {"label": "2023-24", "value": "2023-24"},
-                                        {"label": "2022-23", "value": "2022-23"}
-                                    ],
+                                    options=[],  # Se llena dinámicamente
                                     value="2024-25",
                                     className="mb-3"
                                 )
@@ -69,8 +66,9 @@ def create_performance_layout():
                                     clearable=True
                                 )
                             ], md=4)
-                        ]),
+                        ], className="mb-3"),  # AGREGAR MARGEN ENTRE FILAS
                         
+                        # Segunda fila de filtros
                         dbc.Row([
                             # Filtro por posición
                             dbc.Col([
@@ -125,18 +123,18 @@ def create_performance_layout():
                             ], md=4)
                         ])
                     ])
-                ], className="mb-4")
+                ], className="mb-4")  # MANTENER MARGEN INFERIOR
             ])
         ]),
         
-        # Indicadores de estado
+        # Indicadores de estado - CON MARGEN
         dbc.Row([
             dbc.Col([
                 html.Div(id="status-alerts")
             ])
-        ]),
+        ], className="mb-3"),  # AGREGAR MARGEN
         
-        # Métricas principales (KPIs)
+        # Métricas principales (KPIs) - CON MARGEN
         dbc.Row([
             dbc.Col([
                 dbc.Card([
@@ -148,7 +146,7 @@ def create_performance_layout():
             ])
         ], className="mb-4"),
         
-        # Sección de gráficos principales
+        # Sección de gráficos principales - CON MARGEN
         dbc.Row([
             # Gráfico principal izquierdo
             dbc.Col([
@@ -183,7 +181,7 @@ def create_performance_layout():
             ], md=6)
         ], className="mb-4"),
         
-        # Sección de estadísticas detalladas
+        # Sección de estadísticas detalladas - CON MARGEN
         dbc.Row([
             # Tabla de top performers
             dbc.Col([
@@ -218,7 +216,7 @@ def create_performance_layout():
             ], md=6)
         ], className="mb-4"),
         
-        # Gráfico de comparación (condicional para equipos/jugadores)
+        # Gráfico de comparación (condicional para equipos/jugadores) - CON MARGEN
         dbc.Row([
             dbc.Col([
                 dbc.Card([

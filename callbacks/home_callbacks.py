@@ -7,7 +7,20 @@ import logging
 # Configurar logging
 logger = logging.getLogger(__name__)
 
-# Callback para mostrar estado del sistema - VERSIÓN MEJORADA
+def format_season_short(season):
+    """Convierte '2024-25' a '24/25'"""
+    if not season or '-' not in season:
+        return season
+    
+    try:
+        year1, year2 = season.split('-')
+        short_year1 = year1[-2:]  # Últimos 2 dígitos
+        short_year2 = year2[-2:]  # Últimos 2 dígitos
+        return f"{short_year1}/{short_year2}"
+    except:
+        return season
+
+# Callback para mostrar estado del sistema - VERSIÓN CORREGIDA
 @callback(
     Output('system-status-info', 'children'),
     [Input('refresh-data-button', 'n_clicks')],
@@ -20,7 +33,7 @@ def update_system_status(n_clicks):
     """
     try:
         # Inicializar el data manager (sin cargar automáticamente los datos)
-        data_manager = HongKongDataManager(auto_load=False)
+        data_manager = HongKongDataManager(auto_load=False, background_preload=False)
         
         # Obtener estado del sistema y verificar actualizaciones
         status = data_manager.get_data_status()
@@ -29,24 +42,36 @@ def update_system_status(n_clicks):
         # Crear lista de items de estado
         status_items = []
         
-        # Temporada actual
+        # Temporada actual - FORMATO CORREGIDO
+        current_season = status.get('current_season', 'N/A')
+        available_seasons = status.get('available_seasons', [])
+        
+        # Convertir temporadas a formato corto
+        available_seasons_short = [format_season_short(s) for s in available_seasons]
+        
         status_items.append(
             dbc.ListGroupItem([
                 html.Div([
                     html.Strong("🗓️ Temporada actual: "),
-                    html.Span(status.get('current_season', 'N/A')),
+                    html.Span(format_season_short(current_season)),
                     html.Br(),
-                    html.Small(f"Temporadas disponibles: {', '.join(status.get('available_seasons', []))}", 
+                    html.Small(f"Disponibles: {', '.join(available_seasons_short)}", 
                               className="text-muted")
                 ])
             ])
         )
         
-        # Última actualización
+        # Última actualización - VERSIÓN CORREGIDA
         last_update = status.get('last_update')
-        if last_update:
+        if last_update and last_update != '{}':
             # Formatear fecha para mostrar solo fecha y hora
-            formatted_date = last_update[:19].replace('T', ' ')
+            try:
+                if isinstance(last_update, str) and last_update not in ['None', 'null', '{}']:
+                    formatted_date = last_update[:19].replace('T', ' ')
+                else:
+                    formatted_date = 'Nunca'
+            except:
+                formatted_date = 'Nunca'
         else:
             formatted_date = 'Nunca'
             
@@ -59,8 +84,12 @@ def update_system_status(n_clicks):
             ])
         )
         
-        # Estado de datos disponibles
+        # Estado de datos disponibles - VERSIÓN CORREGIDA
         data_available = status.get('processed_data_available', False)
+        # Verificar también si hay datos en cache
+        if not data_available and status.get('cached_seasons'):
+            data_available = current_season in status.get('cached_seasons', [])
+        
         status_items.append(
             dbc.ListGroupItem([
                 html.Div([
@@ -82,7 +111,11 @@ def update_system_status(n_clicks):
             # Información de equipos de Hong Kong
             if 'hong_kong_teams' in status and status['hong_kong_teams']:
                 teams_list = status['hong_kong_teams']
-                teams_info = f" | Equipos HK: {', '.join(teams_list[:3])}{'...' if len(teams_list) > 3 else ''}"
+                teams_info = f" | Equipos: {', '.join(teams_list[:3])}{'...' if len(teams_list) > 3 else ''}"
+            
+            # Mostrar temporadas en cache en formato corto
+            cached_seasons = status.get('cached_seasons', [])
+            cached_short = [format_season_short(s) for s in cached_seasons]
             
             status_items.append(
                 dbc.ListGroupItem([
@@ -90,7 +123,7 @@ def update_system_status(n_clicks):
                         html.Strong("📊 Estadísticas: "),
                         html.Span(f"{stats.get('total_players', 0)} jugadores, {stats.get('total_teams', 0)} equipos"),
                         html.Br(),
-                        html.Small(f"Temporadas en cache: {', '.join(status.get('cached_seasons', []))}{teams_info}", 
+                        html.Small(f"En cache: {', '.join(cached_short)}{teams_info}", 
                             className="text-muted")
                     ])
                 ])
