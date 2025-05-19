@@ -7,9 +7,8 @@ layout = dbc.Container([
             html.H1("Welcome to Hong Kong Premier League Dashboard", className="text-center my-4"),
             html.Div([
                 html.P([
-                    "Esta aplicación proporciona análisis de performance deportiva y gestión de datos para ",
-                    "equipos y atletas de la Liga de Hong Kong. Navega por las diferentes secciones para explorar ",
-                    "análisis detallados y visualizaciones interactivas."
+                    "This application provides sports performance analysis and data management for  ",
+                    "teams and athletes in the Hong Kong League. ",
                 ], className="lead text-center"),
                 
                 html.Hr(),
@@ -17,32 +16,32 @@ layout = dbc.Container([
                 dbc.Row([
                     dbc.Col([
                         dbc.Card([
-                            dbc.CardHeader(html.H4("Dashboard de Performance", className="text-center")),
+                            dbc.CardHeader(html.H4("Performance Dashboard", className="text-center")),
                             dbc.CardBody([
                                 html.Ul([
-                                    html.Li("📊 Estadísticas de liga completa"),
-                                    html.Li("⚽ Análisis por equipo"),
-                                    html.Li("👤 Perfiles de jugadores"),
-                                    html.Li("📈 Gráficos interactivos"),
-                                    html.Li("📄 Exportación a PDF")
+                                    html.Li("📊 Full league statistics"),
+                                    html.Li("⚽ Analysis by team"),
+                                    html.Li("👤 Player profiles"),
+                                    html.Li("📈 Interactive graphics"),
+                                    html.Li("📄 Export to PDF")
                                 ]),
-                                dbc.Button("Ir a Performance", href="/performance", color="primary", className="w-100"),
+                                dbc.Button("Go to Performance", href="/performance", color="success", className="w-100"),
                             ]),
                         ]),
                     ], width=12, md=6, className="mb-4"),
                     
                     dbc.Col([
                         dbc.Card([
-                            dbc.CardHeader(html.H4("Dashboard de Injuries", className="text-center")),
+                            dbc.CardHeader(html.H4("Injuries Dashboard", className="text-center")),
                             dbc.CardBody([
                                 html.Ul([
-                                    html.Li("🏥 Gestión de lesiones"),
-                                    html.Li("📋 Historiales médicos"),
-                                    html.Li("📊 Análisis de riesgos"),
-                                    html.Li("📈 Tendencias de lesiones"),
-                                    html.Li("📄 Reportes médicos")
+                                    html.Li("🏥 Injury management"),
+                                    html.Li("📋 Medical records"),
+                                    html.Li("📊 Risk analysis"),
+                                    html.Li("📈 Injury trends"),
+                                    html.Li("📄 Medical reports")
                                 ]),
-                                dbc.Button("Ir a Injuries", href="/injuries", color="success", className="w-100"),
+                                dbc.Button("Go to Injuries", href="/injuries", color="warning", className="w-100"),
                             ]),
                         ]),
                     ], width=12, md=6, className="mb-4"),
