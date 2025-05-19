@@ -6,77 +6,16 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from dash.exceptions import PreventUpdate
-import random
+import logging
 
-# Datos simulados para el dashboard de lesiones
-# En una aplicación real, estos datos vendrían de una base de datos médica
+# Importar nuestro nuevo gestor de datos
+from data.transfermarkt_data_manager import TransfermarktDataManager
 
-def generate_sample_injury_data():
-    """
-    Genera datos simulados de lesiones para demostración.
-    En una aplicación real, estos datos vendrían de una base de datos médica.
-    """
-    
-    # Lista de equipos (usando los mismos del sistema principal)
-    teams = [
-        "Eastern Sports Club", "Kitchee SC", "Lee Man FC", "Southern District FC",
-        "HKFC", "Tai Po FC", "Hong Kong FC", "Wofoo Tai Po", "Happy Valley AA",
-        "Central Coast FC"
-    ]
-    
-    # Tipos de lesiones comunes en fútbol
-    injury_types = [
-        "Distensión muscular", "Esguince de tobillo", "Contusión", "Lesión ligamentaria",
-        "Fractura", "Tendinitis", "Rotura muscular", "Luxación", "Sobrecarga muscular"
-    ]
-    
-    # Partes del cuerpo afectadas
-    body_parts = [
-        "Tobillo", "Rodilla", "Isquiotibiales", "Cuádriceps", "Gemelo", "Pie",
-        "Cadera", "Espalda baja", "Hombro", "Muñeca", "Cabeza"
-    ]
-    
-    # Severidad de lesiones
-    severities = ["Leve", "Moderada", "Grave"]
-    severity_weights = [0.6, 0.3, 0.1]  # Más lesiones leves que graves
-    
-    # Generar datos de muestra
-    np.random.seed(42)  # Para reproducibilidad
-    n_injuries = 150
-    
-    data = []
-    base_date = datetime.now() - timedelta(days=365)
-    
-    for i in range(n_injuries):
-        # Fecha aleatoria en el último año
-        days_offset = np.random.randint(0, 365)
-        injury_date = base_date + timedelta(days=days_offset)
-        
-        # Datos de la lesión
-        injury = {
-            'id': i + 1,
-            'player_name': f"Jugador {i + 1}",
-            'team': np.random.choice(teams),
-            'injury_type': np.random.choice(injury_types),
-            'body_part': np.random.choice(body_parts),
-            'severity': np.random.choice(severities, p=severity_weights),
-            'injury_date': injury_date,
-            'recovery_days': np.random.randint(1, 120),
-            'status': np.random.choice(['Recuperado', 'En tratamiento', 'Crónico'], p=[0.7, 0.25, 0.05])
-        }
-        
-        # Calcular fecha de retorno
-        if injury['status'] == 'Recuperado':
-            injury['return_date'] = injury['injury_date'] + timedelta(days=injury['recovery_days'])
-        else:
-            injury['return_date'] = None
-            
-        data.append(injury)
-    
-    return pd.DataFrame(data)
+# Configurar logging
+logging.basicConfig(level=logging.INFO)
 
-# Generar datos de muestra
-INJURY_DATA = generate_sample_injury_data()
+# Inicializar el gestor de datos de Transfermarkt
+transfermarkt_manager = TransfermarktDataManager(auto_load=True)
 
 # Callback para actualizar opciones de equipos
 @callback(
@@ -86,9 +25,9 @@ INJURY_DATA = generate_sample_injury_data()
 )
 def update_team_options(analysis_type):
     """Actualiza las opciones de equipos para el selector."""
-    teams = INJURY_DATA['team'].unique().tolist()
+    teams = transfermarkt_manager.get_teams_with_injuries()
     options = [{"label": "Todos los equipos", "value": "all"}]
-    options.extend([{"label": team, "value": team} for team in sorted(teams)])
+    options.extend([{"label": team, "value": team} for team in teams])
     return options
 
 # Callback principal para cargar datos
@@ -102,7 +41,7 @@ def update_team_options(analysis_type):
     prevent_initial_call=False
 )
 def load_injury_data(analysis_type, team, period, n_clicks):
-    """Carga y filtra los datos de lesiones según los filtros seleccionados."""
+    """Carga y filtra los datos de lesiones desde Transfermarkt."""
     
     # Guardar filtros actuales
     current_filters = {
@@ -111,25 +50,51 @@ def load_injury_data(analysis_type, team, period, n_clicks):
         'period': period
     }
     
+    # Si se presionó refresh, forzar actualización
+    force_refresh = n_clicks and n_clicks > 0
+    
+    if force_refresh:
+        success = transfermarkt_manager.refresh_data(force_scraping=True)
+        if not success:
+            logging.warning("Error al actualizar datos desde Transfermarkt")
+    
+    # Obtener datos de lesiones
+    all_injuries = transfermarkt_manager.get_injuries_data()
+    
+    if not all_injuries:
+        logging.warning("No hay datos de lesiones disponibles")
+        return [], current_filters
+    
     # Filtrar datos por período
-    filtered_data = INJURY_DATA.copy()
+    filtered_data = []
     
     if period != 'all':
         days_map = {'1m': 30, '3m': 90, '6m': 180, 'season': 365}
         days_back = days_map.get(period, 90)
         cutoff_date = datetime.now() - timedelta(days=days_back)
-        filtered_data = filtered_data[filtered_data['injury_date'] >= cutoff_date]
+        
+        for injury in all_injuries:
+            injury_date_str = injury.get('injury_date')
+            if injury_date_str:
+                try:
+                    injury_date = datetime.strptime(injury_date_str, '%Y-%m-%d')
+                    if injury_date >= cutoff_date:
+                        filtered_data.append(injury)
+                except:
+                    # Si hay error parseando fecha, incluir el registro
+                    filtered_data.append(injury)
+            else:
+                # Si no hay fecha, incluir el registro
+                filtered_data.append(injury)
+    else:
+        filtered_data = all_injuries
     
     # Filtrar por equipo si se especifica
     if team and team != 'all':
-        filtered_data = filtered_data[filtered_data['team'] == team]
+        filtered_data = [injury for injury in filtered_data if injury['team'] == team]
     
-    # Convertir dates a strings para serialización JSON
-    data_for_store = filtered_data.copy()
-    data_for_store['injury_date'] = data_for_store['injury_date'].dt.strftime('%Y-%m-%d')
-    data_for_store['return_date'] = data_for_store['return_date'].dt.strftime('%Y-%m-%d') if 'return_date' in data_for_store.columns else None
-    
-    return data_for_store.to_dict('records'), current_filters
+    logging.info(f"Datos filtrados: {len(filtered_data)} lesiones de {len(all_injuries)} total")
+    return filtered_data, current_filters
 
 # Callback para actualizar KPIs principales
 @callback(
@@ -142,14 +107,24 @@ def update_injury_kpis(data):
     if not data:
         return html.Div("No hay datos disponibles")
     
-    df = pd.DataFrame(data)
+    # Obtener estadísticas resumidas
+    stats = transfermarkt_manager.get_statistics_summary()
     
-    # Calcular métricas
-    total_injuries = len(df)
-    active_injuries = len(df[df['status'] == 'En tratamiento'])
-    avg_recovery_days = df['recovery_days'].mean()
-    most_common_injury = df['injury_type'].mode().iloc[0] if not df.empty else "N/A"
-    most_affected_part = df['body_part'].mode().iloc[0] if not df.empty else "N/A"
+    # Calcular métricas específicas del filtro aplicado
+    total_injuries = len(data)
+    active_injuries = len([injury for injury in data if injury['status'] == 'En tratamiento'])
+    
+    # Calcular promedio de días de recuperación
+    recovery_days = [injury['recovery_days'] for injury in data if injury['recovery_days']]
+    avg_recovery_days = sum(recovery_days) / len(recovery_days) if recovery_days else 0
+    
+    # Encontrar lesión más común
+    injury_types = [injury['injury_type'] for injury in data]
+    most_common_injury = max(set(injury_types), key=injury_types.count) if injury_types else "N/A"
+    
+    # Encontrar parte más afectada
+    body_parts = [injury['body_part'] for injury in data]
+    most_affected_part = max(set(body_parts), key=body_parts.count) if body_parts else "N/A"
     
     # Crear KPIs
     kpis = dbc.Row([
@@ -208,17 +183,29 @@ def update_injury_distribution(data):
     if not data:
         return html.Div("No hay datos disponibles")
     
-    df = pd.DataFrame(data)
+    # Contar tipos de lesiones
+    injury_types = [injury['injury_type'] for injury in data]
+    injury_counts = {}
+    for injury_type in injury_types:
+        injury_counts[injury_type] = injury_counts.get(injury_type, 0) + 1
     
-    # Crear gráfico de barras de tipos de lesiones
-    injury_counts = df['injury_type'].value_counts()
+    # Ordenar por frecuencia
+    sorted_injuries = sorted(injury_counts.items(), key=lambda x: x[1], reverse=True)
     
+    # Tomar top 10
+    if len(sorted_injuries) > 10:
+        sorted_injuries = sorted_injuries[:10]
+    
+    types = [item[0] for item in sorted_injuries]
+    counts = [item[1] for item in sorted_injuries]
+    
+    # Crear gráfico de barras
     fig = px.bar(
-        x=injury_counts.index,
-        y=injury_counts.values,
+        x=types,
+        y=counts,
         title="Distribución por Tipo de Lesión",
         labels={'x': 'Tipo de Lesión', 'y': 'Número de Casos'},
-        color=injury_counts.values,
+        color=counts,
         color_continuous_scale='Reds'
     )
     
@@ -241,21 +228,34 @@ def update_injury_trends(data):
     if not data:
         return html.Div("No hay datos disponibles")
     
-    df = pd.DataFrame(data)
-    df['injury_date'] = pd.to_datetime(df['injury_date'])
-    
     # Agrupar por mes
-    df['month'] = df['injury_date'].dt.to_period('M')
-    monthly_counts = df.groupby('month').size().reset_index(name='count')
-    monthly_counts['month_str'] = monthly_counts['month'].astype(str)
+    monthly_counts = {}
+    
+    for injury in data:
+        injury_date_str = injury.get('injury_date')
+        if injury_date_str:
+            try:
+                injury_date = datetime.strptime(injury_date_str, '%Y-%m-%d')
+                month_key = injury_date.strftime('%Y-%m')
+                monthly_counts[month_key] = monthly_counts.get(month_key, 0) + 1
+            except:
+                continue
+    
+    # Ordenar por fecha
+    sorted_months = sorted(monthly_counts.items())
+    
+    if not sorted_months:
+        return html.Div("No hay datos con fechas válidas disponibles")
+    
+    months = [item[0] for item in sorted_months]
+    counts = [item[1] for item in sorted_months]
     
     # Crear gráfico de líneas
     fig = px.line(
-        monthly_counts,
-        x='month_str',
-        y='count',
+        x=months,
+        y=counts,
         title="Tendencia de Lesiones por Mes",
-        labels={'month_str': 'Mes', 'count': 'Número de Lesiones'},
+        labels={'x': 'Mes', 'y': 'Número de Lesiones'},
         markers=True
     )
     
@@ -263,7 +263,7 @@ def update_injury_trends(data):
     
     return dcc.Graph(figure=fig)
 
-# Callback para tabla de lesiones
+# Callback para tabla de lesiones (sin cambios significativos)
 @callback(
     Output('injury-table-container', 'children'),
     [Input('injury-data-store', 'data')]
@@ -274,24 +274,25 @@ def update_injury_table(data):
     if not data:
         return html.Div("No hay datos disponibles")
     
-    df = pd.DataFrame(data)
-    
     # Preparar datos para la tabla
-    table_df = df[['player_name', 'team', 'injury_type', 'body_part', 'severity', 'injury_date', 'recovery_days', 'status']].copy()
-    table_df.columns = ['Jugador', 'Equipo', 'Tipo', 'Zona', 'Severidad', 'Fecha', 'Días Rec.', 'Estado']
-    
-    # Convertir a diccionario con tipos explícitos
-    table_records = []
-    for _, row in table_df.iterrows():
-        record = {}
-        for col in table_df.columns:
-            record[col] = str(row[col]) if pd.notna(row[col]) else ""
-        table_records.append(record)
+    table_data = []
+    for injury in data:
+        row = {
+            'Jugador': injury['player_name'],
+            'Equipo': injury['team'],
+            'Tipo': injury['injury_type'],
+            'Zona': injury['body_part'],
+            'Severidad': injury['severity'],
+            'Fecha': injury['injury_date'] or '',
+            'Días Rec.': injury['recovery_days'],
+            'Estado': injury['status']
+        }
+        table_data.append(row)
     
     # Crear tabla interactiva
     table = dash_table.DataTable(
-        data=table_records,
-        columns=[{'name': col, 'id': col, 'type': 'text'} for col in table_df.columns],
+        data=table_data,
+        columns=[{'name': col, 'id': col, 'type': 'text'} for col in table_data[0].keys()],
         style_cell={
             'textAlign': 'left',
             'padding': '10px',
@@ -335,20 +336,26 @@ def update_body_parts_analysis(data):
     if not data:
         return html.Div("No hay datos disponibles")
     
-    df = pd.DataFrame(data)
-    
     # Contar lesiones por parte del cuerpo
-    body_part_counts = df['body_part'].value_counts()
+    body_parts = [injury['body_part'] for injury in data]
+    body_part_counts = {}
+    for part in body_parts:
+        body_part_counts[part] = body_part_counts.get(part, 0) + 1
+    
+    # Ordenar por frecuencia
+    sorted_parts = sorted(body_part_counts.items(), key=lambda x: x[1], reverse=True)
     
     # Crear lista de elementos
     items = []
-    for part, count in body_part_counts.head(8).items():
-        percentage = (count / len(df)) * 100
+    total_injuries = len(data)
+    
+    for part, count in sorted_parts[:8]:  # Top 8
+        percentage = (count / total_injuries) * 100
         
         items.append(
             dbc.ListGroupItem([
                 html.Div([
-                    html.Strong(str(part)),  # Convertir a string explícitamente
+                    html.Strong(str(part)),
                     html.Span(f" ({count})", className="text-muted"),
                     dbc.Progress(
                         value=percentage,
@@ -374,33 +381,68 @@ def update_injury_risk_analysis(data):
     if not data:
         return html.Div("No hay datos disponibles")
     
-    df = pd.DataFrame(data)
-    
     # Análisis de riesgo por equipo
-    team_risk = df.groupby('team').agg({
-        'injury_type': 'count',
-        'recovery_days': 'mean',
-        'severity': lambda x: (x == 'Grave').sum()
-    }).reset_index()
+    team_stats = {}
     
-    team_risk.columns = ['team', 'total_injuries', 'avg_recovery', 'severe_injuries']
-    team_risk['risk_score'] = (
-        team_risk['total_injuries'] * 0.4 +
-        team_risk['avg_recovery'] * 0.003 +
-        team_risk['severe_injuries'] * 2
-    )
+    for injury in data:
+        team = injury['team']
+        if team not in team_stats:
+            team_stats[team] = {
+                'total_injuries': 0,
+                'severe_injuries': 0,
+                'avg_recovery_days': [],
+                'active_injuries': 0
+            }
+        
+        team_stats[team]['total_injuries'] += 1
+        
+        if injury['severity'] == 'Grave':
+            team_stats[team]['severe_injuries'] += 1
+        
+        if injury['recovery_days']:
+            team_stats[team]['avg_recovery_days'].append(injury['recovery_days'])
+        
+        if injury['status'] == 'En tratamiento':
+            team_stats[team]['active_injuries'] += 1
     
-    team_risk = team_risk.sort_values('risk_score', ascending=False)
+    # Calcular índice de riesgo
+    team_risk = []
+    for team, stats in team_stats.items():
+        avg_recovery = sum(stats['avg_recovery_days']) / len(stats['avg_recovery_days']) if stats['avg_recovery_days'] else 0
+        
+        # Fórmula de riesgo basada en múltiples factores
+        risk_score = (
+            stats['total_injuries'] * 0.4 +
+            stats['severe_injuries'] * 2 +
+            stats['active_injuries'] * 1.5 +
+            avg_recovery * 0.01
+        )
+        
+        team_risk.append({
+            'team': team,
+            'risk_score': risk_score,
+            'total_injuries': stats['total_injuries'],
+            'severe_injuries': stats['severe_injuries'],
+            'active_injuries': stats['active_injuries']
+        })
+    
+    # Ordenar por riesgo
+    team_risk.sort(key=lambda x: x['risk_score'], reverse=True)
+    
+    # Tomar top 8
+    team_risk = team_risk[:8]
     
     # Crear gráfico de barras horizontales
+    teams = [item['team'] for item in team_risk]
+    risks = [item['risk_score'] for item in team_risk]
+    
     fig = px.bar(
-        team_risk.head(8),
-        x='risk_score',
-        y='team',
+        x=risks,
+        y=teams,
         orientation='h',
         title="Índice de Riesgo por Equipo",
-        labels={'risk_score': 'Índice de Riesgo', 'team': 'Equipo'},
-        color='risk_score',
+        labels={'x': 'Índice de Riesgo', 'y': 'Equipo'},
+        color=risks,
         color_continuous_scale='Reds'
     )
     
@@ -432,12 +474,24 @@ def export_injury_report(n_clicks, data, filters):
         from utils.pdf_generator import SportsPDFGenerator
         
         # Calcular estadísticas de resumen
-        df = pd.DataFrame(data)
+        total_injuries = len(data)
+        active_injuries = len([injury for injury in data if injury['status'] == 'En tratamiento'])
+        
+        recovery_days = [injury['recovery_days'] for injury in data if injury['recovery_days']]
+        avg_recovery_days = sum(recovery_days) / len(recovery_days) if recovery_days else 0
+        
+        injury_types = [injury['injury_type'] for injury in data]
+        most_common_injury = max(set(injury_types), key=injury_types.count) if injury_types else "N/A"
+        
+        body_parts = [injury['body_part'] for injury in data]
+        most_affected_part = max(set(body_parts), key=body_parts.count) if body_parts else "N/A"
+        
         summary_stats = {
-            'active_injuries': len(df[df['status'] == 'En tratamiento']),
-            'avg_recovery_days': df['recovery_days'].mean(),
-            'most_common_injury': df['injury_type'].mode().iloc[0] if not df.empty else "N/A",
-            'most_affected_part': df['body_part'].mode().iloc[0] if not df.empty else "N/A"
+            'total_injuries': total_injuries,
+            'active_injuries': active_injuries,
+            'avg_recovery_days': avg_recovery_days,
+            'most_common_injury': most_common_injury,
+            'most_affected_part': most_affected_part
         }
         
         # Generar PDF
@@ -446,7 +500,7 @@ def export_injury_report(n_clicks, data, filters):
         
         # Generar nombre de archivo
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename = f"reporte_lesiones_{timestamp}.pdf"
+        filename = f"reporte_lesiones_transfermarkt_{timestamp}.pdf"
         
         return {
             'content': pdf_buffer.getvalue(),
@@ -460,10 +514,10 @@ def export_injury_report(n_clicks, data, filters):
         
         # Generar nombre de archivo
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename = f"reporte_lesiones_{timestamp}.csv"
+        filename = f"reporte_lesiones_transfermarkt_{timestamp}.csv"
         
         # Agregar información de filtros al DataFrame
-        filter_info = f"Generado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        filter_info = f"Generado desde Transfermarkt: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
         filter_info += f"Filtros aplicados: Tipo={filters.get('analysis_type', 'N/A')}, "
         filter_info += f"Equipo={filters.get('team', 'Todos')}, Período={filters.get('period', 'N/A')}\n"
         filter_info += f"Error generando PDF: {str(e)}\n\n"

@@ -6,11 +6,14 @@ principalmente desde repositorios de GitHub.
 """
 
 from .hong_kong_extractor import HongKongDataExtractor
+from .transfermarkt_extractor import TransfermarktExtractor
 
 # Exportar las clases principales
 __all__ = [
-    'HongKongDataExtractor',
+'HongKongDataExtractor',
+'TransfermarktExtractor'
 ]
+
 
 # Metadatos del módulo
 __version__ = "1.0.0"
