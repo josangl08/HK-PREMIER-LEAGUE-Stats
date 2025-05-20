@@ -145,7 +145,7 @@ def create_performance_layout():
             dbc.Col([
                 dbc.Card([
                     dbc.CardHeader([
-                        html.H5("Análisis Principal", className="mb-0")
+                        html.H5("Main Chart", className="mb-0")
                     ]),
                     dbc.CardBody([
                         dcc.Loading(
@@ -161,7 +161,7 @@ def create_performance_layout():
             dbc.Col([
                 dbc.Card([
                     dbc.CardHeader([
-                        html.H5("Análisis Secundario", className="mb-0")
+                        html.H5("Secondary Chart", className="mb-0")
                     ]),
                     dbc.CardBody([
                         dcc.Loading(

@@ -68,7 +68,7 @@ layout = dbc.Container([
                     ], width=12, md=8, className="mx-auto")
                 ])
                 
-            ], className="p-4 bg-secondary-subtle rounded shadow")
+            ], className="p-4 bg-primary-subtle rounded shadow")
         ], width=12, lg=10, className="mx-auto") 
     ])
 ], fluid=True, className="py-4")

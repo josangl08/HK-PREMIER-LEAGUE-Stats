@@ -140,7 +140,7 @@ def update_system_status(n_clicks, pathname):
                     html.Strong("🗓️ Temporada actual: "),
                     dbc.Badge(format_season_short(current_season), color="primary", className="ms-1"),
                     html.Br(),
-                    html.Small("Disponibles: ", className="text-muted me-1"),
+                    html.Small("Disponibles: ", className="me-1"),
                     html.Span(available_seasons_badges)
                 ])
             ])
@@ -181,7 +181,7 @@ def update_system_status(n_clicks, pathname):
                         className="ms-2"
                     ),
                     html.Br(),
-                    html.Small(f"Temporadas en caché: {len(cached_seasons)}", className="text-muted"),
+                    html.Small(f"Temporadas en caché: {len(cached_seasons)}"),
                     html.Br(),
                     html.Div([
                         dbc.Badge(format_season_short(s), color="secondary", className="me-1 mb-1")
@@ -216,7 +216,7 @@ def update_system_status(n_clicks, pathname):
                         dbc.Badge(format_season_short(current_season), color="primary", className="ms-1 me-2"),
                         html.Span(f"{stats.get('total_players', 0)} jugadores, {stats.get('total_teams', 0)} equipos"),
                         html.Br(),
-                        html.Small("Equipos: ", className="text-muted"),
+                        html.Small("Equipos: "),
                         html.Span(available_teams_badges)
                     ])
                 ])

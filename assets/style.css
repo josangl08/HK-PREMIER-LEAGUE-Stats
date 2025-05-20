@@ -74,13 +74,19 @@ h3 {
 .card-body {
     padding: 1.5rem;
 }
+
 #main-kpis .card {
     background-color: #6ea4da;
 }
+
 #position-analysis-container .card{
     background-color: #6ea4da;
-
 }
+
+#top-performers-container .card {
+    background-color: #6ea4da;
+}
+
 /* Personalización del navbar */
 .navbar {
     box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
@@ -201,7 +207,12 @@ dbc-card,
     overflow: visible !important;
 }
 
-/* Filas y columnas */
+#system-status-info .list-group-item {
+    background-color: #2d3748 !important; 
+    color: #e2e8f0 !important;
+
+}
+/* Filas y columnas */ 
 .row {
     overflow: visible !important;
 }
