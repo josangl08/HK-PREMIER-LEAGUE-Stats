@@ -7,7 +7,6 @@ import json
 class HongKongStatsAggregator:
     """
     Agregador de estadísticas para la Liga de Hong Kong.
-    Versión corregida para mejor manejo de filtros y top performers.
     """
     
     def __init__(self, processed_data: pd.DataFrame):
@@ -202,7 +201,7 @@ class HongKongStatsAggregator:
         }
     
     def _get_top_performers(self, data: pd.DataFrame) -> Dict:
-        """Top performers de la liga en diferentes categorías - CORREGIDO para mostrar 10."""
+        """Top performers de la liga en diferentes categorías con mínimos para métricas de eficiencia."""
         performers = {}
         
         # Top scorers - TOP 10
@@ -223,25 +222,72 @@ class HongKongStatsAggregator:
         
         # Most played minutes - TOP 10
         if 'Minutes played' in data.columns:
-            most_played = data.nlargest(10, 'Minutes played')[['Player', 'Team', 'Minutes played', 'Matches played']].to_dict('records')
+            min_matches = 5  # Mínimo de partidos jugados para entrar en esta lista
+            eligible_players = data
+            if 'Matches played' in data.columns:
+                eligible_players = data[data['Matches played'] >= min_matches]
+            
+            most_played = eligible_players.nlargest(10, 'Minutes played')[
+                ['Player', 'Team', 'Minutes played', 'Matches played']
+            ].to_dict('records')
             performers['most_minutes'] = most_played
         
-        # Best passing accuracy (min 10 matches) - TOP 10
+        # Best passing accuracy (min 5 matches) - TOP 10
         if all(col in data.columns for col in ['Accurate passes, %', 'Matches played']):
-            eligible_passers = data[data['Matches played'] >= 10]
+            # Nuevos filtros para pasadores:
+            min_matches = 5  # Mínimo de partidos jugados
+            min_passes_per_90 = 15  # Mínimo de pases por 90 minutos
+            
+            # Aplicar filtros combinados
+            eligible_passers = data[
+                (data['Matches played'] >= min_matches) & 
+                (data.get('Passes per 90', 0) >= min_passes_per_90)
+            ]
+            
             if len(eligible_passers) > 0:
-                best_passers = eligible_passers.nlargest(10, 'Accurate passes, %')[
-                    ['Player', 'Team', 'Accurate passes, %', 'Passes per 90']
+                # Obtener los mejores y añadir columna calculada directamente
+                passes_df = eligible_passers.copy()
+                
+                # Crear columna de total de pases
+                if 'Passes per 90' in passes_df.columns and 'Matches played' in passes_df.columns:
+                    passes_df['Total passes'] = (passes_df['Passes per 90'] * passes_df['Matches played']).astype(int)
+                else:
+                    passes_df['Total passes'] = 0
+                
+                # Obtener los top 10 con la nueva columna
+                best_passers = passes_df.nlargest(10, 'Accurate passes, %')[
+                    ['Player', 'Team', 'Accurate passes, %', 'Passes per 90', 'Total passes']
                 ].to_dict('records')
+                
                 performers['best_passers'] = best_passers
         
-        # Best dribblers - TOP 10
-        if 'Successful dribbles, %' in data.columns:
-            eligible_dribblers = data[data['Matches played'] >= 10]
+        # Best dribblers (min 5 matches and min dribbles) - TOP 10
+        if all(col in data.columns for col in ['Successful dribbles, %', 'Matches played']):
+            # Nuevos filtros para regateadores:
+            min_matches = 5  # Mínimo de partidos jugados
+            min_dribbles_per_90 = 2  # Mínimo de regates por 90 minutos
+            
+            # Aplicar filtros combinados
+            eligible_dribblers = data[
+                (data['Matches played'] >= min_matches) & 
+                (data.get('Dribbles per 90', 0) >= min_dribbles_per_90)
+            ]
+            
             if len(eligible_dribblers) > 0:
-                best_dribblers = eligible_dribblers.nlargest(10, 'Successful dribbles, %')[
-                    ['Player', 'Team', 'Successful dribbles, %', 'Dribbles per 90']
+                # Obtener los mejores y añadir columna calculada directamente
+                dribbles_df = eligible_dribblers.copy()
+                
+                # Crear columna de total de regates
+                if 'Dribbles per 90' in dribbles_df.columns and 'Matches played' in dribbles_df.columns:
+                    dribbles_df['Total dribbles'] = (dribbles_df['Dribbles per 90'] * dribbles_df['Matches played']).astype(int)
+                else:
+                    dribbles_df['Total dribbles'] = 0
+                
+                # Obtener los top 10 con la nueva columna
+                best_dribblers = dribbles_df.nlargest(10, 'Successful dribbles, %')[
+                    ['Player', 'Team', 'Successful dribbles, %', 'Dribbles per 90', 'Total dribbles']
                 ].to_dict('records')
+                
                 performers['best_dribblers'] = best_dribblers
         
         return performers
@@ -740,10 +786,10 @@ class HongKongStatsAggregator:
         return chart_data
     
     def _prepare_league_chart_data(self) -> Dict:
-        """Prepara datos de la liga para gráficos."""
+        """Prepara datos de la liga para gráficos avanzados."""
         data = {}
         
-        # Datos para gráfico de barras de goles por equipo
+        # Datos para gráfico de barras de goles por equipo (original)
         if all(col in self.data.columns for col in ['Team', 'Goals']):
             team_goals = self.data.groupby('Team')['Goals'].sum().sort_values(ascending=False)
             data['team_goals'] = {
@@ -751,7 +797,7 @@ class HongKongStatsAggregator:
                 'goals': team_goals.values.tolist()
             }
         
-        # Datos para distribución de edades
+        # Datos para distribución de edades (original)
         if 'Age' in self.data.columns:
             age_counts = self.data['Age'].value_counts().sort_index()
             data['age_distribution'] = {
@@ -759,7 +805,7 @@ class HongKongStatsAggregator:
                 'counts': age_counts.values.tolist()
             }
         
-        # Datos para gráfico de dispersión goles vs asistencias
+        # Datos para gráfico de dispersión goles vs asistencias (original)
         if all(col in self.data.columns for col in ['Goals', 'Assists', 'Player', 'Team']):
             data['goals_vs_assists'] = {
                 'goals': self.data['Goals'].tolist(),
@@ -768,7 +814,7 @@ class HongKongStatsAggregator:
                 'teams': self.data['Team'].tolist()
             }
         
-        # Datos para gráfico de posiciones
+        # Datos para gráfico de posiciones (original)
         position_column = 'Position_Group'
         if position_column in self.data.columns:
             pos_counts = self.data[position_column].value_counts()
@@ -782,6 +828,56 @@ class HongKongStatsAggregator:
                 'positions': pos_counts.index.tolist(),
                 'counts': pos_counts.values.tolist()
             }
+        
+        # NUEVO: Datos para radar chart de posiciones
+        if position_column in self.data.columns:
+            position_analysis = {}
+            
+            for position in self.data[position_column].unique():
+                if pd.isna(position) or position == 'Unknown':
+                    continue
+                    
+                pos_data = self.data[self.data[position_column] == position]
+                player_count = len(pos_data)
+                
+                if player_count == 0:
+                    continue
+                
+                # Calcular métricas por jugador
+                total_goals = pos_data['Goals'].sum() if 'Goals' in pos_data.columns else 0
+                total_assists = pos_data['Assists'].sum() if 'Assists' in pos_data.columns else 0
+                avg_goals_per_player = total_goals / player_count
+                avg_assists_per_player = total_assists / player_count
+                
+                # Métricas de precisión
+                pass_accuracy = pos_data['Accurate passes, %'].mean() if 'Accurate passes, %' in pos_data.columns else 0
+                dribble_success = pos_data['Successful dribbles, %'].mean() if 'Successful dribbles, %' in pos_data.columns else 0
+                duels_won = pos_data['Duels won, %'].mean() if 'Duels won, %' in pos_data.columns else 0
+                
+                position_analysis[position] = {
+                    'player_count': player_count,
+                    'avg_goals_per_player': round(avg_goals_per_player, 2),
+                    'avg_assists_per_player': round(avg_assists_per_player, 2),
+                    'avg_accurate_passes_pct': round(pass_accuracy, 2),
+                    'avg_successful_dribbles_pct': round(dribble_success, 2),
+                    'avg_duels_won_pct': round(duels_won, 2)
+                }
+            
+            data['position_analysis'] = position_analysis
+        
+        # NUEVO: Datos para gráfico de edad vs rendimiento
+        if all(col in self.data.columns for col in ['Age', 'Goals', 'Player']):
+            # Filtrar jugadores con al menos 1 gol para mejor visibilidad
+            players_with_goals = self.data[self.data['Goals'] > 0]
+            
+            if not players_with_goals.empty:
+                data['age_performance'] = {
+                    'ages': players_with_goals['Age'].tolist(),
+                    'goals': players_with_goals['Goals'].tolist(),
+                    'players': players_with_goals['Player'].tolist(),
+                    'teams': players_with_goals['Team'].tolist(),
+                    'positions': players_with_goals[position_column].tolist() if position_column in players_with_goals.columns else []
+                }
         
         return data
     

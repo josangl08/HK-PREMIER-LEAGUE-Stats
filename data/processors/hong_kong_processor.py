@@ -125,12 +125,23 @@ class HongKongDataProcessor:
         return df
     
     def _process_positions(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Procesa información de posiciones."""
+        """Procesa información de posiciones con manejo mejorado de múltiples formatos."""
+        # Buscar columnas relacionadas con posiciones con nombres más flexibles
+        position_columns = ['Primary position', 'Position', 'Primary Position', 'position', 
+                        'Position_Primary', 'Position Primary', 'Main Position']
+        
         position_column = None
-        if 'Primary position' in df.columns:
-            position_column = 'Primary position'
-        elif 'Position' in df.columns:
-            position_column = 'Position'
+        for col in position_columns:
+            if col in df.columns:
+                position_column = col
+                break
+        
+        if position_column is None:
+            # Si no encontramos ninguna columna de posición principal, 
+            # buscar cualquier columna que contenga "position" en su nombre
+            possible_columns = [col for col in df.columns if 'position' in col.lower()]
+            if possible_columns:
+                position_column = possible_columns[0]
         
         if position_column is None:
             df['Position_Clean'] = 'Unknown'
@@ -143,17 +154,68 @@ class HongKongDataProcessor:
         # Asignar grupo de posición
         df['Position_Group'] = df['Position_Clean'].apply(self._get_position_group)
         
+        # Si aún hay muchas posiciones 'Unknown', intentar con posiciones secundarias
+        unknown_count = (df['Position_Group'] == 'Unknown').sum()
+        if unknown_count > 0.3 * len(df):  # Si más del 30% son desconocidas
+            # Buscar columnas de posición secundaria
+            secondary_columns = ['Secondary position', 'Position_Secondary', 'Second Position']
+            
+            for col in secondary_columns:
+                if col in df.columns:
+                    # Para jugadores con posición desconocida, usar posición secundaria
+                    mask = df['Position_Group'] == 'Unknown'
+                    df.loc[mask, 'Position_Clean'] = df.loc[mask, col].apply(
+                        lambda x: str(x).strip() if pd.notna(x) else 'Unknown'
+                    )
+                    df.loc[mask, 'Position_Group'] = df.loc[mask, 'Position_Clean'].apply(self._get_position_group)
+                    break
+        
         return df
-    
+
     def _get_position_group(self, position):
-        """Determina el grupo de posición."""
+        """Determina el grupo de posición manejando múltiples posiciones."""
         if not position or position == 'Unknown':
             return 'Unknown'
         
         position = str(position).strip()
+        
+        # Si hay múltiples posiciones separadas por comas, usar la primera
+        if ',' in position:
+            positions = [pos.strip() for pos in position.split(',')]
+            position = positions[0]  # Usar la primera posición
+        
+        # Expandir las abreviaturas y variaciones para cada grupo
+        position_mapping = {
+            'Goalkeeper': ['GK', 'Goalkeeper', 'Goalie', 'Keeper', 'Portero', 'Porter'],
+            'Defender': ['CB', 'RCB', 'LCB', 'RCB3', 'LCB3', 'RB', 'LB', 'RWB', 'LWB', 
+                        'Defender', 'Defense', 'Centre-Back', 'Right-Back', 'Left-Back',
+                        'Centre Back', 'Right Back', 'Left Back', 'Wing Back',
+                        'Central Defender', 'Lateral', 'Stopper'],
+            'Midfielder': ['DM', 'CM', 'AM', 'RM', 'LM', 
+                            'Midfielder', 'Midfield', 'Central Midfielder',
+                            'Defensive Midfielder', 'Attacking Midfielder',
+                            'Central Medio', 'Medio', 'Medio Campo', 'Pivot', 'Pivote'],
+            'Winger': ['RW', 'LW', 'RWF', 'LWF', 
+                    'Winger', 'Wing', 'Wide Midfielder', 'Wide Man',
+                    'Outside Midfielder', 'Extremo', 'Interior'],
+            'Forward': ['CF', 'ST', 'SS', 
+                        'Forward', 'Striker', 'Centre-Forward', 'Center Forward',
+                        'Attacker', 'Second Striker', 'False 9', 'Delantero', 'Punta']
+        }
+        
+        # Verificar en cuál grupo encaja la posición
+        for group, variations in position_mapping.items():
+            if any(variation.lower() == position.lower() or 
+                variation.lower() in position.lower() for variation in variations):
+                return group
+        
+        # Si no coincide con ninguna, intentar usar el diccionario original
+        position = str(position).strip()
         for group, positions in self.position_groups.items():
             if position in positions:
                 return group
+                
+        # Como último recurso
         return 'Unknown'
     
     def _process_numbers(self, df: pd.DataFrame) -> pd.DataFrame:
