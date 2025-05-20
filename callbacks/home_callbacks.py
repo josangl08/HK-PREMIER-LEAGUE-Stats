@@ -3,7 +3,9 @@ import dash_bootstrap_components as dbc
 from dash import html
 from data import HongKongDataManager
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
+import json
+from pathlib import Path
 
 # Configurar logging
 logger = logging.getLogger(__name__)
@@ -46,11 +48,8 @@ def update_system_status(n_clicks, pathname):
     try:
         # Inicializar solo si no existe
         if 'data_manager' not in globals() or data_manager is None:
-            data_manager = HongKongDataManager(auto_load=False, background_preload=False)
+            data_manager = HongKongDataManager(auto_load=True, background_preload=True)
 
-            if not data_manager.processed_data is None:
-                data_manager.refresh_data(force_download=False) 
-        
         # Si se hizo click en actualizar, forzar refresco
         if n_clicks and n_clicks > 0:
             # Marcar como solicitud manual (internamente se guardará este timestamp)
@@ -58,8 +57,65 @@ def update_system_status(n_clicks, pathname):
             data_manager._save_update_timestamps()
             data_manager.refresh_data(force_download=True)
         
+        # Forzar explícitamente la temporada 2024-25
+        if data_manager.current_season != "2024-25":
+            # Guardar la temporada actual para restaurarla después
+            current = data_manager.current_season
+            
+            # Cargar datos de 2024-25
+            data_manager.refresh_data("2024-25", force_download=False)
+            
+            # Obtener estado con los datos correctos
+            status = data_manager.get_data_status()
+            
+            # Restaurar la temporada solo si es reciente (actualizada en el último mes)
+            restore_season = False
+            if current in data_manager.last_update:
+                try:
+                    last_update_str = data_manager.last_update[current]
+                    if isinstance(last_update_str, str):
+                        last_update = datetime.fromisoformat(last_update_str)
+                        one_month_ago = datetime.now() - timedelta(days=30)
+                        
+                        # Solo restaurar temporadas recientes
+                        if last_update > one_month_ago:
+                            restore_season = True
+                    elif isinstance(last_update_str, datetime):
+                        # Si ya es un objeto datetime
+                        one_month_ago = datetime.now() - timedelta(days=30)
+                        if last_update_str > one_month_ago:
+                            restore_season = True
+                except Exception as e:
+                    logger.warning(f"Error verificando timestamp de {current}: {e}")
+            
+            # Solo restaurar si cumple los criterios
+            if restore_season:
+                logger.info(f"Restaurando temporada reciente: {current}")
+                data_manager.refresh_data(current, force_download=False)
+            else:
+                logger.info(f"No se restaura temporada {current} por ser antigua o problemática")
+        else:
+            status = data_manager.get_data_status()
+        
+        # Asegurar que la UI siempre muestre 2024-25
+        status['current_season'] = "2024-25"
+        
+        # Extraer manualmente el timestamp del archivo para mostrar la fecha correcta
+        timestamp_file = Path(data_manager.extractor.cache_dir) / "update_timestamps.json"
+        if timestamp_file.exists():
+            try:
+                with open(timestamp_file, 'r') as f:
+                    timestamps_data = json.load(f)
+                    if "2024-25" in timestamps_data:
+                        # Formatear el timestamp para mostrar
+                        timestamp_str = timestamps_data["2024-25"]
+                        formatted_date = timestamp_str[:19].replace('T', ' ')
+                        # Sobreescribir el timestamp en el status
+                        status['last_update'] = formatted_date
+            except Exception as e:
+                logger.error(f"Error leyendo timestamp file: {e}")
+        
         # Obtener estado del sistema y verificar actualizaciones
-        status = data_manager.get_data_status()
         update_check = data_manager.check_for_updates()
         
         # Crear lista de items de estado

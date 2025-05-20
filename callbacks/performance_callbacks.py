@@ -73,11 +73,10 @@ def update_selector_options(season, selected_team):
     Input('team-selector', 'value'),
     Input('player-selector', 'value'),
     Input('position-filter', 'value'),
-    Input('age-range', 'value'),
-    Input('refresh-button', 'n_clicks')],
+    Input('age-range', 'value')],
     prevent_initial_call=False
 )
-def load_performance_data(season, team, player, position_filter, age_range, n_clicks):
+def load_performance_data(season, team, player, position_filter, age_range):
     """Carga los datos de performance según los filtros seleccionados."""
     
     try:

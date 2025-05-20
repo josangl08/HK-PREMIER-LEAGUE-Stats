@@ -55,7 +55,25 @@ class HongKongDataManager:
         self._load_update_timestamps()
         
         if auto_load:
-            self.refresh_data()
+            # Verificar si ya hay datos en caché para la temporada actual
+            timestamp_file = Path(self.extractor.cache_dir) / "update_timestamps.json"
+            if "2024-25" in self.last_update and timestamp_file.exists():
+                # Cargar desde caché sin actualizar timestamps
+                logger.info("Using cached data from previous session")
+                cached_file = self.extractor._get_cached_file_path("2024-25")
+                if cached_file.exists():
+                    try:
+                        self.raw_data = pd.read_csv(cached_file)
+                        self.processed_data = self.processor.process_season_data(self.raw_data, "2024-25")
+                        self.aggregator = HongKongStatsAggregator(self.processed_data.copy())
+                        logger.info("Loaded data from cache successfully")
+                    except Exception as e:
+                        logger.error(f"Error loading cached data: {e}")
+                        self.refresh_data()
+                else:
+                    self.refresh_data()
+            else:
+                self.refresh_data()
 
             # Iniciar pre-carga en background después de cargar la principal
             if background_preload:
@@ -116,6 +134,9 @@ class HongKongDataManager:
             current_season = "2024-25"  # Temporada actual
             
             logger.info(f"Refreshing data for season {target_season}")
+
+            # Variable para rastrear si se descargaron nuevos datos
+            data_was_downloaded = False
             
             # Si hay forzado manual, registrarlo
             if force_download:
@@ -178,6 +199,10 @@ class HongKongDataManager:
             logger.info(f"Downloading data for {target_season}...")
             raw_data = self.extractor.download_season_data(target_season, force_download)
             
+            # Marcar que se descargaron datos si no usamos caché
+            if force_download or not (target_season in self.data_cache):
+                data_was_downloaded = True
+
             if raw_data is None:
                 logger.error(f"Failed to extract data for {target_season}")
                 return False
@@ -221,9 +246,13 @@ class HongKongDataManager:
             self.aggregator = aggregator
             
             # Actualizar timestamp y guardar
-            self.last_update[target_season] = datetime.now()
-            self._save_update_timestamps()
-            
+            if data_was_downloaded or force_download:
+                self.last_update[target_season] = datetime.now()
+                self._save_update_timestamps()
+                logger.info(f"Updated timestamp for {target_season} - new data downloaded/processed")
+            else:
+                logger.info(f"Using cached data for {target_season}, main timestamp not updated")
+                    
             logger.info("Data refresh completed successfully")
             return True
             
@@ -439,7 +468,7 @@ class HongKongDataManager:
         data_status = {
             'current_season': self.current_season,
             'available_seasons': self.get_available_seasons(),
-            'last_update': self.last_update.get(self.current_season, None),
+            'last_update': last_update,
             'raw_data_available': self.raw_data is not None,
             'processed_data_available': self.processed_data is not None,
             'aggregator_available': self.aggregator is not None,
@@ -731,6 +760,45 @@ class HongKongDataManager:
             
             for i, season in enumerate(seasons_to_load, 1):
                 try:
+                    # NUEVO: Verificar si ya existe en caché y tiene datos
+                    cached_file = self.extractor._get_cached_file_path(season)
+                    timestamp_file = Path(self.extractor.cache_dir) / "update_timestamps.json"
+                    timestamp_exists = False
+                    
+                    # Verificar si existe en timestamps guardados
+                    if timestamp_file.exists():
+                        try:
+                            with open(timestamp_file, 'r') as f:
+                                timestamps = json.load(f)
+                                timestamp_exists = season in timestamps
+                        except:
+                            pass
+                    
+                    # Si el archivo CSV existe y hay un timestamp guardado, saltarlo
+                    if cached_file.exists() and timestamp_exists:
+                        logger.info(f"✅ Background: {season} ya está en caché, saltando...")
+                        
+                        # Añadir esta temporada a data_cache si no está
+                        if season not in self.data_cache:
+                            try:
+                                # Cargar datos de caché directamente
+                                raw_data = pd.read_csv(cached_file)
+                                processed_data = self.processor.process_season_data(raw_data, season)
+                                aggregator = HongKongStatsAggregator(processed_data)
+                                
+                                self.data_cache[season] = {
+                                    'raw_data': raw_data,
+                                    'processed_data': processed_data,
+                                    'aggregator': aggregator,
+                                    'last_update': datetime.now()  # Timestamp solo para caché interno
+                                }
+                                logger.info(f"✅ Background: {season} cargada desde caché existente")
+                            except Exception as e:
+                                logger.warning(f"⚠️ Error cargando {season} desde caché: {e}")
+                        
+                        continue
+                    
+                    # Si no está en caché, cargar normalmente
                     logger.info(f"📥 Cargando en background: {season} ({i}/{len(seasons_to_load)})")
                     success = self.refresh_data(season)
                     if success:

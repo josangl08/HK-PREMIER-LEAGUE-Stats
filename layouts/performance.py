@@ -107,13 +107,6 @@ def create_performance_layout():
                                 dbc.Label("Options:", html_for="action-buttons"),
                                 html.Div([
                                     dbc.Button(
-                                        "🔄 Update",
-                                        id="refresh-button",
-                                        color="primary",
-                                        size="sm",
-                                        className="me-2"
-                                    ),
-                                    dbc.Button(
                                         "📊 Export PDF",
                                         id="export-pdf-button",
                                         color="success",
