@@ -10,6 +10,7 @@ import logging
 
 # Importar nuestro nuevo gestor de datos
 from data.transfermarkt_data_manager import TransfermarktDataManager
+from data.aggregators.transfermarkt_aggregator import TransfermarktStatsAggregator
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
@@ -107,70 +108,74 @@ def update_injury_kpis(data):
     if not data:
         return html.Div("No hay datos disponibles")
     
-    # Obtener estadísticas resumidas
-    stats = transfermarkt_manager.get_statistics_summary()
-    
-    # Calcular métricas específicas del filtro aplicado
-    total_injuries = len(data)
-    active_injuries = len([injury for injury in data if injury['status'] == 'En tratamiento'])
-    
-    # Calcular promedio de días de recuperación
-    recovery_days = [injury['recovery_days'] for injury in data if injury['recovery_days']]
-    avg_recovery_days = sum(recovery_days) / len(recovery_days) if recovery_days else 0
-    
-    # Encontrar lesión más común
-    injury_types = [injury['injury_type'] for injury in data]
-    most_common_injury = max(set(injury_types), key=injury_types.count) if injury_types else "N/A"
-    
-    # Encontrar parte más afectada
-    body_parts = [injury['body_part'] for injury in data]
-    most_affected_part = max(set(body_parts), key=body_parts.count) if body_parts else "N/A"
-    
-    # Crear KPIs
-    kpis = dbc.Row([
-        dbc.Col([
-            dbc.Card([
-                dbc.CardBody([
-                    html.H3(total_injuries, className="text-danger"),
-                    html.P("Total Lesiones", className="card-text")
+    try:
+        # Verificar si el aggregator está disponible
+        if not hasattr(transfermarkt_manager, 'aggregator') or transfermarkt_manager.aggregator is None:
+            # Fallback: calcular estadísticas directamente como antes
+            total_injuries = len(data)
+            active_injuries = len([injury for injury in data if injury['status'] == 'En tratamiento'])
+            recovery_days = [injury['recovery_days'] for injury in data if injury['recovery_days']]
+            avg_recovery_days = sum(recovery_days) / len(recovery_days) if recovery_days else 0
+            injury_types = [injury['injury_type'] for injury in data]
+            most_common_injury = max(set(injury_types), key=injury_types.count) if injury_types else "N/A"
+            body_parts = [injury['body_part'] for injury in data]
+            most_affected_part = max(set(body_parts), key=body_parts.count) if body_parts else "N/A"
+        else:
+            # Usar el aggregator
+            stats = transfermarkt_manager.aggregator.get_statistics_summary()
+            total_injuries = stats['total_injuries']
+            active_injuries = stats['active_injuries']
+            avg_recovery_days = stats['avg_recovery_days']
+            most_common_injury = stats['most_common_injury']
+            most_affected_part = stats['most_affected_part']
+     
+        # Crear KPIs
+        kpis = dbc.Row([
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardBody([
+                        html.H3(total_injuries, className="text-danger"),
+                        html.P("Total Lesiones", className="card-text")
+                    ])
                 ])
-            ])
-        ], md=2),
-        dbc.Col([
-            dbc.Card([
-                dbc.CardBody([
-                    html.H3(active_injuries, className="text-warning"),
-                    html.P("En Tratamiento", className="card-text")
+            ], md=2),
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardBody([
+                        html.H3(active_injuries, className="text-warning"),
+                        html.P("En Tratamiento", className="card-text")
+                    ])
                 ])
-            ])
-        ], md=2),
-        dbc.Col([
-            dbc.Card([
-                dbc.CardBody([
-                    html.H3(f"{avg_recovery_days:.0f}", className="text-info"),
-                    html.P("Días Promedio Recuperación", className="card-text")
+            ], md=2),
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardBody([
+                        html.H3(f"{avg_recovery_days:.0f}", className="text-info"),
+                        html.P("Días Promedio Recuperación", className="card-text")
+                    ])
                 ])
-            ])
-        ], md=2),
-        dbc.Col([
-            dbc.Card([
-                dbc.CardBody([
-                    html.H4(most_common_injury, className="text-success", style={'font-size': '1rem'}),
-                    html.P("Lesión Más Común", className="card-text")
+            ], md=2),
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardBody([
+                        html.H4(most_common_injury, className="text-success", style={'font-size': '1rem'}),
+                        html.P("Lesión Más Común", className="card-text")
+                    ])
                 ])
-            ])
-        ], md=3),
-        dbc.Col([
-            dbc.Card([
-                dbc.CardBody([
-                    html.H4(most_affected_part, className="text-secondary", style={'font-size': '1rem'}),
-                    html.P("Zona Más Afectada", className="card-text")
+            ], md=3),
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardBody([
+                        html.H4(most_affected_part, className="text-secondary", style={'font-size': '1rem'}),
+                        html.P("Zona Más Afectada", className="card-text")
+                    ])
                 ])
-            ])
-        ], md=3)
-    ])
-    
-    return kpis
+            ], md=3)
+        ])
+        
+        return kpis
+    except Exception as e:
+        return html.Div(f"Error calculando KPIs: {str(e)}")
 
 # Callback para gráfico de distribución de lesiones
 @callback(
@@ -183,39 +188,47 @@ def update_injury_distribution(data):
     if not data:
         return html.Div("No hay datos disponibles")
     
-    # Contar tipos de lesiones
-    injury_types = [injury['injury_type'] for injury in data]
-    injury_counts = {}
-    for injury_type in injury_types:
-        injury_counts[injury_type] = injury_counts.get(injury_type, 0) + 1
+    try:
+        # Verificar si el aggregator está disponible
+        if not hasattr(transfermarkt_manager, 'aggregator') or transfermarkt_manager.aggregator is None:
+            # Fallback: calcular distribución directamente como antes
+            injury_types = [injury['injury_type'] for injury in data]
+            injury_counts = {}
+            for injury_type in injury_types:
+                injury_counts[injury_type] = injury_counts.get(injury_type, 0) + 1
+            
+            sorted_injuries = sorted(injury_counts.items(), key=lambda x: x[1], reverse=True)
+            
+            if len(sorted_injuries) > 10:
+                sorted_injuries = sorted_injuries[:10]
+                
+            types = [item[0] for item in sorted_injuries]
+            counts = [item[1] for item in sorted_injuries]
+        else:
+            # Usar el aggregator
+            distribution = transfermarkt_manager.aggregator.get_injury_distribution()
+            types = distribution['types']
+            counts = distribution['counts']
     
-    # Ordenar por frecuencia
-    sorted_injuries = sorted(injury_counts.items(), key=lambda x: x[1], reverse=True)
-    
-    # Tomar top 10
-    if len(sorted_injuries) > 10:
-        sorted_injuries = sorted_injuries[:10]
-    
-    types = [item[0] for item in sorted_injuries]
-    counts = [item[1] for item in sorted_injuries]
-    
-    # Crear gráfico de barras
-    fig = px.bar(
-        x=types,
-        y=counts,
-        title="Distribución por Tipo de Lesión",
-        labels={'x': 'Tipo de Lesión', 'y': 'Número de Casos'},
-        color=counts,
-        color_continuous_scale='Reds'
-    )
-    
-    fig.update_layout(
-        height=400,
-        showlegend=False,
-        xaxis_tickangle=-45
-    )
-    
-    return dcc.Graph(figure=fig)
+        # Crear gráfico de barras
+        fig = px.bar(
+            x=types,
+            y=counts,
+            title="Distribución por Tipo de Lesión",
+            labels={'x': 'Tipo de Lesión', 'y': 'Número de Casos'},
+            color=counts,
+            color_continuous_scale='Reds'
+        )
+        
+        fig.update_layout(
+            height=400,
+            showlegend=False,
+            xaxis_tickangle=-45
+        )
+        
+        return dcc.Graph(figure=fig)
+    except Exception as e:
+        return html.Div(f"Error generando gráfico de distribución: {str(e)}")
 
 # Callback para gráfico de tendencias temporales
 @callback(

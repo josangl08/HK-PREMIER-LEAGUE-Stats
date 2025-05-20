@@ -29,14 +29,14 @@ def create_performance_layout():
             dbc.Col([
                 dbc.Card([
                     dbc.CardHeader([
-                        html.H4("Filtros de Análisis", className="mb-0")
+                        html.H4("Analysis Filters", className="mb-0")
                     ]),
                     dbc.CardBody([
                         # Primera fila de filtros
                         dbc.Row([
                             # Selector de temporada
                             dbc.Col([
-                                dbc.Label("Temporada:", html_for="season-selector"),
+                                dbc.Label("Season:", html_for="season-selector"),
                                 dcc.Dropdown(
                                     id="season-selector",
                                     options=[],  # Se llena dinámicamente
@@ -47,7 +47,7 @@ def create_performance_layout():
                             
                             # Selector de equipo
                             dbc.Col([
-                                dbc.Label("Equipo:", html_for="team-selector"),
+                                dbc.Label("Team:", html_for="team-selector"),
                                 dcc.Dropdown(
                                     id="team-selector",
                                     placeholder="Todos los equipos...",
@@ -58,7 +58,7 @@ def create_performance_layout():
                             
                             # Selector de jugador
                             dbc.Col([
-                                dbc.Label("Jugador:", html_for="player-selector"),
+                                dbc.Label("Player:", html_for="player-selector"),
                                 dcc.Dropdown(
                                     id="player-selector",
                                     placeholder="Todos los jugadores...",
@@ -72,16 +72,16 @@ def create_performance_layout():
                         dbc.Row([
                             # Filtro por posición
                             dbc.Col([
-                                dbc.Label("Posición:", html_for="position-filter"),
+                                dbc.Label("Position:", html_for="position-filter"),
                                 dcc.Dropdown(
                                     id="position-filter",
                                     options=[
-                                        {"label": "Todas las posiciones", "value": "all"},
-                                        {"label": "Portero", "value": "Goalkeeper"},
-                                        {"label": "Defensor", "value": "Defender"},
-                                        {"label": "Mediocampista", "value": "Midfielder"},
-                                        {"label": "Extremo", "value": "Winger"},
-                                        {"label": "Delantero", "value": "Forward"}
+                                        {"label": "All Positions", "value": "all"},
+                                        {"label": "Golakeeper", "value": "Goalkeeper"},
+                                        {"label": "Defender", "value": "Defender"},
+                                        {"label": "Midfielder", "value": "Midfielder"},
+                                        {"label": "Winger", "value": "Winger"},
+                                        {"label": "Forward", "value": "Forward"}
                                     ],
                                     value="all",
                                     className="mb-3"
@@ -90,7 +90,7 @@ def create_performance_layout():
                             
                             # Filtro por rango de edad
                             dbc.Col([
-                                dbc.Label("Rango de Edad:", html_for="age-range"),
+                                dbc.Label("Age Range:", html_for="age-range"),
                                 dcc.RangeSlider(
                                     id="age-range",
                                     min=15,
@@ -104,17 +104,17 @@ def create_performance_layout():
                             
                             # Botones de acción
                             dbc.Col([
-                                dbc.Label("Acciones:", html_for="action-buttons"),
+                                dbc.Label("Options:", html_for="action-buttons"),
                                 html.Div([
                                     dbc.Button(
-                                        "🔄 Actualizar",
+                                        "🔄 Update",
                                         id="refresh-button",
                                         color="primary",
                                         size="sm",
                                         className="me-2"
                                     ),
                                     dbc.Button(
-                                        "📊 Exportar PDF",
+                                        "📊 Export PDF",
                                         id="export-pdf-button",
                                         color="success",
                                         size="sm"
@@ -203,7 +203,7 @@ def create_performance_layout():
             dbc.Col([
                 dbc.Card([
                     dbc.CardHeader([
-                        html.H5("Análisis por Posición", className="mb-0")
+                        html.H5("Analysis by positon", className="mb-0")
                     ]),
                     dbc.CardBody([
                         dcc.Loading(

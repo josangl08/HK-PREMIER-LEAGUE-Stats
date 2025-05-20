@@ -9,6 +9,9 @@ from typing import Dict, List, Optional, Union
 from datetime import datetime
 import logging
 import threading
+import json
+from pathlib import Path
+
 
 # Importar componentes
 from data.extractors.hong_kong_extractor import HongKongDataExtractor
@@ -47,6 +50,9 @@ class HongKongDataManager:
         # Datos actuales
         self.raw_data = None
         self.processed_data = None
+
+        # Cargar timestamps desde archivo
+        self._load_update_timestamps()
         
         if auto_load:
             self.refresh_data()
@@ -54,6 +60,44 @@ class HongKongDataManager:
             # Iniciar pre-carga en background después de cargar la principal
             if background_preload:
                 self.start_background_preload()
+
+    def _load_update_timestamps(self):
+        """Carga timestamps de últimas actualizaciones desde un archivo."""
+        timestamp_file = Path(self.extractor.cache_dir) / "update_timestamps.json"
+        if timestamp_file.exists():
+            try:
+                with open(timestamp_file, 'r') as f:
+                    timestamps_json = json.load(f)
+                    # Convertir strings a datetime
+                    self.last_update = {}
+                    for season, timestamp in timestamps_json.items():
+                        try:
+                            self.last_update[season] = datetime.fromisoformat(timestamp)
+                        except:
+                            # Si hay error al parsear, ignorar esta entrada
+                            pass
+                    logger.info(f"Loaded update timestamps for {len(self.last_update)} seasons")
+            except Exception as e:
+                logger.warning(f"Failed to load timestamps: {e}")
+                self.last_update = {}
+        else:
+            self.last_update = {}
+
+    def _save_update_timestamps(self):
+        """Guarda timestamps de últimas actualizaciones en un archivo."""
+        timestamp_file = Path(self.extractor.cache_dir) / "update_timestamps.json"
+        try:
+            # Convertir datetime a strings
+            timestamps = {}
+            for season, timestamp in self.last_update.items():
+                if isinstance(timestamp, datetime):
+                    timestamps[season] = timestamp.isoformat()
+
+            with open(timestamp_file, 'w') as f:
+                json.dump(timestamps, f, indent=2)
+            logger.info(f"Saved update timestamps for {len(self.last_update)} seasons")
+        except Exception as e:
+            logger.warning(f"Failed to save timestamps: {e}")                                   
             
     def refresh_data(self, season: Optional[str] = None, force_download: bool = False) -> bool:
         """
@@ -69,14 +113,20 @@ class HongKongDataManager:
         try:
             # Usar temporada especificada o actual
             target_season = season or self.current_season
+            current_season = "2024-25"  # Temporada actual
             
             logger.info(f"Refreshing data for season {target_season}")
             
-            # Verificar si ya tenemos datos en cache para esta temporada
-            if not force_download and target_season in self.data_cache:
+            # Si hay forzado manual, registrarlo
+            if force_download:
+                self.last_update[f"{target_season}_manual"] = datetime.now()
+                self._save_update_timestamps()
+            
+            # SOLO para temporadas anteriores, usar caché siempre
+            if target_season != current_season and target_season in self.data_cache:
                 cached_data = self.data_cache[target_season]
-                if cached_data['processed_data'] is not None:
-                    logger.info(f"Using cached data for season {target_season}")
+                if cached_data.get('processed_data') is not None:
+                    logger.info(f"Using cached data for previous season {target_season}")
                     
                     # Actualizar datos actuales
                     self.current_season = target_season
@@ -86,12 +136,50 @@ class HongKongDataManager:
                     
                     return True
             
+            # Para temporada actual
+            if target_season == current_season:
+                # Verificar si se debe buscar actualizaciones
+                should_check = self.should_check_for_updates(target_season) or force_download
+                
+                # Si no es momento de verificar Y tenemos datos en caché, usar caché
+                if not should_check and target_season in self.data_cache:
+                    cached_data = self.data_cache[target_season]
+                    if cached_data.get('processed_data') is not None:
+                        logger.info(f"No es momento de verificar actualizaciones, usando caché para {target_season}")
+                        
+                        # Actualizar datos actuales
+                        self.current_season = target_season
+                        self.raw_data = cached_data['raw_data']
+                        self.processed_data = cached_data['processed_data']
+                        self.aggregator = cached_data['aggregator']
+                        
+                        return True
+                
+                # Si es momento de verificar Y tenemos datos en caché, verificar actualizaciones
+                if should_check and target_season in self.data_cache:
+                    needs_update, message = self.extractor.check_for_updates(target_season)
+                    if not needs_update and not force_download:
+                        cached_data = self.data_cache[target_season]
+                        logger.info(f"No hay cambios en GitHub para {target_season}: {message}")
+                        
+                        # Actualizar datos actuales
+                        self.current_season = target_season
+                        self.raw_data = cached_data['raw_data']
+                        self.processed_data = cached_data['processed_data']
+                        self.aggregator = cached_data['aggregator']
+                        
+                        return True
+                    else:
+                        logger.info(f"Se detectaron cambios en GitHub para {target_season}: {message}")
+            
+            # Si llegamos aquí, necesitamos descargar/actualizar los datos
+            
             # 1. Extraer datos
-            logger.info("Extracting raw data...")
+            logger.info(f"Downloading data for {target_season}...")
             raw_data = self.extractor.download_season_data(target_season, force_download)
             
             if raw_data is None:
-                logger.error("Failed to extract data")
+                logger.error(f"Failed to extract data for {target_season}")
                 return False
             
             logger.info(f"Extracted {len(raw_data)} player records")
@@ -105,17 +193,6 @@ class HongKongDataManager:
                 return False
             
             logger.info(f"Processed {len(processed_data)} player records")
-            
-            # Verificar que tenemos exactamente 9 equipos de Hong Kong
-            if 'Team' in processed_data.columns:
-                hong_kong_teams = processed_data['Team'].nunique()
-                logger.info(f"Found {hong_kong_teams} teams in Hong Kong league")
-                
-                if hong_kong_teams < 8:
-                    logger.warning(f"Expected ~9 teams, but found only {hong_kong_teams}")
-                    # Listar los equipos encontrados
-                    teams_list = sorted(processed_data['Team'].unique())
-                    logger.info(f"Teams found: {teams_list}")
             
             # 3. Inicializar agregador
             logger.info("Initializing aggregator...")
@@ -142,7 +219,10 @@ class HongKongDataManager:
             self.raw_data = raw_data
             self.processed_data = processed_data
             self.aggregator = aggregator
+            
+            # Actualizar timestamp y guardar
             self.last_update[target_season] = datetime.now()
+            self._save_update_timestamps()
             
             logger.info("Data refresh completed successfully")
             return True
@@ -339,20 +419,33 @@ class HongKongDataManager:
         Returns:
             Diccionario con información del estado
         """
-        # Información de cache del extractor
-        extractor_cache_info = self.extractor.get_cache_info()
+        # Verificar fecha real del archivo para la temporada actual
+        cached_file = self.extractor._get_cached_file_path(self.current_season)
+        file_timestamp = None
+        if cached_file.exists():
+            file_timestamp = datetime.fromtimestamp(cached_file.stat().st_mtime)
         
+        # Usar la fecha del archivo como último timestamp si existe y es más reciente
+        last_update = None
+        if file_timestamp and self.current_season in self.last_update:
+            # Usar el timestamp más reciente
+            last_update = max(file_timestamp, self.last_update[self.current_season])
+        elif file_timestamp:
+            last_update = file_timestamp
+        else:
+            last_update = self.last_update.get(self.current_season)
+
         # Estado de los datos actuales
         data_status = {
             'current_season': self.current_season,
             'available_seasons': self.get_available_seasons(),
-            'last_update': self.last_update.get(self.current_season, {}).isoformat() if self.current_season in self.last_update else None,
+            'last_update': self.last_update.get(self.current_season, None),
             'raw_data_available': self.raw_data is not None,
             'processed_data_available': self.processed_data is not None,
             'aggregator_available': self.aggregator is not None,
-            'extractor_cache_info': extractor_cache_info,
-            'cached_seasons': list(self.data_cache.keys())
-        }
+            'extractor_cache_info': self.extractor.get_cache_info(),
+            'cached_seasons': list(self.data_cache.keys()) # Esto debería incluir todas las temporadas cacheadas
+    }
         
         # Estadísticas de datos si están disponibles
         if self.processed_data is not None:
@@ -383,13 +476,67 @@ class HongKongDataManager:
         target_season = season or self.current_season
         needs_update, message = self.extractor.check_for_updates(target_season)
         
+        # Para probar - descomentar esta línea:
+        # needs_update = True
+        # message = "Simulando actualización disponible para pruebas"
+
         return {
             'needs_update': needs_update,
             'message': message,
             'season': target_season,
-            'last_update': self.last_update.get(target_season, {}).isoformat() if target_season in self.last_update else None
+            'last_update': self.last_update[target_season].isoformat() if target_season in self.last_update else None
         }
     
+    def should_check_for_updates(self, season: Optional[str] = None) -> bool:
+        """
+        Determina si se debe verificar actualizaciones para una temporada.
+        Para la temporada actual, solo verificar los lunes por la mañana.
+        Para temporadas anteriores, nunca verificar.
+        
+        Args:
+            season: Temporada a verificar (por defecto la actual)
+            
+        Returns:
+            True si se debe verificar actualizaciones
+        """
+        target_season = season or self.current_season
+        current_season = "2024-25"
+        
+        # Para temporadas anteriores, nunca verificar
+        if target_season != current_season:
+            logger.info(f"No se verifican actualizaciones para temporada anterior: {target_season}")
+            return False
+        
+        # Para temporada actual, verificar solo los lunes por la mañana
+        now = datetime.now()
+        is_monday = now.weekday() == 0  # 0 = Lunes
+        is_morning = now.hour < 12  # Antes de mediodía
+        
+        # Si hay forzado manual (desde UI), siempre verificar
+        last_manual_check = self.last_update.get(f"{target_season}_manual", None)
+        is_manual_check = False
+        
+        if last_manual_check:
+            # Si ha pasado menos de 5 minutos desde la última verificación manual
+            time_since_manual = datetime.now() - last_manual_check
+            is_manual_check = time_since_manual.total_seconds() < 300  # 5 minutos
+        
+        if is_monday and is_morning:
+            # Verificar si ya se comprobó hoy
+            last_update = self.last_update.get(target_season)
+            if last_update and last_update.date() == now.date():
+                logger.info(f"Ya se verificaron actualizaciones hoy para {target_season}")
+                return False
+            
+            logger.info(f"Verificando actualizaciones para {target_season} (lunes por la mañana)")
+            return True
+        elif is_manual_check:
+            logger.info(f"Verificando actualizaciones para {target_season} (solicitud manual)")
+            return True
+        else:
+            logger.info(f"No es momento de verificar actualizaciones automáticas para {target_season}")
+            return False
+        
     def export_data(self, format: str = 'csv', level: str = 'processed', season: Optional[str] = None) -> Optional[str]:
         """
         Exporta datos en diferentes formatos.

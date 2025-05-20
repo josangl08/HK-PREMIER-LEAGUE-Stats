@@ -1,4 +1,5 @@
-from dash import Input, Output, State, callback, html, dash_table, dcc
+from dash import Input, Output, State, callback, html, dash_table, dcc, no_update
+import dash
 import dash_bootstrap_components as dbc
 from dash.dcc.express import send_bytes, send_string
 import plotly.express as px
@@ -29,12 +30,13 @@ def format_season_short(season):
     except:
         return season
     
+
 # Callback para actualizar opciones de selectores basado en temporada
 @callback(
     [Output('team-selector', 'options'),
-     Output('player-selector', 'options')],
+    Output('player-selector', 'options')],
     [Input('season-selector', 'value'),
-     Input('team-selector', 'value')],
+    Input('team-selector', 'value')],
     prevent_initial_call=False
 )
 def update_selector_options(season, selected_team):
@@ -63,16 +65,16 @@ def update_selector_options(season, selected_team):
 # Callback principal para cargar datos con filtros aplicados
 @callback(
     [Output('performance-data-store', 'data'),
-     Output('chart-data-store', 'data'),
-     Output('current-filters-store', 'data'),
-     Output('status-alerts', 'children'),
-     Output('season-selector', 'options')],  # AGREGAR ESTE OUTPUT
+    Output('chart-data-store', 'data'),
+    Output('current-filters-store', 'data'),
+    Output('status-alerts', 'children'),
+    Output('season-selector', 'options')], 
     [Input('season-selector', 'value'),
-     Input('team-selector', 'value'),
-     Input('player-selector', 'value'),
-     Input('position-filter', 'value'),
-     Input('age-range', 'value'),
-     Input('refresh-button', 'n_clicks')],
+    Input('team-selector', 'value'),
+    Input('player-selector', 'value'),
+    Input('position-filter', 'value'),
+    Input('age-range', 'value'),
+    Input('refresh-button', 'n_clicks')],
     prevent_initial_call=False
 )
 def load_performance_data(season, team, player, position_filter, age_range, n_clicks):
@@ -85,7 +87,11 @@ def load_performance_data(season, team, player, position_filter, age_range, n_cl
             {"label": format_season_short(s), "value": s} 
             for s in available_seasons
         ]
-        
+
+        # Si season es None, usar la temporada actual
+        if not season:
+            season = data_manager.current_season
+
         # Cambiar temporada si es necesario
         if season != data_manager.current_season:
             data_manager.refresh_data(season)
@@ -133,13 +139,31 @@ def load_performance_data(season, team, player, position_filter, age_range, n_cl
         # Agregar nivel de análisis a filtros
         current_filters['analysis_level'] = analysis_level
         
-        # Alert de éxito
-        status_alert = dbc.Alert(
-            f"✅ Datos cargados exitosamente - {analysis_level.title()} ({format_season_short(season)})",
-            color="success",
-            dismissable=True,
-            duration=3000
-        )
+        # Alert de éxito mejorado
+        if analysis_level == 'league':
+                status_alert = dbc.Alert(
+                    f"✅ Datos cargados exitosamente - Liga ({format_season_short(season)})",
+                    color="success",
+                    dismissable=True,
+                    duration=3000
+                )
+        elif analysis_level == 'team':
+            status_alert = dbc.Alert(
+                f"✅ Datos cargados exitosamente - Equipo: {team} ({format_season_short(season)})",
+                color="success",
+                dismissable=True,
+                duration=3000
+            )
+        elif analysis_level == 'player':
+            player_message = f"✅ Datos cargados exitosamente - Jugador: {player}"
+            if team:
+                player_message += f" ({team})"
+            status_alert = dbc.Alert(
+                player_message,
+                color="success",
+                dismissable=True,
+                duration=3000
+            )
         
         return performance_data, chart_data, current_filters, status_alert, season_options
         
@@ -163,9 +187,9 @@ def load_performance_data(season, team, player, position_filter, age_range, n_cl
 # Callback para actualizar KPIs principales
 @callback(
     [Output('kpi-title', 'children'),
-     Output('main-kpis', 'children')],
+    Output('main-kpis', 'children')],
     [Input('performance-data-store', 'data'),
-     Input('current-filters-store', 'data')]
+    Input('current-filters-store', 'data')]
 )
 def update_main_kpis(performance_data, filters):
     """Actualiza los KPIs principales según los datos."""
@@ -354,7 +378,7 @@ def update_main_kpis(performance_data, filters):
 @callback(
     Output('main-chart-container', 'children'),
     [Input('chart-data-store', 'data'),
-     Input('current-filters-store', 'data')]
+    Input('current-filters-store', 'data')]
 )
 def update_main_chart(chart_data, filters):
     """Actualiza el gráfico principal según los datos."""
@@ -445,7 +469,7 @@ def update_main_chart(chart_data, filters):
 @callback(
     Output('secondary-chart-container', 'children'),
     [Input('chart-data-store', 'data'),
-     Input('current-filters-store', 'data')]
+    Input('current-filters-store', 'data')]
 )
 def update_secondary_chart(chart_data, filters):
     """Actualiza el gráfico secundario según los datos."""
@@ -509,7 +533,7 @@ def update_secondary_chart(chart_data, filters):
 @callback(
     Output('top-performers-container', 'children'),
     [Input('performance-data-store', 'data'),
-     Input('current-filters-store', 'data')]
+    Input('current-filters-store', 'data')]
 )
 def update_top_performers(performance_data, filters):
     """Actualiza la sección de top performers - TOP 10."""
@@ -606,7 +630,7 @@ def update_top_performers(performance_data, filters):
 @callback(
     Output('position-analysis-container', 'children'),
     [Input('performance-data-store', 'data'),
-     Input('current-filters-store', 'data')]
+    Input('current-filters-store', 'data')]
 )
 def update_position_analysis(performance_data, filters):
     """Actualiza el análisis por posición."""
@@ -668,7 +692,7 @@ def update_position_analysis(performance_data, filters):
 # Callback para controlar visibilidad del gráfico de comparación
 @callback(
     [Output('comparison-card', 'style'),
-     Output('comparison-chart-title', 'children')],
+    Output('comparison-chart-title', 'children')],
     [Input('current-filters-store', 'data')],
     prevent_initial_call=True  # AGREGAR ESTO PARA EVITAR EJECUCIÓN CON DATOS VACÍOS
 )
@@ -691,7 +715,7 @@ def toggle_comparison_chart(filters):
     Output('download-performance-pdf', 'data'),
     [Input('export-pdf-button', 'n_clicks')],
     [State('performance-data-store', 'data'),
-     State('current-filters-store', 'data')],
+    State('current-filters-store', 'data')],
     prevent_initial_call=True
 )
 def export_performance_pdf(n_clicks, performance_data, filters):

@@ -13,6 +13,7 @@ from pathlib import Path
 # Importar nuestros módulos
 from data.extractors.transfermarkt_extractor import TransfermarktExtractor
 from data.processors.transfermarkt_processor import TransfermarktProcessor
+from data.aggregators.transfermarkt_aggregator import TransfermarktStatsAggregator
 
 class TransfermarktDataManager:
     """
@@ -25,7 +26,7 @@ class TransfermarktDataManager:
         
         Args:
             cache_dir: Directorio para cache de datos
-            auto_load: Si debe cargar datos automáticamente al inicializar
+            auto_load: Si debe cargar automáticamente al inicializar
         """
         
         self.extractor = TransfermarktExtractor(cache_dir)
@@ -34,6 +35,7 @@ class TransfermarktDataManager:
         # Estado interno
         self.raw_injuries = None
         self.processed_injuries = None
+        self.aggregator = None  # Agregador similar a Performance
         self.last_update = None
         
         # Configurar logging
@@ -45,6 +47,40 @@ class TransfermarktDataManager:
         
         if auto_load:
             self.refresh_data()
+    def should_update_data(self) -> bool:
+        """
+        Determina si los datos deben actualizarse basado en la programación (lunes por la mañana).
+        
+        Returns:
+            True si se debe realizar una actualización
+        """
+        # Si no hay última actualización, siempre actualizar
+        if self.last_update is None:
+            self.logger.info("No hay actualización previa, actualizando datos...")
+            return True
+        
+        # Obtener fecha y hora actual
+        now = datetime.now()
+        
+        # Verificar si es lunes
+        is_monday = now.weekday() == 0
+        
+        # Verificar si es por la mañana (antes de las 12:00)
+        is_morning = now.hour < 12
+        
+        # Verificar si ya se actualizó este lunes
+        last_update_date = self.last_update.date()
+        is_different_day = last_update_date < now.date()
+        
+        # Actualizar solo si:
+        # 1. Es lunes por la mañana
+        # 2. No se ha actualizado hoy todavía
+        should_update = is_monday and is_morning and is_different_day
+        
+        if should_update:
+            self.logger.info("Es lunes por la mañana, programando actualización automática...")
+        
+        return should_update
     
     def refresh_data(self, force_scraping: bool = False) -> bool:
         """
@@ -57,12 +93,16 @@ class TransfermarktDataManager:
             True si la operación fue exitosa
         """
         try:
-            self.logger.info("Iniciando actualización de datos de lesiones...")
+            self.logger.info("Verificando si se deben actualizar datos de lesiones...")
             
-            # 1. Verificar cache procesado primero
-            if not force_scraping and self._has_recent_processed_cache():
-                self.logger.info("Usando datos procesados desde cache")
-                return self._load_from_processed_cache()
+            # NUEVO: Solo actualizar si:
+            # 1. Es forzado manualmente
+            # 2. Es lunes por la mañana y no se ha actualizado hoy
+            if not force_scraping and not self.should_update_data():
+                # Verificar si tenemos datos procesados recientes
+                if self._has_recent_processed_cache():
+                    self.logger.info("Usando datos procesados desde cache (no es lunes o ya se actualizó hoy)")
+                    return self._load_from_processed_cache()
             
             # 2. Extraer datos crudos
             self.logger.info("Extrayendo datos desde Transfermarkt...")
@@ -92,6 +132,10 @@ class TransfermarktDataManager:
                 self.logger.info("Convirtiendo a formato dashboard...")
                 self.processed_injuries = self._convert_to_dashboard_format(df_processed)
                 
+                # Inicializar el agregador después de procesar los datos
+                if self.processed_injuries:
+                    self.aggregator = TransfermarktStatsAggregator(self.processed_injuries)
+
                 if not self.processed_injuries:
                     self.logger.error("Error convirtiendo a formato dashboard")
                     return False
