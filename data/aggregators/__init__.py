@@ -6,10 +6,12 @@ a nivel de liga, equipo y jugador.
 """
 
 from .hong_kong_aggregator import HongKongStatsAggregator
+from .transfermarkt_aggregator import TransfermarktStatsAggregator
 
 # Exportar las clases principales
 __all__ = [
     'HongKongStatsAggregator',
+    'TransfermarktStatsAggregator',
 ]
 
 # Metadatos del módulo

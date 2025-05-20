@@ -3,9 +3,13 @@ import pandas as pd
 import hashlib
 import json
 import os
+import time
 from datetime import datetime
 from typing import Dict, Optional, Tuple
 from pathlib import Path
+from dotenv import load_dotenv
+load_dotenv()
+
 
 class HongKongDataExtractor:
     """
@@ -35,6 +39,17 @@ class HongKongDataExtractor:
         
         # Cargar metadatos existentes
         self.metadata = self._load_metadata()
+        self.headers = {
+        'User-Agent': 'HongKongLeagueDataExtractor/1.0',
+        'Accept': 'application/vnd.github.v3+json'
+        }
+        # Añadir token si está disponible
+        self.github_token = os.getenv("GITHUB_TOKEN")
+        if self.github_token:
+            self.headers["Authorization"] = f"token {self.github_token}"
+            print("✅ Token de GitHub configurado correctamente")
+        else:
+            print("⚠️ No se encontró un token de GitHub. Se usarán límites de API reducidos.")
     
     def _load_metadata(self) -> Dict:
         """Carga metadatos del cache local."""
@@ -58,6 +73,7 @@ class HongKongDataExtractor:
     def _get_github_file_info(self, filename: str) -> Optional[Dict]:
         """
         Obtiene información del archivo desde la API de GitHub.
+        Versión mejorada con mejor manejo de errores y caché.
         
         Args:
             filename: Nombre del archivo CSV
@@ -65,24 +81,83 @@ class HongKongDataExtractor:
         Returns:
             Diccionario con información del archivo o None si hay error
         """
+        # Verificar si tenemos esta información en caché
+        cache_key = f"file_info_{filename}"
+        cached_info_file = Path(self.cache_dir) / f"{cache_key}.json"
+        
+        # Usar caché si existe y no tiene más de 24 horas
+        if cached_info_file.exists():
+            try:
+                file_age = datetime.now() - datetime.fromtimestamp(cached_info_file.stat().st_mtime)
+                if file_age.total_seconds() < 24 * 3600:  # Menos de 24 horas
+                    with open(cached_info_file, 'r') as f:
+                        return json.load(f)
+            except Exception:
+                pass  # Si hay error leyendo el caché, intentar API
+        
         try:
             api_url = f"{self.github_api_base}/{filename}"
-            response = requests.get(api_url, timeout=10)
             
-            if response.status_code == 200:
-                file_info = response.json()
-                return {
-                    'sha': file_info.get('sha'),
-                    'size': file_info.get('size'),
-                    'download_url': file_info.get('download_url'),
-                    'last_modified': file_info.get('git_url')  # Podríamos obtener más info del commit
-                }
-            else:
-                print(f"Error accessing GitHub API: {response.status_code}")
-                return None
-                
-        except requests.RequestException as e:
-            print(f"Error connecting to GitHub API: {e}")
+            # Añadir encabezado User-Agent para evitar algunos bloqueos
+            headers = self.headers.copy()
+            headers['User-Agent'] = 'HongKongLeagueDataExtractor/1.0'
+            
+            # Implementar retroceso exponencial
+            max_retries = 3
+            retry_delay = 2  # segundos
+            
+            for retry in range(max_retries):
+                try:
+                    if retry > 0:
+                        print(f"Intento {retry+1} de {max_retries} para acceder a GitHub API...")
+                        time.sleep(retry_delay * (2**retry))  # Retroceso exponencial
+                    
+                    response = requests.get(api_url, headers=headers, timeout=10)
+                    
+                    if response.status_code == 200:
+                        file_info = response.json()
+                        result = {
+                            'sha': file_info.get('sha'),
+                            'size': file_info.get('size'),
+                            'download_url': file_info.get('download_url'),
+                            'last_modified': file_info.get('git_url')
+                        }
+                        
+                        # Guardar en caché
+                        with open(cached_info_file, 'w') as f:
+                            json.dump(result, f)
+                        
+                        return result
+                    elif response.status_code == 403:
+                        rate_limit_remaining = response.headers.get('X-RateLimit-Remaining')
+                        if rate_limit_remaining and int(rate_limit_remaining) == 0:
+                            reset_time = int(response.headers.get('X-RateLimit-Reset', 0))
+                            reset_datetime = datetime.fromtimestamp(reset_time)
+                            wait_time = (reset_datetime - datetime.now()).total_seconds()
+                            print(f"Rate limit excedido. Se reiniciará en {wait_time/60:.1f} minutos")
+                            break  # No reintentar si es un problema de límite de tasa
+                        else:
+                            print(f"Error de acceso a GitHub API: 403 - Acceso denegado")
+                    else:
+                        print(f"Error accediendo a GitHub API: {response.status_code}")
+                except requests.RequestException as e:
+                    if retry == max_retries - 1:  # Último intento
+                        print(f"Error conectando a GitHub API: {e}")
+                    # Si no es el último intento, simplemente continuará con el siguiente
+            
+            # Si llegamos aquí, todos los intentos fallaron. Usar caché antiguo si existe
+            if cached_info_file.exists():
+                try:
+                    with open(cached_info_file, 'r') as f:
+                        print("Usando información en caché aunque sea antigua")
+                        return json.load(f)
+                except Exception:
+                    pass
+                    
+            return None
+                    
+        except Exception as e:
+            print(f"Error inesperado accediendo a GitHub API: {e}")
             return None
     
     def _download_csv_content(self, filename: str) -> Optional[str]:
@@ -120,6 +195,10 @@ class HongKongDataExtractor:
         Returns:
             Tupla (needs_update: bool, message: str)
         """
+        current_season = "2024-25"
+        if season != current_season:
+            return False, f"Temporada {season} archivada (no se actualizan temporadas anteriores)"
+        
         if season not in self.available_seasons:
             return False, f"Temporada {season} no disponible"
         
