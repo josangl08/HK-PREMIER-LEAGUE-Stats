@@ -82,7 +82,6 @@ class TransfermarktProcessor:
             'ingle': 'Cadera',
             'rodilla': 'Rodilla',
             'menisco': 'Rodilla',
-            'ligamento': 'Ligamentos',
             'cruzado': 'rodilla',
             'isquiotibiales': 'Isquiotibiales',
             'cuádriceps': 'Cuádriceps',
@@ -90,9 +89,10 @@ class TransfermarktProcessor:
             'perone': 'Perone',
             'gemelo': 'Gemelo',
             'pantorrilla': 'Gemelo',
-            'tendón': 'Tendones',
             'tobillo': 'Tobillo',
             'pie': 'Pie',
+            'ligamento': 'Ligamentos',
+            'tendón': 'Tendones',
             
         }
     
@@ -163,7 +163,7 @@ class TransfermarktProcessor:
     
     def _process_dates_improved(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Procesa las fechas de lesiones - VERSIÓN FINAL MEJORADA.
+        Procesa las fechas de lesiones
         Maneja diferentes formatos de fecha y casos especiales.
         """
         self.logger.info("Procesando fechas de lesiones...")
