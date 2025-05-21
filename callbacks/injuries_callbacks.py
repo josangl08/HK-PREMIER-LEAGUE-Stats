@@ -3,11 +3,12 @@ import dash_bootstrap_components as dbc
 import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
-import numpy as np
 from datetime import datetime, timedelta
 from dash.exceptions import PreventUpdate
 import logging
+import base64
 
+from utils.pdf_generator import SportsPDFGenerator
 # Importar nuestro nuevo gestor de datos
 from data.transfermarkt_data_manager import TransfermarktDataManager
 from data.aggregators.transfermarkt_aggregator import TransfermarktStatsAggregator
@@ -97,37 +98,53 @@ def load_injury_data(analysis_type, team, period, n_clicks):
     logging.info(f"Datos filtrados: {len(filtered_data)} lesiones de {len(all_injuries)} total")
     return filtered_data, current_filters
 
-# Callback para actualizar KPIs principales
 @callback(
     Output('injury-main-kpis', 'children'),
-    [Input('injury-data-store', 'data')]
+    [Input('injury-data-store', 'data'),
+    Input('injury-team-selector', 'value')]  # Añadir el selector de equipo como input
 )
-def update_injury_kpis(data):
+def update_injury_kpis(data, selected_team):
     """Actualiza los KPIs principales del dashboard de lesiones."""
     
     if not data:
         return html.Div("No hay datos disponibles")
     
     try:
+        # Filtrar datos por equipo si está seleccionado
+        filtered_data = data
+        if selected_team:
+            filtered_data = [injury for injury in data if injury['team'] == selected_team]
+        
         # Verificar si el aggregator está disponible
         if not hasattr(transfermarkt_manager, 'aggregator') or transfermarkt_manager.aggregator is None:
-            # Fallback: calcular estadísticas directamente como antes
-            total_injuries = len(data)
-            active_injuries = len([injury for injury in data if injury['status'] == 'En tratamiento'])
-            recovery_days = [injury['recovery_days'] for injury in data if injury['recovery_days']]
+            # Fallback: calcular estadísticas directamente
+            total_injuries = len(filtered_data)
+            active_injuries = len([injury for injury in filtered_data if injury['status'] == 'En tratamiento'])
+            recovery_days = [injury['recovery_days'] for injury in filtered_data if injury['recovery_days']]
             avg_recovery_days = sum(recovery_days) / len(recovery_days) if recovery_days else 0
-            injury_types = [injury['injury_type'] for injury in data]
+            injury_types = [injury['injury_type'] for injury in filtered_data]
             most_common_injury = max(set(injury_types), key=injury_types.count) if injury_types else "N/A"
-            body_parts = [injury['body_part'] for injury in data]
+            body_parts = [injury['body_part'] for injury in filtered_data]
             most_affected_part = max(set(body_parts), key=body_parts.count) if body_parts else "N/A"
         else:
-            # Usar el aggregator
-            stats = transfermarkt_manager.aggregator.get_statistics_summary()
-            total_injuries = stats['total_injuries']
-            active_injuries = stats['active_injuries']
-            avg_recovery_days = stats['avg_recovery_days']
-            most_common_injury = stats['most_common_injury']
-            most_affected_part = stats['most_affected_part']
+            # Usar el aggregator con datos filtrados
+            if selected_team:
+                stats = transfermarkt_manager.aggregator.get_filtered_injuries(team=selected_team)
+                total_injuries = len(stats)
+                active_injuries = len([injury for injury in stats if injury['status'] == 'En tratamiento'])
+                recovery_days = [injury['recovery_days'] for injury in stats if injury['recovery_days']]
+                avg_recovery_days = sum(recovery_days) / len(recovery_days) if recovery_days else 0
+                injury_types = [injury['injury_type'] for injury in stats]
+                most_common_injury = max(set(injury_types), key=injury_types.count) if injury_types else "N/A"
+                body_parts = [injury['body_part'] for injury in stats]
+                most_affected_part = max(set(body_parts), key=body_parts.count) if body_parts else "N/A"
+            else:
+                stats = transfermarkt_manager.aggregator.get_statistics_summary()
+                total_injuries = stats['total_injuries']
+                active_injuries = stats['active_injuries']
+                avg_recovery_days = stats['avg_recovery_days']
+                most_common_injury = stats['most_common_injury']
+                most_affected_part = stats['most_affected_part']
      
         # Crear KPIs
         kpis = dbc.Row([
@@ -180,19 +197,25 @@ def update_injury_kpis(data):
 # Callback para gráfico de distribución de lesiones
 @callback(
     Output('injury-distribution-chart', 'children'),
-    [Input('injury-data-store', 'data')]
+    [Input('injury-data-store', 'data'),
+    Input('injury-team-selector', 'value')]  # Añadir el selector de equipo como input
 )
-def update_injury_distribution(data):
+def update_injury_distribution(data, selected_team):
     """Actualiza el gráfico de distribución de lesiones."""
     
     if not data:
         return html.Div("No hay datos disponibles")
     
     try:
+        # Filtrar datos por equipo si está seleccionado
+        filtered_data = data
+        if selected_team:
+            filtered_data = [injury for injury in data if injury['team'] == selected_team]
+        
         # Verificar si el aggregator está disponible
         if not hasattr(transfermarkt_manager, 'aggregator') or transfermarkt_manager.aggregator is None:
-            # Fallback: calcular distribución directamente como antes
-            injury_types = [injury['injury_type'] for injury in data]
+            # Fallback: calcular distribución directamente
+            injury_types = [injury['injury_type'] for injury in filtered_data]
             injury_counts = {}
             for injury_type in injury_types:
                 injury_counts[injury_type] = injury_counts.get(injury_type, 0) + 1
@@ -205,10 +228,18 @@ def update_injury_distribution(data):
             types = [item[0] for item in sorted_injuries]
             counts = [item[1] for item in sorted_injuries]
         else:
-            # Usar el aggregator
-            distribution = transfermarkt_manager.aggregator.get_injury_distribution()
-            types = distribution['types']
-            counts = distribution['counts']
+            # Usar el aggregator con datos filtrados
+            if selected_team:
+                # Usar chart_data con filtro de equipo
+                chart_data = transfermarkt_manager.aggregator.get_chart_data('distribution', selected_team)
+                distribution = chart_data
+                types = distribution.get('types', [])
+                counts = distribution.get('counts', [])
+            else:
+                # Usar aggregator para datos generales
+                distribution = transfermarkt_manager.aggregator.get_injury_distribution()
+                types = distribution['types']
+                counts = distribution['counts']
     
         # Crear gráfico de barras
         fig = px.bar(
@@ -386,9 +417,10 @@ def update_body_parts_analysis(data):
 # Callback para análisis de riesgo
 @callback(
     Output('injury-risk-analysis', 'children'),
-    [Input('injury-data-store', 'data')]
+    [Input('injury-data-store', 'data'),
+    Input('injury-team-selector', 'value')]  # Añadir el selector de equipo como input
 )
-def update_injury_risk_analysis(data):
+def update_injury_risk_analysis(data, selected_team):
     """Actualiza el análisis de riesgo de lesiones."""
     
     if not data:
@@ -397,33 +429,88 @@ def update_injury_risk_analysis(data):
     # Análisis de riesgo por equipo
     team_stats = {}
     
-    for injury in data:
-        team = injury['team']
+    # Filtrar datos por equipo si está seleccionado
+    filtered_data = data
+    if selected_team:
+        filtered_data = [injury for injury in data if injury['team'] == selected_team]
+    
+    # Si tenemos un equipo seleccionado, mostrar análisis detallado de ese equipo
+    if selected_team:
+        team_injuries = [injury for injury in data if injury['team'] == selected_team]
+        
+        if not team_injuries:
+            return html.Div(f"No hay datos de lesiones para el equipo {selected_team}")
+        
+        # Estadísticas para el equipo seleccionado
+        stats = {
+            'total_injuries': len(team_injuries),
+            'severe_injuries': len([i for i in team_injuries if i.get('severity') == 'Grave']),
+            'recovery_days': [i.get('recovery_days', 0) for i in team_injuries if i.get('recovery_days')],
+            'active_injuries': len([i for i in team_injuries if i.get('status') == 'En tratamiento'])
+        }
+        
+        avg_recovery = sum(stats['recovery_days']) / len(stats['recovery_days']) if stats['recovery_days'] else 0
+        
+        # Crear gráfico para un solo equipo
+        fig = go.Figure()
+        
+        # Añadir barras para diferentes métricas
+        metrics = ['Total Lesiones', 'Lesiones Graves', 'Lesiones Activas']
+        values = [stats['total_injuries'], stats['severe_injuries'], stats['active_injuries']]
+        
+        fig.add_trace(go.Bar(
+            x=values,
+            y=metrics,
+            orientation='h',
+            marker_color=['#e74c3c', '#c0392b', '#e67e22'],
+            text=values,
+            textposition='auto'
+        ))
+        
+        fig.update_layout(
+            title=f"Análisis de Lesiones - {selected_team}",
+            height=400,
+            xaxis_title="Número de Lesiones",
+            margin=dict(l=150)
+        )
+        
+        return dcc.Graph(figure=fig)
+    
+    # Si no hay equipo seleccionado, mostrar el análisis de riesgo normal
+    for injury in filtered_data:
+        team = injury.get('team', 'Desconocido')
+        
         if team not in team_stats:
             team_stats[team] = {
                 'total_injuries': 0,
                 'severe_injuries': 0,
-                'avg_recovery_days': [],
+                'recovery_days': [],
                 'active_injuries': 0
             }
         
+        # Incrementar contadores
         team_stats[team]['total_injuries'] += 1
         
-        if injury['severity'] == 'Grave':
+        # Verificar severidad
+        if injury.get('severity') == 'Grave':
             team_stats[team]['severe_injuries'] += 1
         
-        if injury['recovery_days']:
-            team_stats[team]['avg_recovery_days'].append(injury['recovery_days'])
+        # Agregar días de recuperación
+        if injury.get('recovery_days'):
+            team_stats[team]['recovery_days'].append(injury.get('recovery_days', 0))
         
-        if injury['status'] == 'En tratamiento':
+        # Verificar lesiones activas
+        if injury.get('status') == 'En tratamiento':
             team_stats[team]['active_injuries'] += 1
     
     # Calcular índice de riesgo
     team_risk = []
+    
     for team, stats in team_stats.items():
-        avg_recovery = sum(stats['avg_recovery_days']) / len(stats['avg_recovery_days']) if stats['avg_recovery_days'] else 0
+        avg_recovery = (sum(stats['recovery_days']) / len(stats['recovery_days']) 
+            if stats['recovery_days'] else 0)
         
-        # Fórmula de riesgo basada en múltiples factores
+        # Fórmula de riesgo: considera múltiples factores con diferentes pesos
         risk_score = (
             stats['total_injuries'] * 0.4 +
             stats['severe_injuries'] * 2 +
@@ -443,7 +530,8 @@ def update_injury_risk_analysis(data):
     team_risk.sort(key=lambda x: x['risk_score'], reverse=True)
     
     # Tomar top 8
-    team_risk = team_risk[:8]
+    if len(team_risk) > 8:
+        team_risk = team_risk[:8]
     
     # Crear gráfico de barras horizontales
     teams = [item['team'] for item in team_risk]
@@ -484,7 +572,6 @@ def export_injury_report(n_clicks, data, filters):
         raise PreventUpdate
     
     try:
-        from utils.pdf_generator import SportsPDFGenerator
         
         # Calcular estadísticas de resumen
         total_injuries = len(data)
@@ -515,11 +602,16 @@ def export_injury_report(n_clicks, data, filters):
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         filename = f"reporte_lesiones_transfermarkt_{timestamp}.pdf"
         
-        return {
-            'content': pdf_buffer.getvalue(),
-            'filename': filename,
-            'type': 'application/pdf'
-        }
+        # Convertir los bytes del PDF a base64 para la descarga
+        encoded_pdf = base64.b64encode(pdf_buffer.getvalue()).decode('utf-8')
+        
+        # Retornar los datos en formato descargable para Dash
+        return dict(
+            content=encoded_pdf,
+            filename=filename,
+            type='application/pdf',
+            base64=True  # Indicar que el contenido está en base64
+        )
         
     except Exception as e:
         # En caso de error, exportar como CSV
@@ -538,8 +630,8 @@ def export_injury_report(n_clicks, data, filters):
         # Convertir DataFrame a CSV
         csv_string = filter_info + df.to_csv(index=False)
         
-        return {
-            'content': csv_string,
-            'filename': filename,
-            'type': 'text/csv'
-        }
+        return dict(
+            content=csv_string,
+            filename=filename,
+            type='text/csv'
+        )
