@@ -42,7 +42,8 @@ def create_injuries_layout():
                                         {"label": "⚽ Lesiones por Equipo", "value": "team"}
                                     ],
                                     value="general",
-                                    className="mb-3"
+                                    className="mb-3",
+                                    disabled=True 
                                 )
                             ], md=3),
                             
