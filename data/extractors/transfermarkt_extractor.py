@@ -116,7 +116,7 @@ class TransfermarktExtractor:
     
     def extract_teams(self, force_refresh: bool = False) -> List[Dict]:
         """
-        Extrae la lista de equipos de la liga - VERSIÓN CORREGIDA.
+        Extrae la lista de equipos de la liga
         
         Args:
             force_refresh: Forzar actualización ignorando cache
@@ -152,13 +152,13 @@ class TransfermarktExtractor:
             # Buscar tabla de clasificación o equipos
             table = soup.find('table', {'class': 'items'})
             if table and isinstance(table, Tag):
-                rows = table.find_all('tr')
+                rows = table.find_all('tr') if isinstance(table, Tag) else []
                 for row in rows:
                     if not isinstance(row, Tag):
                         continue
                     
                     # Buscar células con enlaces de equipos
-                    cells = row.find_all('td')
+                    cells = row.find_all('td') if isinstance(row, Tag) else []
                     for cell in cells:
                         links = cell.find_all('a', href=re.compile(r'/[^/]+/startseite/verein/\d+')) if isinstance(cell, Tag) else []
                         for link in links:
@@ -277,46 +277,92 @@ class TransfermarktExtractor:
         injuries = []
         
         try:
-            # Buscar tabla de lesiones
-            table = soup.find('table', {'class': 'items'})
-            if not table:
-                self.logger.warning(f"No se encontró tabla de lesiones para {team['name']}")
+            self.logger.info(f"URL de lesiones: {team['injuries_url']}")
+            
+            # Buscar la sección específica de lesiones
+            # Primero, buscar todos los encabezados de sección
+            section_headers = soup.find_all('h2', {'class': 'content-box-headline'})
+            
+            # Buscar el encabezado de lesiones
+            injuries_section = None
+            for header in section_headers:
+                if 'Sanciones y lesiones' in header.get_text(strip=True):
+                    # Encontrar la sección completa (div.box que contiene este encabezado)
+                    injuries_section = header.find_parent('div', {'class': 'box'})
+                    break
+            
+            if not injuries_section:
+                self.logger.warning(f"No se encontró sección de lesiones para {team['name']}")
                 return []
             
-            # Buscar filas de lesiones
-            tbody = table.find('tbody') if isinstance(table, Tag) else None
-            rows = []
-            if isinstance(tbody, Tag):
-                rows = tbody.find_all('tr')
-            elif isinstance(table, Tag):
-                rows = table.find_all('tr')
+            # Verificar si hay mensaje de "No hay datos"
+            empty_message = injuries_section.find('span', {'class': 'empty'}) if isinstance(injuries_section, Tag) else None
+            if empty_message and "No hay datos" in empty_message.get_text(strip=True):
+                self.logger.info(f"No hay lesiones para {team['name']}")
+                return []
             
+            # Buscar tabla de lesiones dentro de la sección
+            injury_table = injuries_section.find('table', {'class': 'items'}) if isinstance(injuries_section, Tag) else None
+            if not injury_table:
+                self.logger.warning(f"No se encontró tabla de lesiones para {team['name']}")
+                return []
+                
+            # Buscar filas de lesiones
+            rows = injury_table.find_all('tr') if isinstance(injury_table, Tag) else []
+            self.logger.info(f"Filas en la tabla principal: {len(rows)}")
+            
+            # Verificar si hay encabezado
+            header_row = None
             for row in rows:
-                if not isinstance(row, Tag):
+                if isinstance(row, Tag) and row.find('th') and len(row.find_all('th')) > 5:
+                    header_row = row
+                    break
+            
+            # Si no hay encabezado válido, puede no ser la tabla correcta
+            if not header_row:
+                self.logger.warning(f"No se encontró encabezado en la tabla para {team['name']}")
+                return []
+            
+            valid_rows = []
+            # Procesar filas que no son encabezados
+            for row in rows:
+                if row == header_row or (isinstance(row, Tag) and row.find('th')):
                     continue
                     
-                # Saltar filas de header y separadores
-                if (row.find('th') or 
-                    row.find('td', {'class': 'extrarow'}) or
-                    'thead' in str(row.get('class', None))):
+                # Verificar si es la fila de "Lesiones" (generalmente tiene class="extrarow")
+                if isinstance(row, Tag) and row.find('td', {'class': 'extrarow'}) and "Lesiones" in row.get_text(strip=True):
                     continue
                 
-                cells = row.find_all('td')
-                if len(cells) < 6:  # Mínimo de columnas esperadas
-                    continue
-                
+                # Obtener todas las celdas
+                cells = row.find_all('td') if isinstance(row, Tag) else []
+                if len(cells) >= 7:  # Asegurar que hay suficientes celdas
+                    # Verificar que la primera celda tenga una tabla anidada con un jugador
+                    first_cell = cells[0]
+                    player_table = first_cell.find('table', {'class': 'inline-table'}) if isinstance(first_cell, Tag) else None
+                    if isinstance(player_table, Tag) and player_table.find('a'):
+                        valid_rows.append(cells)
+                        # Log para depuración
+                        if len(valid_rows) == 1:
+                            self.logger.info(f"Primera fila de datos - Celdas: {len(cells)}")
+                            for i, cell in enumerate(cells):
+                                self.logger.info(f"  Celda {i}: {cell.get_text(strip=True)}")
+            
+            self.logger.info(f"Total de filas encontradas: {len(valid_rows)}")
+            
+            # Procesar filas válidas
+            for cells in valid_rows:
                 try:
                     # Filter to ensure only Tag objects are passed
                     valid_cells = [cell for cell in cells if isinstance(cell, Tag)]
                     injury = self._parse_injury_row(valid_cells, team)
                     if injury:
                         injuries.append(injury)
-                        self.logger.debug(f"Lesión extraída: {injury['player_name']} - {injury['injury_type']}")
+                        self.logger.info(f"Lesión extraída: {injury['player_name']} - {injury['injury_type']}")
                 
                 except Exception as e:
                     self.logger.warning(f"Error procesando fila de lesión: {e}")
                     continue
-        
+            
         except Exception as e:
             self.logger.error(f"Error extrayendo lesiones de {team['name']}: {e}")
         
@@ -335,50 +381,55 @@ class TransfermarktExtractor:
             Diccionario con información de la lesión o None
         """
         try:
-            # Extraer nombre del jugador (primera celda)
+            # Extraer nombre del jugador y posición de la primera celda (columna 0)
             player_cell = cells[0]
             player_name = 'Desconocido'
             position = 'Desconocida'
             
             if isinstance(player_cell, Tag):
-                # Buscar nombre en enlace
-                player_link = player_cell.find('a')
-                if player_link and isinstance(player_link, Tag):
-                    player_name = (player_link.get('title') or 
-                        player_link.get_text(strip=True) or 
-                        'Desconocido')
-                
-                # Buscar posición en tabla interna
-                inline_table = player_cell.find('table')
+                # Buscar tabla anidada que contiene el nombre del jugador y posición
+                inline_table = player_cell.find('table', {'class': 'inline-table'})
                 if inline_table and isinstance(inline_table, Tag):
-                    rows = inline_table.find_all('tr')
-                    if len(rows) > 1:
-                        position_row = rows[1]
-                        if isinstance(position_row, Tag):
-                            position_cell = position_row.find('td')
-                            if position_cell:
-                                position = position_cell.get_text(strip=True)
+                    # Buscar el enlace del jugador
+                    player_link = inline_table.find('a')
+                    if player_link and isinstance(player_link, Tag):
+                        player_name = player_link.get_text(strip=True) or 'Desconocido'
+                    
+                    # Encontrar la celda de posición (segunda fila, única celda)
+                    position_row = inline_table.find_all('tr')
+                    if len(position_row) > 1:
+                        second_row = position_row[1]
+                        if isinstance(second_row, Tag):
+                            position_cell = second_row.find('td')
+                        if position_cell:
+                            position = position_cell.get_text(strip=True) or 'Desconocida'
             
-            # Extraer otros campos con manejo de errores
-            field_map = {
-                1: 'age',
-                2: 'injury_type', 
-                3: 'date_from',
-                4: 'date_until',
-                5: 'days',
-                6: 'market_value'
-            }
+            # Extraer edad (columna 4)
+            age = self._parse_age(cells[4].get_text(strip=True)) if len(cells) > 4 else 0
             
-            extracted_data = {}
-            for i, field in field_map.items():
-                if i < len(cells):
-                    if field == 'days':
-                        # Para días, buscar en enlaces también
-                        extracted_data[field] = self._extract_number_from_cell(cells[i])
-                    else:
-                        extracted_data[field] = self._extract_text(cells[i])
+            # Extraer motivo/tipo de lesión (columna 5)
+            injury_type = cells[5].get_text(strip=True) if len(cells) > 5 else 'Desconocida'
+            
+            # Extraer fecha desde (columna 6)
+            date_from = cells[6].get_text(strip=True) if len(cells) > 6 else ''
+            
+            # Extraer fecha hasta (columna 7)
+            date_until = cells[7].get_text(strip=True) if len(cells) > 7 else ''
+            
+            # Extraer encuentros no jugados (columna 8) - está dentro de un enlace
+            matches_missed = 0
+            if len(cells) > 8:
+                missed_link = cells[8].find('a')
+                if missed_link and isinstance(missed_link, Tag):
+                    matches_missed = self._parse_number(missed_link.get_text(strip=True))
                 else:
-                    extracted_data[field] = ''
+                    matches_missed = self._parse_number(cells[8].get_text(strip=True))
+            
+            # Extraer días (columna 9)
+            days = self._parse_number(cells[9].get_text(strip=True)) if len(cells) > 9 else 0
+            
+            # Extraer valor de mercado (columna 10)
+            market_value = self._parse_market_value(cells[10].get_text(strip=True)) if len(cells) > 10 else 0
             
             # Crear registro de lesión
             injury = {
@@ -386,18 +437,15 @@ class TransfermarktExtractor:
                 'team': team['name'],
                 'team_id': team['id'],
                 'position': str(position).strip(),
-                'age': self._parse_age(extracted_data.get('age', '')),
-                'injury_type': self._clean_injury_type(extracted_data.get('injury_type', '')),
-                'date_from': extracted_data.get('date_from', ''),
-                'date_until': extracted_data.get('date_until', ''),
-                'days': self._parse_number(extracted_data.get('days', '')),
-                'market_value': self._parse_market_value(extracted_data.get('market_value', '')),
+                'age': age,
+                'injury_type': injury_type,
+                'date_from': date_from,
+                'date_until': date_until,
+                'matches_missed': matches_missed,
+                'days': days,
+                'market_value': market_value,
                 'extracted_at': datetime.now().isoformat()
             }
-            
-            # Validar datos mínimos
-            if injury['player_name'] == 'Desconocido' and not injury['injury_type']:
-                return None
             
             return injury
             
@@ -516,7 +564,7 @@ class TransfermarktExtractor:
     
     def extract_all_injuries(self, force_refresh: bool = False) -> List[Dict]:
         """
-        Extrae lesiones de todos los equipos de la liga - VERSIÓN MEJORADA.
+        Extrae lesiones de todos los equipos de la liga
         
         Args:
             force_refresh: Forzar actualización ignorando cache
