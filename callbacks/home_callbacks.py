@@ -1,289 +1,214 @@
+"""
+Callbacks para la página home.
+Versión simplificada y modularizada.
+"""
 from dash import Input, Output, callback
 import dash_bootstrap_components as dbc
 from dash import html
 from data import HongKongDataManager
+from data.transfermarkt_data_manager import TransfermarktDataManager
+from utils.common import format_season_short, format_datetime, get_current_season
+from utils.home_helpers import (
+    create_performance_section,
+    create_performance_status_section,
+    create_injuries_section,
+    create_overall_status_section,
+    create_update_results_section
+)
 import logging
-from datetime import datetime, timedelta
-import json
-from pathlib import Path
+from datetime import datetime
+import time
 
 # Configurar logging
 logger = logging.getLogger(__name__)
 
-# Initialize global data_manager
+# Initialize global data_managers
 data_manager = None
+transfermarkt_manager = None
 
-def format_season_short(season):
-    """Convierte '2024-25' a '24/25'"""
-    if not season or '-' not in season:
-        return season
+def initialize_managers():
+    """
+    Inicializa los managers de datos si no existen.
+    
+    Returns:
+        tuple: (data_manager, transfermarkt_manager)
+    """
+    global data_manager, transfermarkt_manager
     
     try:
-        year1, year2 = season.split('-')
-        short_year1 = year1[-2:]  # Últimos 2 dígitos
-        short_year2 = year2[-2:]  # Últimos 2 dígitos
-        return f"{short_year1}/{short_year2}"
-    except:
-        return season
+        if data_manager is None:
+            logger.info("Inicializando HongKongDataManager...")
+            data_manager = HongKongDataManager(auto_load=True)
+        
+        if transfermarkt_manager is None:
+            logger.info("Inicializando TransfermarktDataManager...")
+            transfermarkt_manager = TransfermarktDataManager(auto_load=True)
+            
+        return data_manager, transfermarkt_manager
+        
+    except Exception as e:
+        logger.error(f"Error inicializando managers: {e}")
+        raise
 
-# Callback para mostrar estado del sistema
+def update_performance_data(data_manager, force_update=False):
+    """
+    Actualiza los datos de performance.
+    
+    Args:
+        data_manager: Manager de datos de performance
+        force_update (bool): Si forzar la actualización
+        
+    Returns:
+        tuple: (success, error_message)
+    """
+    try:
+        if force_update:
+            current_season = get_current_season()
+            data_manager.last_update[f"{current_season}_manual"] = datetime.now()
+            data_manager._save_update_timestamps()
+        
+        success = data_manager.refresh_data(force_download=force_update)
+        
+        if success:
+            logger.info("✅ Datos de performance actualizados exitosamente")
+            return True, None
+        else:
+            error_msg = "Error actualizando datos de performance"
+            logger.error(error_msg)
+            return False, error_msg
+            
+    except Exception as e:
+        error_msg = f"Error en performance: {str(e)}"
+        logger.error(error_msg)
+        return False, error_msg
+
+def update_injuries_data(transfermarkt_manager, force_update=False):
+    """
+    Actualiza los datos de lesiones.
+    
+    Args:
+        transfermarkt_manager: Manager de datos de lesiones
+        force_update (bool): Si forzar la actualización
+        
+    Returns:
+        tuple: (success, error_message)
+    """
+    try:
+        success = transfermarkt_manager.refresh_data(force_scraping=force_update)
+        
+        if success:
+            logger.info("✅ Datos de lesiones actualizados exitosamente")
+            return True, None
+        else:
+            error_msg = "Error actualizando datos de lesiones"
+            logger.error(error_msg)
+            return False, error_msg
+            
+    except Exception as e:
+        error_msg = f"Error en lesiones: {str(e)}"
+        logger.error(error_msg)
+        return False, error_msg
+
 @callback(
     Output('system-status-info', 'children'),
     [Input('refresh-data-button', 'n_clicks'),
-    Input('url', 'pathname')],  # Añadir input del URL para ejecutar al cargar
+     Input('url', 'pathname')],
     prevent_initial_call=False
 )
 def update_system_status(n_clicks, pathname):
     """
-    Callback que actualiza la información del estado del sistema.
-    Versión mejorada con badges para todas las temporadas y mejor manejo de estados.
+    Callback principal que actualiza la información del estado del sistema.
+    Versión simplificada usando funciones auxiliares.
     """
-    # Ignorar el pathname, solo lo usamos para que el callback se ejecute al cargar
+    # Solo ejecutar en la página home
     if pathname != "/":
-        return None  # No hacer nada si no estamos en home
-    
-    # Variable global para mantener el data_manager entre llamadas
-    global data_manager
+        return None
     
     try:
-        # Inicializar solo si no existe
-        if 'data_manager' not in globals() or data_manager is None:
-            data_manager = HongKongDataManager(auto_load=True, background_preload=True)
-
-        # Si se hizo click en actualizar, forzar refresco
+        # Mostrar loading si se está actualizando
         if n_clicks and n_clicks > 0:
-            # Marcar como solicitud manual (internamente se guardará este timestamp)
-            data_manager.last_update[f"{data_manager.current_season}_manual"] = datetime.now()
-            data_manager._save_update_timestamps()
-            data_manager.refresh_data(force_download=True)
+            time.sleep(1.0)  # Pausa para mostrar el spinner
         
-        # Forzar explícitamente la temporada 2024-25
-        if data_manager.current_season != "2024-25":
-            # Guardar la temporada actual para restaurarla después
-            current = data_manager.current_season
+        # Inicializar managers
+        dm, tm = initialize_managers()
+        
+        # Variables para tracking de actualizaciones
+        performance_updated = False
+        injuries_updated = False
+        update_errors = []
+        
+        # Si se hizo click en actualizar, procesar ambos sistemas
+        if n_clicks and n_clicks > 0:
+            logger.info("Actualizando datos manualmente desde el botón...")
             
-            # Cargar datos de 2024-25
-            data_manager.refresh_data("2024-25", force_download=False)
+            # Actualizar performance
+            perf_success, perf_error = update_performance_data(dm, force_update=True)
+            if perf_success:
+                performance_updated = True
+            elif perf_error:
+                update_errors.append(perf_error)
             
-            # Obtener estado con los datos correctos
-            status = data_manager.get_data_status()
+            # Actualizar injuries
+            inj_success, inj_error = update_injuries_data(tm, force_update=True)
+            if inj_success:
+                injuries_updated = True
+            elif inj_error:
+                update_errors.append(inj_error)
             
-            # Restaurar la temporada solo si es reciente (actualizada en el último mes)
-            restore_season = False
-            if current in data_manager.last_update:
-                try:
-                    last_update_str = data_manager.last_update[current]
-                    if isinstance(last_update_str, str):
-                        last_update = datetime.fromisoformat(last_update_str)
-                        one_month_ago = datetime.now() - timedelta(days=30)
-                        
-                        # Solo restaurar temporadas recientes
-                        if last_update > one_month_ago:
-                            restore_season = True
-                    elif isinstance(last_update_str, datetime):
-                        # Si ya es un objeto datetime
-                        one_month_ago = datetime.now() - timedelta(days=30)
-                        if last_update_str > one_month_ago:
-                            restore_season = True
-                except Exception as e:
-                    logger.warning(f"Error verificando timestamp de {current}: {e}")
-            
-            # Solo restaurar si cumple los criterios
-            if restore_season:
-                logger.info(f"Restaurando temporada reciente: {current}")
-                data_manager.refresh_data(current, force_download=False)
-            else:
-                logger.info(f"No se restaura temporada {current} por ser antigua o problemática")
-        else:
-            status = data_manager.get_data_status()
+            # Si hubo errores críticos y no se actualizó nada
+            if update_errors and not (performance_updated or injuries_updated):
+                return dbc.Alert(
+                    [
+                        html.H6("❌ Error de Actualización", className="alert-heading"),
+                        html.P("No se pudieron actualizar los datos:"),
+                        html.Ul([html.Li(error) for error in update_errors]),
+                        html.Hr(),
+                        html.P("Mostrando información en cache.", className="mb-0")
+                    ],
+                    color="danger"
+                )
         
-        # Asegurar que la UI siempre muestre 2024-25
-        status['current_season'] = "2024-25"
+        # Obtener estados actuales
+        performance_status = dm.get_data_status()
+        injuries_data = tm.get_injuries_data()
+        injuries_stats = tm.get_statistics_summary()
         
-        # Extraer manualmente el timestamp del archivo para mostrar la fecha correcta
-        timestamp_file = Path(data_manager.extractor.cache_dir) / "update_timestamps.json"
-        if timestamp_file.exists():
-            try:
-                with open(timestamp_file, 'r') as f:
-                    timestamps_data = json.load(f)
-                    if "2024-25" in timestamps_data:
-                        # Formatear el timestamp para mostrar
-                        timestamp_str = timestamps_data["2024-25"]
-                        formatted_date = timestamp_str[:19].replace('T', ' ')
-                        # Sobreescribir el timestamp en el status
-                        status['last_update'] = formatted_date
-            except Exception as e:
-                logger.error(f"Error leyendo timestamp file: {e}")
+        # Verificar disponibilidad de datos
+        cached_seasons = performance_status.get('cached_seasons', [])
+        performance_data_available = len(cached_seasons) > 0
+        injuries_available = len(injuries_data) > 0
         
-        # Obtener estado del sistema y verificar actualizaciones
-        update_check = data_manager.check_for_updates()
-        
-        # Crear lista de items de estado
+        # Crear secciones usando las funciones auxiliares
         status_items = []
         
-        # Temporada actual con formato mejorado
-        current_season = status.get('current_season', 'N/A')
-        available_seasons = status.get('available_seasons', [])
+        # Sección de performance
+        status_items.append(create_performance_section(performance_status))
+        status_items.append(create_performance_status_section(performance_status))
         
-        # Convertir temporadas a formato corto y crear badges
-        available_seasons_badges = [
-            dbc.Badge(format_season_short(s), 
-                color="info", 
-                className="me-1 mb-1",
-                style={"font-size": "0.8rem"}) 
-            for s in available_seasons
-        ]
+        # Sección de injuries
+        status_items.append(create_injuries_section(injuries_data, injuries_stats, tm))
         
-        status_items.append(
-            dbc.ListGroupItem([
-                html.Div([
-                    html.Strong("🗓️ Temporada actual: "),
-                    dbc.Badge(format_season_short(current_season), color="primary", className="ms-1"),
-                    html.Br(),
-                    html.Small("Disponibles: ", className="me-1"),
-                    html.Span(available_seasons_badges)
-                ])
-            ])
+        # Estado general
+        status_items.append(create_overall_status_section(performance_data_available, injuries_available))
+        
+        # Resultados de actualización (si corresponde)
+        update_results_item = create_update_results_section(
+            performance_updated, injuries_updated, dm, tm, update_errors
         )
-        
-        # Última actualización
-        last_update = status.get('last_update')
-        formatted_date = 'Nunca'
-        if last_update:
-            # Asegurar que sea un objeto datetime antes de formatearlo
-            if isinstance(last_update, datetime):
-                formatted_date = last_update.strftime("%Y-%m-%d %H:%M:%S")
-            elif isinstance(last_update, str) and last_update not in ['None', 'null', '{}']:
-                formatted_date = last_update[:19].replace('T', ' ')
-                    
-        status_items.append(
-            dbc.ListGroupItem([
-                html.Div([
-                    html.Strong("🕐 Última actualización: "),
-                    html.Span(formatted_date, className="fst-italic")
-                ])
-            ])
-        )
-        
-        # Verificación más robusta de datos disponibles
-        raw_data_available = status.get('raw_data_available', False)
-        processed_data_available = status.get('processed_data_available', False)
-        cached_seasons = status.get('cached_seasons', [])
-        data_available = processed_data_available or len(cached_seasons) > 0
-        
-        status_items.append(
-            dbc.ListGroupItem([
-                html.Div([
-                    html.Strong("💾 Datos disponibles: "),
-                    dbc.Badge(
-                        "Sí ✓" if data_available else "No ✗", 
-                        color="success" if data_available else "danger",
-                        className="ms-2"
-                    ),
-                    html.Br(),
-                    html.Small(f"Temporadas en caché: {len(cached_seasons)}"),
-                    html.Br(),
-                    html.Div([
-                        dbc.Badge(format_season_short(s), color="secondary", className="me-1 mb-1")
-                        for s in cached_seasons
-                    ], style={"margin-top": "5px"})
-                ])
-            ])
-        )
-        
-        # Estadísticas de datos (si están disponibles)
-        if 'data_stats' in status and data_available:
-            stats = status['data_stats']
-            
-            # Información de equipos
-            teams_list_str = ""
-            if 'hong_kong_teams' in status and status['hong_kong_teams']:
-                teams_list = status['hong_kong_teams']
-                #teams_list_str = f"{', '.join(teams_list)}"
-
-            available_teams_badges = [
-            dbc.Badge(format_season_short(t), 
-                color="info", 
-                className="me-1 mb-1",
-                style={"font-size": "0.8rem"}) 
-            for t in teams_list
-            ]    
-            
-            status_items.append(
-                dbc.ListGroupItem([
-                    html.Div([
-                        html.Strong("📊 Estadísticas: "),
-                        dbc.Badge(format_season_short(current_season), color="primary", className="ms-1 me-2"),
-                        html.Span(f"{stats.get('total_players', 0)} jugadores, {stats.get('total_teams', 0)} equipos"),
-                        html.Br(),
-                        html.Small("Equipos: "),
-                        html.Span(available_teams_badges)
-                    ])
-                ])
-            )
-        
-        # Estado de actualización (ahora coherente con datos disponibles)
-        needs_update = update_check.get('needs_update', False)
-        if not data_available:
-            # Si no hay datos, el estado es "Datos no disponibles"
-            status_items.append(
-                dbc.ListGroupItem([
-                    html.Div([
-                        html.Strong("⚠️ Estado: "),
-                        dbc.Badge("Datos no disponibles", color="danger", className="ms-2"),
-                        html.Br(),
-                        html.Small("Se requiere cargar datos", className="text-muted")
-                    ])
-                ], color="danger")
-            )
-        elif needs_update:
-            status_items.append(
-                dbc.ListGroupItem([
-                    html.Div([
-                        html.Strong("🔄 Estado: "),
-                        dbc.Badge("Actualizaciones disponibles", color="warning", className="ms-2"),
-                        html.Br(),
-                        html.Small(update_check.get('message', ''), className="text-muted")
-                    ])
-                ], color="warning")
-            )
-        else:
-            status_items.append(
-                dbc.ListGroupItem([
-                    html.Div([
-                        html.Strong("✅ Estado: "),
-                        dbc.Badge("Datos actualizados", color="success", className="ms-2")
-                    ])
-                ], color="light")
-            )
-        
-        # Si se hizo click en el botón, mostrar resultado del refresco
-        if n_clicks and n_clicks > 0:
-            # Obtener estadísticas actualizadas
-            updated_status = data_manager.get_data_status()
-            teams_count = updated_status.get('data_stats', {}).get('total_teams', 0)
-            players_count = updated_status.get('data_stats', {}).get('total_players', 0)
-            
-            status_items.append(
-                dbc.ListGroupItem([
-                    dbc.Alert([
-                        html.Strong("✅ Datos actualizados exitosamente"),
-                        html.Br(),
-                        html.Small(f"Cargados {players_count} jugadores de {teams_count} equipos")
-                    ], color="success", className="mb-0")
-                ])
-            )
+        if update_results_item:
+            status_items.append(update_results_item)
         
         return dbc.ListGroup(status_items, flush=True)
         
     except Exception as e:
-        # En caso de error, mostrar mensaje de error
+        # Error handler simplificado
+        logger.error(f"Error en update_system_status: {e}")
         return dbc.Alert(
             [
-                html.H6("❌ Error del Sistema", className="alert-heading"),
-                html.P(f"No se pudo obtener el estado del sistema: {str(e)}"),
+                html.H6("❌ System Error", className="alert-heading"),
+                html.P(f"Could not retrieve system status: {str(e)}"),
                 html.Hr(),
-                html.Small("Verifica que el sistema de datos esté configurado correctamente.", className="text-muted"),
+                html.Small("Please verify that the data system is properly configured.", className="text-muted"),
             ],
             color="danger"
         )

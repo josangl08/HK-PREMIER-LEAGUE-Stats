@@ -1,8 +1,7 @@
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Optional, Tuple, Union, Any
-from datetime import datetime
-import json
+from typing import Dict, List, Optional, Union, Any
+import logging
 
 class HongKongStatsAggregator:
     """
@@ -21,6 +20,9 @@ class HongKongStatsAggregator:
         
         # Cache para optimizar consultas repetidas
         self._cache = {}
+        
+        # Inicializar logger para la clase
+        self.logger = logging.getLogger(__name__)
         
         # Definir métricas clave por posición
         self.position_metrics = {
@@ -201,96 +203,115 @@ class HongKongStatsAggregator:
         }
     
     def _get_top_performers(self, data: pd.DataFrame) -> Dict:
-        """Top performers de la liga en diferentes categorías con mínimos para métricas de eficiencia."""
+        """Top performers de la liga en diferentes categorías."""
         performers = {}
         
-        # Top scorers - TOP 10
-        if 'Goals' in data.columns:
-            top_scorers = data.nlargest(10, 'Goals')[['Player', 'Team', 'Goals', 'Position_Group']].to_dict('records')
-            # Limpiar registros
-            for player in top_scorers:
-                player['Position_Group'] = player.get('Position_Group', 'Unknown')
-            performers['top_scorers'] = top_scorers
-        
-        # Top assisters - TOP 10
-        if 'Assists' in data.columns:
-            top_assisters = data.nlargest(10, 'Assists')[['Player', 'Team', 'Assists', 'Position_Group']].to_dict('records')
-            # Limpiar registros
-            for player in top_assisters:
-                player['Position_Group'] = player.get('Position_Group', 'Unknown')
-            performers['top_assisters'] = top_assisters
-        
-        # Most played minutes - TOP 10
-        if 'Minutes played' in data.columns:
-            min_matches = 5  # Mínimo de partidos jugados para entrar en esta lista
-            eligible_players = data
-            if 'Matches played' in data.columns:
-                eligible_players = data[data['Matches played'] >= min_matches]
-            
-            most_played = eligible_players.nlargest(10, 'Minutes played')[
-                ['Player', 'Team', 'Minutes played', 'Matches played']
-            ].to_dict('records')
-            performers['most_minutes'] = most_played
-        
-        # Best passing accuracy (min 5 matches) - TOP 10
-        if all(col in data.columns for col in ['Accurate passes, %', 'Matches played']):
-            # Nuevos filtros para pasadores:
-            min_matches = 5  # Mínimo de partidos jugados
-            min_passes_per_90 = 15  # Mínimo de pases por 90 minutos
-            
-            # Aplicar filtros combinados
-            eligible_passers = data[
-                (data['Matches played'] >= min_matches) & 
-                (data.get('Passes per 90', 0) >= min_passes_per_90)
-            ]
-            
-            if len(eligible_passers) > 0:
-                # Obtener los mejores y añadir columna calculada directamente
-                passes_df = eligible_passers.copy()
-                
-                # Crear columna de total de pases
-                if 'Passes per 90' in passes_df.columns and 'Matches played' in passes_df.columns:
-                    passes_df['Total passes'] = (passes_df['Passes per 90'] * passes_df['Matches played']).astype(int)
-                else:
-                    passes_df['Total passes'] = 0
-                
-                # Obtener los top 10 con la nueva columna
-                best_passers = passes_df.nlargest(10, 'Accurate passes, %')[
-                    ['Player', 'Team', 'Accurate passes, %', 'Passes per 90', 'Total passes']
-                ].to_dict('records')
-                
-                performers['best_passers'] = best_passers
-        
-        # Best dribblers (min 5 matches and min dribbles) - TOP 10
-        if all(col in data.columns for col in ['Successful dribbles, %', 'Matches played']):
-            # Nuevos filtros para regateadores:
-            min_matches = 5  # Mínimo de partidos jugados
-            min_dribbles_per_90 = 2  # Mínimo de regates por 90 minutos
-            
-            # Aplicar filtros combinados
-            eligible_dribblers = data[
-                (data['Matches played'] >= min_matches) & 
-                (data.get('Dribbles per 90', 0) >= min_dribbles_per_90)
-            ]
-            
-            if len(eligible_dribblers) > 0:
-                # Obtener los mejores y añadir columna calculada directamente
-                dribbles_df = eligible_dribblers.copy()
-                
-                # Crear columna de total de regates
-                if 'Dribbles per 90' in dribbles_df.columns and 'Matches played' in dribbles_df.columns:
-                    dribbles_df['Total dribbles'] = (dribbles_df['Dribbles per 90'] * dribbles_df['Matches played']).astype(int)
-                else:
-                    dribbles_df['Total dribbles'] = 0
-                
-                # Obtener los top 10 con la nueva columna
-                best_dribblers = dribbles_df.nlargest(10, 'Successful dribbles, %')[
-                    ['Player', 'Team', 'Successful dribbles, %', 'Dribbles per 90', 'Total dribbles']
-                ].to_dict('records')
-                
-                performers['best_dribblers'] = best_dribblers
+        # Dividir en métodos más específicos
+        performers.update(self._get_top_scorers(data))
+        performers.update(self._get_top_assisters(data))
+        performers.update(self._get_most_minutes_players(data))
+        performers.update(self._get_best_passers(data))
+        performers.update(self._get_best_dribblers(data))
         
         return performers
+
+    def _get_top_scorers(self, data: pd.DataFrame) -> Dict:
+        """Obtiene los mejores goleadores."""
+        if 'Goals' not in data.columns:
+            return {}
+        
+        top_scorers = data.nlargest(10, 'Goals')[['Player', 'Team', 'Goals', 'Position_Group']].to_dict('records')
+        # Limpiar registros
+        for player in top_scorers:
+            player['Position_Group'] = player.get('Position_Group', 'Unknown')
+        
+        return {'top_scorers': top_scorers}
+
+    def _get_top_assisters(self, data: pd.DataFrame) -> Dict:
+        """Obtiene los mejores asistentes."""
+        if 'Assists' not in data.columns:
+            return {}
+        
+        top_assisters = data.nlargest(10, 'Assists')[['Player', 'Team', 'Assists', 'Position_Group']].to_dict('records')
+        # Limpiar registros
+        for player in top_assisters:
+            player['Position_Group'] = player.get('Position_Group', 'Unknown')
+        
+        return {'top_assisters': top_assisters}
+
+    def _get_most_minutes_players(self, data: pd.DataFrame) -> Dict:
+        """Obtiene jugadores con más minutos."""
+        if 'Minutes played' not in data.columns:
+            return {}
+        
+        min_matches = 5  # Mínimo de partidos jugados
+        eligible_players = data
+        if 'Matches played' in data.columns:
+            eligible_players = data[data['Matches played'] >= min_matches]
+        
+        most_played = eligible_players.nlargest(10, 'Minutes played')[
+            ['Player', 'Team', 'Minutes played', 'Matches played']
+        ].to_dict('records')
+        
+        return {'most_minutes': most_played}
+
+    def _get_best_passers(self, data: pd.DataFrame) -> Dict:
+        """Obtiene los mejores pasadores (con criterios mínimos)."""
+        if not all(col in data.columns for col in ['Accurate passes, %', 'Matches played']):
+            return {}
+        
+        min_matches = 5
+        min_passes_per_90 = 15
+        
+        eligible_passers = data[
+            (data['Matches played'] >= min_matches) & 
+            (data.get('Passes per 90', 0) >= min_passes_per_90)
+        ]
+        
+        if len(eligible_passers) == 0:
+            return {}
+        
+        # Calcular pases totales
+        passes_df = eligible_passers.copy()
+        if 'Passes per 90' in passes_df.columns:
+            passes_df['Total passes'] = (passes_df['Passes per 90'] * passes_df['Matches played']).astype(int)
+        else:
+            passes_df['Total passes'] = 0
+        
+        best_passers = passes_df.nlargest(10, 'Accurate passes, %')[
+            ['Player', 'Team', 'Accurate passes, %', 'Passes per 90', 'Total passes']
+        ].to_dict('records')
+        
+        return {'best_passers': best_passers}
+
+    def _get_best_dribblers(self, data: pd.DataFrame) -> Dict:
+        """Obtiene los mejores regateadores (con criterios mínimos)."""
+        if not all(col in data.columns for col in ['Successful dribbles, %', 'Matches played']):
+            return {}
+        
+        min_matches = 5
+        min_dribbles_per_90 = 2
+        
+        eligible_dribblers = data[
+            (data['Matches played'] >= min_matches) & 
+            (data.get('Dribbles per 90', 0) >= min_dribbles_per_90)
+        ]
+        
+        if len(eligible_dribblers) == 0:
+            return {}
+        
+        # Calcular regates totales
+        dribbles_df = eligible_dribblers.copy()
+        if 'Dribbles per 90' in dribbles_df.columns:
+            dribbles_df['Total dribbles'] = (dribbles_df['Dribbles per 90'] * dribbles_df['Matches played']).astype(int)
+        else:
+            dribbles_df['Total dribbles'] = 0
+        
+        best_dribblers = dribbles_df.nlargest(10, 'Successful dribbles, %')[
+            ['Player', 'Team', 'Successful dribbles, %', 'Dribbles per 90', 'Total dribbles']
+        ].to_dict('records')
+        
+        return {'best_dribblers': best_dribblers}
     
     def _get_position_analysis(self, data: pd.DataFrame) -> Dict:
         """Análisis por posición."""
@@ -329,7 +350,7 @@ class HongKongStatsAggregator:
         return position_stats
     
     def _get_age_distribution(self, data: pd.DataFrame) -> Dict:
-        """Distribución de edades en la liga."""
+        """Distribución de edades simplificada."""
         if 'Age' not in data.columns or len(data) == 0:
             return {}
         
@@ -340,24 +361,20 @@ class HongKongStatsAggregator:
         age_groups = pd.cut(data['Age'], bins=age_bins, labels=age_labels, include_lowest=True)
         age_distribution = age_groups.value_counts().to_dict()
         
-        # Obtener índices de extremos de manera segura
-        min_age_idx = data['Age'].idxmin()
-        max_age_idx = data['Age'].idxmax()
-        
-        # Estadísticas adicionales
+        # Estadísticas básicas sin extracciones complejas
         stats = {
             'distribution': age_distribution,
             'youngest_player': {
-                'name': str(self._extract_scalar_value(data.loc[min_age_idx, 'Player'])),
-                'age': int(self._extract_scalar_value(data.loc[min_age_idx, 'Age'])),
-                'team': str(self._extract_scalar_value(data.loc[min_age_idx, 'Team']))
+                'name': data.loc[data['Age'].idxmin(), 'Player'],
+                'age': int(data['Age'].min()),
+                'team': data.loc[data['Age'].idxmin(), 'Team']
             },
             'oldest_player': {
-                'name': str(self._extract_scalar_value(data.loc[max_age_idx, 'Player'])),
-                'age': int(self._extract_scalar_value(data.loc[max_age_idx, 'Age'])),
-                'team': str(self._extract_scalar_value(data.loc[max_age_idx, 'Team']))
+                'name': data.loc[data['Age'].idxmax(), 'Player'],
+                'age': int(data['Age'].max()),
+                'team': data.loc[data['Age'].idxmax(), 'Team']
             },
-            'median_age': data['Age'].median(),
+            'median_age': float(data['Age'].median()),
             'avg_age_by_position': data.groupby('Position_Group')['Age'].mean().round(1).to_dict() if 'Position_Group' in data.columns else {}
         }
         
@@ -459,59 +476,48 @@ class HongKongStatsAggregator:
         """Top players del equipo en diferentes métricas."""
         top_players = {}
         
-        # Top scorer
-        if 'Goals' in team_data.columns and len(team_data) > 0:
-            goals_series = team_data['Goals']
-            if not goals_series.empty and goals_series.max() > 0:
-                top_scorer_idx = goals_series.idxmax()
-                top_scorer_row = team_data.loc[top_scorer_idx]
-                
-                top_players['top_scorer'] = {
-                    'name': str(self._extract_scalar_value(top_scorer_row['Player'])),
-                    'goals': int(self._extract_scalar_value(top_scorer_row['Goals'])),
-                    'position': str(self._extract_scalar_value(top_scorer_row.get('Position_Group', 'Unknown')))
-                }
+        # Configuración de métricas a evaluar
+        metrics_config = [
+            ('top_scorer', 'Goals', 'goals', 'Goals'),
+            ('top_assister', 'Assists', 'assists', 'Assists'),
+            ('most_played', 'Minutes played', 'minutes', 'Minutes played'),
+            ('most_valuable', 'Market value', 'value', 'Market value')
+        ]
         
-        # Top assister
-        if 'Assists' in team_data.columns and len(team_data) > 0:
-            assists_series = team_data['Assists']
-            if not assists_series.empty and assists_series.max() > 0:
-                top_assister_idx = assists_series.idxmax()
-                top_assister_row = team_data.loc[top_assister_idx]
-                
-                top_players['top_assister'] = {
-                    'name': str(self._extract_scalar_value(top_assister_row['Player'])),
-                    'assists': int(self._extract_scalar_value(top_assister_row['Assists'])),
-                    'position': str(self._extract_scalar_value(top_assister_row.get('Position_Group', 'Unknown')))
-                }
-        
-        # Most played
-        if 'Minutes played' in team_data.columns and len(team_data) > 0:
-            minutes_series = team_data['Minutes played']
-            if not minutes_series.empty and minutes_series.max() > 0:
-                most_played_idx = minutes_series.idxmax()
-                most_played_row = team_data.loc[most_played_idx]
-                
-                top_players['most_played'] = {
-                    'name': str(self._extract_scalar_value(most_played_row['Player'])),
-                    'minutes': int(self._extract_scalar_value(most_played_row['Minutes played'])),
-                    'matches': int(self._extract_scalar_value(most_played_row.get('Matches played', 0)))
-                }
-        
-        # Most valuable
-        if 'Market value' in team_data.columns and len(team_data) > 0:
-            value_series = team_data['Market value']
-            if not value_series.empty and value_series.max() > 0:
-                most_valuable_idx = value_series.idxmax()
-                most_valuable_row = team_data.loc[most_valuable_idx]
-                
-                top_players['most_valuable'] = {
-                    'name': str(self._extract_scalar_value(most_valuable_row['Player'])),
-                    'value': int(self._extract_scalar_value(most_valuable_row['Market value'])),
-                    'position': str(self._extract_scalar_value(most_valuable_row.get('Position_Group', 'Unknown')))
-                }
+        for key, column, value_key, display_name in metrics_config:
+            player_info = self._get_top_player_for_metric(team_data, column, value_key, display_name)
+            if player_info:
+                top_players[key] = player_info
         
         return top_players
+
+    def _get_top_player_for_metric(self, team_data: pd.DataFrame, column: str, value_key: str, display_name: str) -> Optional[Dict]:
+        """Obtiene el mejor jugador para una métrica específica."""
+        if column not in team_data.columns or len(team_data) == 0:
+            return None
+        
+        metric_series = team_data[column]
+        if metric_series.empty or metric_series.max() <= 0:
+            return None
+        
+        try:
+            top_player_idx = metric_series.idxmax()
+            top_player_row = team_data.loc[top_player_idx]
+            
+            player_info = {
+                'name': str(top_player_row['Player']),
+                value_key: int(top_player_row[column].item()),
+                'position': str(top_player_row.get('Position_Group', 'Unknown'))
+            }
+            
+            # Añadir información adicional según la métrica
+            if column == 'Minutes played' and 'Matches played' in top_player_row.index:
+                player_info['matches'] = int(top_player_row['Matches played'].item())
+            
+            return player_info
+        except Exception as e:
+            self.logger.warning(f"Error obteniendo top player para {display_name}: {e}")
+            return None
     
     def _get_team_position_breakdown(self, team_data: pd.DataFrame) -> Dict:
         """Desglose detallado por posición del equipo."""
@@ -865,7 +871,7 @@ class HongKongStatsAggregator:
             
             data['position_analysis'] = position_analysis
         
-        # NUEVO: Datos para gráfico de edad vs rendimiento
+        # Datos para gráfico de edad vs rendimiento
         if all(col in self.data.columns for col in ['Age', 'Goals', 'Player']):
             # Filtrar jugadores con al menos 1 gol para mejor visibilidad
             players_with_goals = self.data[self.data['Goals'] > 0]
@@ -974,28 +980,40 @@ class HongKongStatsAggregator:
         """Limpia el cache del agregador."""
         self._cache.clear()
     
-    def get_available_teams(self) -> List[str]:
-        """Retorna lista de equipos disponibles."""
-        if 'Team' in self.data.columns:
-            return sorted(self.data['Team'].unique().tolist())
-        return []
-    
-    def get_available_players(self, team_name: Optional[str] = None) -> List[str]:
+    def get_available_entities(self, entity_type: str, team_name: Optional[str] = None) -> List[str]:
         """
-        Retorna lista de jugadores disponibles.
+        Método consolidado para obtener listas de entidades disponibles.
         
         Args:
-            team_name: Filtrar por equipo específico
+            entity_type: 'teams' o 'players'
+            team_name: Para filtrar jugadores por equipo (solo cuando entity_type='players')
             
         Returns:
-            Lista de nombres de jugadores ordenada alfabéticamente
+            Lista ordenada de entidades disponibles
         """
-        if 'Player' not in self.data.columns:
+        if entity_type == 'teams':
+            if 'Team' in self.data.columns:
+                return sorted(self.data['Team'].unique().tolist())
             return []
         
-        if team_name:
-            players = self.data[self.data['Team'] == team_name]['Player'].unique()
-        else:
-            players = self.data['Player'].unique()
+        elif entity_type == 'players':
+            if 'Player' not in self.data.columns:
+                return []
+            
+            if team_name:
+                players = self.data[self.data['Team'] == team_name]['Player'].unique()
+            else:
+                players = self.data['Player'].unique()
+            
+            return sorted(players.tolist())
         
-        return sorted(players.tolist())
+        else:
+            raise ValueError(f"entity_type debe ser 'teams' o 'players', recibido: {entity_type}")
+
+    def get_available_teams(self) -> List[str]:
+        """Retorna lista de equipos disponibles."""
+        return self.get_available_entities('teams')
+
+    def get_available_players(self, team_name: Optional[str] = None) -> List[str]:
+        """Retorna lista de jugadores disponibles."""
+        return self.get_available_entities('players', team_name)

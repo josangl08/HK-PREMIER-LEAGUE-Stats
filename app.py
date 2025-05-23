@@ -3,7 +3,6 @@ import dash
 from dash import html, dcc
 import dash_bootstrap_components as dbc
 from flask_login import LoginManager, current_user
-from dotenv import load_dotenv
 import logging
 
 # Configurar logging básico
@@ -14,23 +13,17 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Cargar variables de entorno
+from dotenv import load_dotenv
 load_dotenv()
 
 # Importar componentes propios
 try:
-    from utils.auth import User, load_user
+    from utils.auth import load_user
     from utils.cache import init_cache
-    logger.info("✓ Módulos de utilidades importados correctamente")
+    import callbacks # Esto registrará los callbacks automáticamente
+    logger.info("✓ Módulos y callbacks importados correctamente")   
 except ImportError as e:
     logger.error(f"❌ Error importando utilidades: {e}")
-    raise
-
-# Importar todos los callbacks - esto registrará los callbacks automáticamente
-try:
-    import callbacks
-    logger.info("✓ Callbacks importados correctamente")
-except ImportError as e:
-    logger.error(f"❌ Error importando callbacks: {e}")
     raise
 
 # Inicializar la aplicación Dash con tema Bootstrap
@@ -50,22 +43,22 @@ app = dash.Dash(
 )
 
 # Configuraciones básicas de la aplicación
-app.title = "Sports Dashboard - Liga de Hong Kong"
+app.title = "Hong Kong Premier League Dashboard"
 # app._favicon = "assets/favicon.ico"  # Si tienes un favicon
 server = app.server
 
 # Configuración de Flask
 server.config.update(
-    SECRET_KEY=os.getenv("SECRET_KEY", "dev-secret-key-change-in-production"),
+    SECRET_KEY=os.getenv("SECRET_KEY"),
     WTF_CSRF_ENABLED=False  # Deshabilitar CSRF para simplicidad en desarrollo
 )
 
 # Inicializar el sistema de caché
 try:
     cache = init_cache(app)
-    print("✓ Cache system initialized successfully")
+    logger.info("✓ El sistema de caché se ha inicializado correctamente")
 except Exception as e:
-    print(f"⚠️ Warning: Cache initialization failed: {e}")
+    logger.warning(f"⚠️ Warning: Error en la inicialización de la caché: {e}")
 
 # Configurar autenticación con Flask-Login
 login_manager = LoginManager()
@@ -102,17 +95,6 @@ app.layout = dbc.Container([
     
 ], fluid=True, className="p-0")
 
-# Callback para manejar el tema de la aplicación (opcional)
-@app.callback(
-    dash.dependencies.Output('app-theme', 'data'),
-    [dash.dependencies.Input('url', 'pathname')],
-    prevent_initial_call=True
-)
-def update_theme(pathname):
-    """Callback opcional para manejar temas dinámicos."""
-    # Por ahora retorna el tema por defecto
-    return 'light'
-
 def run_app(debug=None, host=None, port=None):
     """
     Función helper para ejecutar la aplicación con configuraciones personalizadas.
@@ -122,7 +104,7 @@ def run_app(debug=None, host=None, port=None):
     host_address = host if host is not None else os.getenv("HOST", "127.0.0.1")
     port_number = port if port is not None else int(os.getenv("PORT", "8050"))
     
-    print(f"""
+    logger.info(f"""
 ╔══════════════════════════════════════════════════════════════╗
 ║                    SPORTS DASHBOARD                          ║
 ║                Liga de Hong Kong                             ║
@@ -145,11 +127,11 @@ def run_app(debug=None, host=None, port=None):
             use_reloader=False       
         )
     except Exception as e:
-        print(f"❌ Error al iniciar la aplicación: {e}")
-        print("💡 Consejos:")
-        print("  - Verifica que el puerto no esté en uso")
-        print("  - Revisa las variables de entorno")
-        print("  - Asegúrate de que todas las dependencias están instaladas")
+        logger.error(f"❌ Error al iniciar la aplicación: {e}")
+        logger.info("💡 Consejos:")
+        logger.info("  - Verifica que el puerto no esté en uso")
+        logger.info("  - Revisa las variables de entorno")
+        logger.info("  - Asegúrate de que todas las dependencias están instaladas")
 
 # Punto de entrada principal
 if __name__ == '__main__':
@@ -158,8 +140,8 @@ if __name__ == '__main__':
     missing_vars = [var for var in required_env_vars if not os.getenv(var)]
     
     if missing_vars:
-        print(f"⚠️ Advertencia: Variables de entorno faltantes: {missing_vars}")
-        print("📖 Consulta el archivo README.md para configuración inicial")
+        logger.warning(f"⚠️ Advertencia: Variables de entorno faltantes: {missing_vars}")
+        logger.info("📖 Consulta el archivo README.md para configuración inicial")
     
     # Ejecutar la aplicación
     run_app()

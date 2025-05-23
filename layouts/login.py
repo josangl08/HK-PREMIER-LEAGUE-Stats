@@ -3,6 +3,15 @@ import dash_bootstrap_components as dbc
 
 # Crea el layout de la página de login
 def create_login_layout(login_status=None):
+    """
+    Crea el layout de la página de inicio de sesión.
+    
+    Args:
+        login_status (str, optional): Estado del login ('failed' si falló). Defaults to None.
+        
+    Returns:
+        dbc.Container: Layout completo de la página de login
+    """
     
     # Mensaje de error condicionado al estado de login
     error_message = None

@@ -1,13 +1,12 @@
 import pandas as pd
 import numpy as np
-import re
-from datetime import datetime
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, Any
+import logging
 
+logger = logging.getLogger(__name__)
 class HongKongDataProcessor:
     """
     Procesador específico para datos de jugadores de la Liga de Hong Kong.
-    Versión simplificada y robusta.
     """
     
     def __init__(self):
@@ -23,14 +22,13 @@ class HongKongDataProcessor:
     def process_season_data(self, df: pd.DataFrame, season: str) -> pd.DataFrame:
         """
         Procesa datos de jugadores de una temporada.
-        Versión simplificada.
         """
         if df.empty:
-            print("DataFrame vacío, no hay datos para procesar")
+            logger.info("DataFrame vacío, no hay datos para procesar")
             return df
         
-        print(f"Procesando datos de jugadores {season}...")
-        print(f"Datos originales: {len(df)} jugadores, {len(df.columns)} columnas")
+        logger.info(f"Procesando datos de jugadores {season}...")
+        logger.info(f"Datos originales: {len(df)} jugadores, {len(df.columns)} columnas")
         
         # Hacer una copia para no modificar el original
         processed_df = df.copy()
@@ -57,13 +55,13 @@ class HongKongDataProcessor:
             # 7. Validación final
             processed_df = self._final_cleanup(processed_df)
             
-            print(f"Datos procesados: {len(processed_df)} jugadores, {len(processed_df.columns)} columnas")
-            print(f"Jugadores eliminados: {len(df) - len(processed_df)}")
+            logger.info(f"Datos procesados: {len(processed_df)} jugadores, {len(processed_df.columns)} columnas")
+            logger.info(f"Jugadores eliminados: {len(df) - len(processed_df)}")
             
             return processed_df
             
         except Exception as e:
-            print(f"Error procesando datos: {e}")
+            logger.error(f"Error procesando datos: {e}")
             # En caso de error, devolver al menos una versión básica
             return self._create_minimal_dataset(df, season)
     
@@ -126,54 +124,54 @@ class HongKongDataProcessor:
     
     def _process_positions(self, df: pd.DataFrame) -> pd.DataFrame:
         """Procesa información de posiciones con manejo mejorado de múltiples formatos."""
-        # Buscar columnas relacionadas con posiciones con nombres más flexibles
-        position_columns = ['Primary position', 'Position', 'Primary Position', 'position', 
-                        'Position_Primary', 'Position Primary', 'Main Position']
+        # Buscar columnas relacionadas con posiciones - orden de prioridad
+        position_columns = [
+            'Primary position', 'Position', 'Primary Position', 'position', 
+            'Position_Primary', 'Position Primary', 'Main Position'
+        ]
         
-        position_column = None
-        for col in position_columns:
-            if col in df.columns:
-                position_column = col
-                break
+        # Encontrar la primera columna disponible
+        position_column = next((col for col in position_columns if col in df.columns), None)
         
+        # Si no se encuentra, buscar cualquier columna con "position" en el nombre
         if position_column is None:
-            # Si no encontramos ninguna columna de posición principal, 
-            # buscar cualquier columna que contenga "position" en su nombre
-            possible_columns = [col for col in df.columns if 'position' in col.lower()]
-            if possible_columns:
-                position_column = possible_columns[0]
+            position_column = next((col for col in df.columns if 'position' in col.lower()), None)
         
+        # Si no se encuentra ninguna columna de posición
         if position_column is None:
             df['Position_Clean'] = 'Unknown'
             df['Position_Group'] = 'Unknown'
             return df
         
-        # Limpiar posiciones manualmente
+        # Limpiar posiciones
         df['Position_Clean'] = df[position_column].apply(lambda x: str(x).strip() if pd.notna(x) else 'Unknown')
         
         # Asignar grupo de posición
         df['Position_Group'] = df['Position_Clean'].apply(self._get_position_group)
         
-        # Si aún hay muchas posiciones 'Unknown', intentar con posiciones secundarias
-        unknown_count = (df['Position_Group'] == 'Unknown').sum()
+        # Manejar Unknown con posiciones secundarias
+        unknown_mask = df['Position_Group'] == 'Unknown'
+        unknown_count = unknown_mask.sum()
+        
         if unknown_count > 0.3 * len(df):  # Si más del 30% son desconocidas
-            # Buscar columnas de posición secundaria
+            # Buscar columnas de posición secundaria por orden de prioridad
             secondary_columns = ['Secondary position', 'Position_Secondary', 'Second Position']
             
             for col in secondary_columns:
                 if col in df.columns:
-                    # Para jugadores con posición desconocida, usar posición secundaria
-                    mask = df['Position_Group'] == 'Unknown'
-                    df.loc[mask, 'Position_Clean'] = df.loc[mask, col].apply(
+                    # Actualizar solo las filas con posición desconocida
+                    df.loc[unknown_mask, 'Position_Clean'] = df.loc[unknown_mask, col].apply(
                         lambda x: str(x).strip() if pd.notna(x) else 'Unknown'
                     )
-                    df.loc[mask, 'Position_Group'] = df.loc[mask, 'Position_Clean'].apply(self._get_position_group)
+                    df.loc[unknown_mask, 'Position_Group'] = df.loc[unknown_mask, 'Position_Clean'].apply(
+                        self._get_position_group
+                    )
                     break
         
         return df
 
     def _get_position_group(self, position):
-        """Determina el grupo de posición manejando múltiples posiciones."""
+        """Determina el grupo de posición con mejor manejo de variaciones."""
         if not position or position == 'Unknown':
             return 'Unknown'
         
@@ -182,9 +180,9 @@ class HongKongDataProcessor:
         # Si hay múltiples posiciones separadas por comas, usar la primera
         if ',' in position:
             positions = [pos.strip() for pos in position.split(',')]
-            position = positions[0]  # Usar la primera posición
+            position = positions[0]
         
-        # Expandir las abreviaturas y variaciones para cada grupo
+        # Mapeo completo de posiciones a grupos
         position_mapping = {
             'Goalkeeper': ['GK', 'Goalkeeper', 'Goalie', 'Keeper', 'Portero', 'Porter'],
             'Defender': ['CB', 'RCB', 'LCB', 'RCB3', 'LCB3', 'RB', 'LB', 'RWB', 'LWB', 
@@ -203,19 +201,19 @@ class HongKongDataProcessor:
                         'Attacker', 'Second Striker', 'False 9', 'Delantero', 'Punta']
         }
         
-        # Verificar en cuál grupo encaja la posición
+        # Verificar en cuál grupo encaja la posición (case-insensitive)
+        position_lower = position.lower()
         for group, variations in position_mapping.items():
-            if any(variation.lower() == position.lower() or 
-                variation.lower() in position.lower() for variation in variations):
+            if any(variation.lower() == position_lower or 
+                variation.lower() in position_lower 
+                for variation in variations):
                 return group
         
-        # Si no coincide con ninguna, intentar usar el diccionario original
-        position = str(position).strip()
+        # Si no hay coincidencia, verificar con el mapeo original
         for group, positions in self.position_groups.items():
             if position in positions:
                 return group
-                
-        # Como último recurso
+        
         return 'Unknown'
     
     def _process_numbers(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -280,7 +278,7 @@ class HongKongDataProcessor:
             initial_count = len(df)
             df = df.drop_duplicates(subset=['Player', 'Team'], keep='first')
             if len(df) < initial_count:
-                print(f"Eliminados {initial_count - len(df)} registros duplicados")
+                logger.info(f"Eliminados {initial_count - len(df)} registros duplicados")
         
         # Resetear índice final
         df = df.reset_index(drop=True)
@@ -293,7 +291,7 @@ class HongKongDataProcessor:
     
     def _create_minimal_dataset(self, df: pd.DataFrame, season: str) -> pd.DataFrame:
         """Crea un dataset mínimo en caso de error total."""
-        print("Creando dataset mínimo debido a errores en el procesamiento")
+        logger.warning("Creando dataset mínimo debido a errores en el procesamiento")
         
         minimal_df = pd.DataFrame({
             'Player': ['Sample Player 1', 'Sample Player 2'],
@@ -313,7 +311,15 @@ class HongKongDataProcessor:
         return minimal_df
     
     def get_player_summary(self, df: pd.DataFrame) -> Dict[str, Any]:
-        """Genera resumen estadístico simple."""
+        """
+        Genera resumen estadístico detallado de los jugadores procesados.
+        
+        Args:
+            df: DataFrame procesado
+            
+        Returns:
+            Diccionario con resumen estadístico
+        """
         if df.empty:
             return {"error": "No hay datos para resumir"}
         
@@ -321,7 +327,9 @@ class HongKongDataProcessor:
             'basic_info': {
                 'total_players': len(df),
                 'total_teams': df['Team'].nunique() if 'Team' in df.columns else 0,
-                'season': df['Season'].iloc[0] if 'Season' in df.columns else 'N/A'
+                'season': df['Season'].iloc[0] if 'Season' in df.columns else 'N/A',
+                'positions_distribution': df['Position_Group'].value_counts().to_dict() 
+                    if 'Position_Group' in df.columns else {}
             }
         }
         
@@ -329,13 +337,54 @@ class HongKongDataProcessor:
         if 'Age' in df.columns:
             summary['age_stats'] = {
                 'average_age': round(df['Age'].mean(), 1),
-                'youngest_player': int(df['Age'].min()),
-                'oldest_player': int(df['Age'].max())
+                'median_age': round(df['Age'].median(), 1),
+                'youngest_player': {
+                    'age': int(df['Age'].min()),
+                    'player': df.loc[df['Age'].idxmin(), 'Player'] if 'Player' in df.columns else 'N/A'
+                },
+                'oldest_player': {
+                    'age': int(df['Age'].max()),
+                    'player': df.loc[df['Age'].idxmax(), 'Player'] if 'Player' in df.columns else 'N/A'
+                },
+                'age_distribution': df['Age_Category'].value_counts().to_dict() 
+                    if 'Age_Category' in df.columns else {}
             }
         
-        # Top performers
-        if all(col in df.columns for col in ['Goals', 'Player', 'Team']):
+        # Performance stats
+        performance_stats = {}
+        if 'Goals' in df.columns:
+            performance_stats['goals'] = {
+                'total': int(df['Goals'].sum()),
+                'average_per_player': round(df['Goals'].mean(), 2)
+            }
+            # Top scorers
             top_scorers = df.nlargest(5, 'Goals')[['Player', 'Team', 'Goals']]
-            summary['top_scorers'] = top_scorers.to_dict('records')  # type: ignore
+            performance_stats['top_scorers'] = top_scorers.to_dict('records')
+        
+        if 'Assists' in df.columns:
+            performance_stats['assists'] = {
+                'total': int(df['Assists'].sum()),
+                'average_per_player': round(df['Assists'].mean(), 2)
+            }
+            # Top assisters
+            top_assisters = df.nlargest(5, 'Assists')[['Player', 'Team', 'Assists']]
+            performance_stats['top_assisters'] = top_assisters.to_dict('records')
+        
+        # Añadir performance stats al resumen
+        if performance_stats:
+            summary['performance_stats'] = performance_stats
+        
+        # Team stats
+        if 'Team' in df.columns:
+            team_stats = {}
+            for team in df['Team'].unique():
+                team_df = df[df['Team'] == team]
+                team_stats[team] = {
+                    'players_count': len(team_df),
+                    'avg_age': round(team_df['Age'].mean(), 1) if 'Age' in team_df.columns else 0,
+                    'goals': int(team_df['Goals'].sum()) if 'Goals' in team_df.columns else 0,
+                    'assists': int(team_df['Assists'].sum()) if 'Assists' in team_df.columns else 0
+                }
+            summary['team_stats'] = team_stats
         
         return summary

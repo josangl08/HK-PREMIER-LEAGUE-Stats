@@ -2,6 +2,7 @@ from dash import html, dcc
 import dash_bootstrap_components as dbc
 
 layout = dbc.Container([
+    # Header - Bienvenida
     dbc.Row([
         dbc.Col([
             html.H1("Welcome to Hong Kong Premier League Dashboard", className="text-center my-4"),
@@ -13,6 +14,7 @@ layout = dbc.Container([
                 
                 html.Hr(),
                 
+                # Tarjetas principales con mejor espaciado
                 dbc.Row([
                     dbc.Col([
                         dbc.Card([
@@ -41,7 +43,7 @@ layout = dbc.Container([
                                     html.Li("📈 Injury trends"),
                                     html.Li("📄 Medical reports")
                                 ]),
-                                dbc.Button("Go to Injuries", href="/injuries", color="warning", className="w-100"),
+                                dbc.Button("Go to Injuries", href="/injuries", color="warning", className="w-100 text-light"),
                             ]),
                         ]),
                     ], width=12, md=6, className="mb-4"),
@@ -49,19 +51,27 @@ layout = dbc.Container([
                 
                 html.Hr(),
                 
-                # Sección de información del sistema
+                # Estado del sistema con indicador de carga
                 dbc.Row([
                     dbc.Col([
                         dbc.Card([
                             dbc.CardHeader(html.H5("Estado del Sistema", className="text-center")),
                             dbc.CardBody([
-                                html.Div(id="system-status-info"),
+                                # Agregar Loading wrapper para el spinner
+                                dcc.Loading(
+                                    id="loading-system-status",
+                                    children=[html.Div(id="system-status-info")],
+                                    type="default",
+                                    color="#6ea4da"
+                                ),
                                 dbc.Button(
-                                    "Actualizar Datos", 
-                                    id="refresh-data-button", 
-                                    color="info", 
-                                    size="sm", 
-                                    className="mt-2 w-100"
+                                    [
+                                        html.I(className="fas fa-sync-alt me-2"),  # Icono de actualizar
+                                        "Update Data"
+                                    ],
+                                    id="refresh-data-button",
+                                    color="info",
+                                    className="mt-2 w-100 text-light"
                                 )
                             ])
                         ])

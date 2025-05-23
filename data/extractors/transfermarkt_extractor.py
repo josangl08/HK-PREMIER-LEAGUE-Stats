@@ -1,8 +1,3 @@
-"""
-Extractor de datos de lesiones desde Transfermarkt - VERSIÓN CORREGIDA
-Maneja el scraping de equipos y lesiones de la Liga Premier de Hong Kong.
-"""
-
 import requests
 from bs4 import BeautifulSoup, Tag
 import pandas as pd
@@ -19,7 +14,6 @@ import json
 class TransfermarktExtractor:
     """
     Extractor de datos de Transfermarkt para lesiones de equipos de Hong Kong.
-    VERSIÓN CORREGIDA - Elimina duplicados y mejora el parsing.
     """
     
     def __init__(self, cache_dir: str = "data/cache"):
@@ -279,74 +273,18 @@ class TransfermarktExtractor:
         try:
             self.logger.info(f"URL de lesiones: {team['injuries_url']}")
             
-            # Buscar la sección específica de lesiones
-            # Primero, buscar todos los encabezados de sección
-            section_headers = soup.find_all('h2', {'class': 'content-box-headline'})
-            
-            # Buscar el encabezado de lesiones
-            injuries_section = None
-            for header in section_headers:
-                if 'Sanciones y lesiones' in header.get_text(strip=True):
-                    # Encontrar la sección completa (div.box que contiene este encabezado)
-                    injuries_section = header.find_parent('div', {'class': 'box'})
-                    break
-            
+            # Extraer la sección de lesiones
+            injuries_section = self._find_injuries_section(soup, team['name'])
             if not injuries_section:
-                self.logger.warning(f"No se encontró sección de lesiones para {team['name']}")
                 return []
             
-            # Verificar si hay mensaje de "No hay datos"
-            empty_message = injuries_section.find('span', {'class': 'empty'}) if isinstance(injuries_section, Tag) else None
-            if empty_message and "No hay datos" in empty_message.get_text(strip=True):
-                self.logger.info(f"No hay lesiones para {team['name']}")
-                return []
-            
-            # Buscar tabla de lesiones dentro de la sección
-            injury_table = injuries_section.find('table', {'class': 'items'}) if isinstance(injuries_section, Tag) else None
+            # Extraer la tabla de lesiones
+            injury_table = self._find_injury_table(injuries_section, team['name'])
             if not injury_table:
-                self.logger.warning(f"No se encontró tabla de lesiones para {team['name']}")
-                return []
-                
-            # Buscar filas de lesiones
-            rows = injury_table.find_all('tr') if isinstance(injury_table, Tag) else []
-            self.logger.info(f"Filas en la tabla principal: {len(rows)}")
-            
-            # Verificar si hay encabezado
-            header_row = None
-            for row in rows:
-                if isinstance(row, Tag) and row.find('th') and len(row.find_all('th')) > 5:
-                    header_row = row
-                    break
-            
-            # Si no hay encabezado válido, puede no ser la tabla correcta
-            if not header_row:
-                self.logger.warning(f"No se encontró encabezado en la tabla para {team['name']}")
                 return []
             
-            valid_rows = []
-            # Procesar filas que no son encabezados
-            for row in rows:
-                if row == header_row or (isinstance(row, Tag) and row.find('th')):
-                    continue
-                    
-                # Verificar si es la fila de "Lesiones" (generalmente tiene class="extrarow")
-                if isinstance(row, Tag) and row.find('td', {'class': 'extrarow'}) and "Lesiones" in row.get_text(strip=True):
-                    continue
-                
-                # Obtener todas las celdas
-                cells = row.find_all('td') if isinstance(row, Tag) else []
-                if len(cells) >= 7:  # Asegurar que hay suficientes celdas
-                    # Verificar que la primera celda tenga una tabla anidada con un jugador
-                    first_cell = cells[0]
-                    player_table = first_cell.find('table', {'class': 'inline-table'}) if isinstance(first_cell, Tag) else None
-                    if isinstance(player_table, Tag) and player_table.find('a'):
-                        valid_rows.append(cells)
-                        # Log para depuración
-                        if len(valid_rows) == 1:
-                            self.logger.info(f"Primera fila de datos - Celdas: {len(cells)}")
-                            for i, cell in enumerate(cells):
-                                self.logger.info(f"  Celda {i}: {cell.get_text(strip=True)}")
-            
+            # Extraer las filas válidas
+            valid_rows = self._extract_valid_rows(injury_table)
             self.logger.info(f"Total de filas encontradas: {len(valid_rows)}")
             
             # Procesar filas válidas
@@ -368,6 +306,89 @@ class TransfermarktExtractor:
         
         self.logger.info(f"Lesiones extraídas de {team['name']}: {len(injuries)}")
         return injuries
+
+    def _find_injuries_section(self, soup, team_name: str) -> Optional[Tag]:
+        """Encuentra la sección de lesiones en la página."""
+        try:
+            # Buscar todos los encabezados de sección
+            section_headers = soup.find_all('h2', {'class': 'content-box-headline'})
+            
+            # Buscar el encabezado de lesiones
+            for header in section_headers:
+                if 'Sanciones y lesiones' in header.get_text(strip=True):
+                    # Encontrar la sección completa
+                    return header.find_parent('div', {'class': 'box'})
+            
+            self.logger.warning(f"No se encontró sección de lesiones para {team_name}")
+            return None
+        except Exception as e:
+            self.logger.error(f"Error buscando sección de lesiones: {e}")
+            return None
+
+    def _find_injury_table(self, injuries_section: Tag, team_name: str) -> Optional[Tag]:
+        """Encuentra la tabla de lesiones dentro de la sección."""
+        try:
+            # Verificar si hay mensaje de "No hay datos"
+            empty_message = injuries_section.find('span', {'class': 'empty'})
+            if empty_message and "No hay datos" in empty_message.get_text(strip=True):
+                self.logger.info(f"No hay lesiones para {team_name}")
+                return None
+            
+            # Buscar tabla de lesiones dentro de la sección
+            injury_table = injuries_section.find('table', {'class': 'items'})
+            if not injury_table or not isinstance(injury_table, Tag):
+                self.logger.warning(f"No se encontró tabla de lesiones para {team_name}")
+                return None
+            
+            return injury_table if isinstance(injury_table, Tag) else None
+        except Exception as e:
+            self.logger.error(f"Error buscando tabla de lesiones: {e}")
+            return None
+
+    def _extract_valid_rows(self, injury_table: Tag) -> List[List[Tag]]:
+        """Extrae las filas válidas de la tabla de lesiones."""
+        try:
+            rows = injury_table.find_all('tr')
+            self.logger.info(f"Filas en la tabla principal: {len(rows)}")
+            
+            # Verificar si hay encabezado
+            header_row = None
+            for row in rows:
+                if isinstance(row, Tag) and row.find('th') and len(row.find_all('th')) > 5:
+                    header_row = row
+                    break
+            
+            # Si no hay encabezado válido, puede no ser la tabla correcta
+            if not header_row:
+                self.logger.warning("No se encontró encabezado en la tabla")
+                return []
+            
+            valid_rows = []
+            # Procesar filas que no son encabezados
+            for row in rows:
+                if row == header_row or (isinstance(row, Tag) and row.find('th')):
+                    continue
+                    
+                # Verificar si es la fila de "Lesiones"
+                if isinstance(row, Tag) and row.find('td', {'class': 'extrarow'}) and "Lesiones" in row.get_text(strip=True):
+                    continue
+                
+                # Obtener todas las celdas
+                cells = row.find_all('td') if isinstance(row, Tag) else []
+                if len(cells) >= 7:  # Asegurar que hay suficientes celdas
+                    # Verificar que la primera celda tenga una tabla anidada con un jugador
+                    first_cell = cells[0]
+                    player_table = first_cell.find('table', {'class': 'inline-table'}) if isinstance(first_cell, Tag) else None
+                    if isinstance(player_table, Tag) and player_table.find('a'):
+                        valid_rows.append(cells)
+                        # Log para depuración
+                        if len(valid_rows) == 1:
+                            self.logger.info(f"Primera fila de datos - Celdas: {len(cells)}")
+            
+            return valid_rows
+        except Exception as e:
+            self.logger.error(f"Error extrayendo filas válidas: {e}")
+            return []
     
     def _parse_injury_row(self, cells: Sequence[Tag], team: Dict) -> Optional[Dict]:
         """
@@ -395,6 +416,8 @@ class TransfermarktExtractor:
                     if player_link and isinstance(player_link, Tag):
                         player_name = player_link.get_text(strip=True) or 'Desconocido'
                     
+                    position_cell = None
+
                     # Encontrar la celda de posición (segunda fila, única celda)
                     position_row = inline_table.find_all('tr')
                     if len(position_row) > 1:
@@ -453,30 +476,7 @@ class TransfermarktExtractor:
             self.logger.warning(f"Error parseando fila de lesión: {e}")
             return None
     
-    # Métodos auxiliares mejorados
-    
-    def _extract_text(self, cell) -> str:
-        """Extrae texto limpio de una celda."""
-        if not cell or not isinstance(cell, Tag):
-            return ''
-        return cell.get_text(strip=True)
-    
-    def _extract_number_from_cell(self, cell) -> str:
-        """Extrae número de una celda, incluyendo enlaces."""
-        if not cell or not isinstance(cell, Tag):
-            return '0'
-        
-        # Primero buscar en enlaces
-        link = cell.find('a')
-        if link:
-            link_text = link.get_text(strip=True)
-            if link_text and link_text.isdigit():
-                return link_text
-        
-        # Luego buscar en texto general
-        cell_text = cell.get_text(strip=True)
-        numbers = re.findall(r'\d+', cell_text)
-        return numbers[0] if numbers else '0'
+    # Métodos auxiliar
     
     def _parse_age(self, age_str: str) -> int:
         """Convierte string de edad a entero."""
@@ -531,36 +531,6 @@ class TransfermarktExtractor:
             
         return 0  # Default return if no other path matches
     
-    def _clean_injury_type(self, injury_str: str) -> str:
-        """Limpia y normaliza el tipo de lesión."""
-        if not injury_str:
-            return 'Desconocida'
-        
-        # Diccionario de normalización más completo
-        injury_mapping = {
-            'lesión de rodilla': 'Lesión de rodilla',
-            'rotura del ligamento': 'Rotura de ligamento',
-            'rotura de ligamento': 'Rotura de ligamento',
-            'lesión muscular': 'Lesión muscular',
-            'desgarro muscular': 'Desgarro muscular',
-            'esguince': 'Esguince',
-            'fractura': 'Fractura',
-            'contusión': 'Contusión',
-            'tendinitis': 'Tendinitis',
-            'sobrecarga': 'Sobrecarga muscular',
-            'rotura fibrilar': 'Rotura fibrilar'
-        }
-        
-        injury_lower = str(injury_str).lower().strip()
-        
-        # Buscar coincidencias
-        for key, value in injury_mapping.items():
-            if key in injury_lower:
-                return value
-        
-        # Si no encuentra coincidencia, limpiar y capitalizar
-        cleaned = str(injury_str).strip()
-        return cleaned.capitalize() if cleaned else 'Desconocida'
     
     def extract_all_injuries(self, force_refresh: bool = False) -> List[Dict]:
         """
@@ -572,8 +542,31 @@ class TransfermarktExtractor:
         Returns:
             Lista de diccionarios con todas las lesiones
         """
-        # Verificar cache
-        if not force_refresh and self.injuries_cache_file.exists():
+        # 1. Verificar y usar caché si es posible
+        if not force_refresh:
+            cached_data = self._try_load_from_cache()
+            if cached_data:
+                return cached_data
+        
+        # 2. Obtener lista de equipos
+        teams = self.extract_teams(force_refresh=force_refresh)
+        if not teams:
+            self.logger.error("No se pudieron obtener equipos")
+            return []
+        
+        # 3. Extraer lesiones de todos los equipos
+        all_injuries, successful_teams = self._extract_injuries_from_teams(teams)
+        
+        # 4. Guardar en caché si hay datos
+        if all_injuries:
+            self._save_injuries_to_cache(all_injuries, teams, successful_teams)
+        
+        self.logger.info(f"Extracción completada: {len(all_injuries)} lesiones de {successful_teams}/{len(teams)} equipos")
+        return all_injuries
+
+    def _try_load_from_cache(self) -> Optional[List[Dict]]:
+        """Intenta cargar lesiones desde el caché."""
+        if self.injuries_cache_file.exists():
             try:
                 with open(self.injuries_cache_file, 'r', encoding='utf-8') as f:
                     cached_data = json.load(f)
@@ -584,13 +577,10 @@ class TransfermarktExtractor:
                         return cached_data['injuries']
             except Exception as e:
                 self.logger.warning(f"Error leyendo cache de lesiones: {e}")
-        
-        # Obtener lista de equipos
-        teams = self.extract_teams(force_refresh=force_refresh)
-        if not teams:
-            self.logger.error("No se pudieron obtener equipos")
-            return []
-        
+        return None
+
+    def _extract_injuries_from_teams(self, teams: List[Dict]) -> Tuple[List[Dict], int]:
+        """Extrae lesiones de todos los equipos en la lista."""
         all_injuries = []
         successful_teams = 0
         
@@ -613,25 +603,24 @@ class TransfermarktExtractor:
             if i < len(teams):
                 time.sleep(2)
         
-        # Guardar en cache solo si obtuvimos datos
-        if all_injuries:
-            cache_data = {
-                'timestamp': datetime.now().isoformat(),
-                'total_teams': len(teams),
-                'successful_teams': successful_teams,
-                'total_injuries': len(all_injuries),
-                'injuries': all_injuries
-            }
-            
-            try:
-                with open(self.injuries_cache_file, 'w', encoding='utf-8') as f:
-                    json.dump(cache_data, f, ensure_ascii=False, indent=2)
-                    self.logger.info(f"Lesiones guardadas en cache: {len(all_injuries)}")
-            except Exception as e:
-                self.logger.warning(f"Error guardando cache de lesiones: {e}")
+        return all_injuries, successful_teams
+
+    def _save_injuries_to_cache(self, injuries: List[Dict], teams: List[Dict], successful_teams: int):
+        """Guarda las lesiones en el caché."""
+        cache_data = {
+            'timestamp': datetime.now().isoformat(),
+            'total_teams': len(teams),
+            'successful_teams': successful_teams,
+            'total_injuries': len(injuries),
+            'injuries': injuries
+        }
         
-        self.logger.info(f"Extracción completada: {len(all_injuries)} lesiones de {successful_teams}/{len(teams)} equipos")
-        return all_injuries
+        try:
+            with open(self.injuries_cache_file, 'w', encoding='utf-8') as f:
+                json.dump(cache_data, f, ensure_ascii=False, indent=2)
+                self.logger.info(f"Lesiones guardadas en cache: {len(injuries)}")
+        except Exception as e:
+            self.logger.warning(f"Error guardando cache de lesiones: {e}")
     
     def get_cache_info(self) -> Dict:
         """Obtiene información sobre el cache."""
