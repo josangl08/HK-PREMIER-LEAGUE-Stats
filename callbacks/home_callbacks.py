@@ -94,6 +94,9 @@ def update_injuries_data(transfermarkt_manager, force_update=False):
         tuple: (success, error_message)
     """
     try:
+        if force_update:
+            transfermarkt_manager._save_manual_update_timestamp(datetime.now())
+        
         success = transfermarkt_manager.refresh_data(force_scraping=force_update)
         
         if success:
