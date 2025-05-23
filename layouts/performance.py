@@ -24,7 +24,7 @@ def create_performance_layout():
             ])
         ]),
         
-        # Panel de control / Filtros mejorado - MÁS ESPACIADO
+        # Panel de control / Filtros mejorado
         dbc.Row([
             dbc.Col([
                 dbc.Card([
@@ -50,7 +50,7 @@ def create_performance_layout():
                                 dbc.Label("Team:", html_for="team-selector"),
                                 dcc.Dropdown(
                                     id="team-selector",
-                                    placeholder="Todos los equipos...",
+                                    placeholder="All teams...",
                                     className="mb-3",
                                     clearable=True
                                 )
@@ -61,12 +61,12 @@ def create_performance_layout():
                                 dbc.Label("Player:", html_for="player-selector"),
                                 dcc.Dropdown(
                                     id="player-selector",
-                                    placeholder="Todos los jugadores...",
+                                    placeholder="All players...",
                                     className="mb-3",
                                     clearable=True
                                 )
                             ], md=4)
-                        ], className="mb-3"),  # AGREGAR MARGEN ENTRE FILAS
+                        ], className="mb-3"),
                         
                         # Segunda fila de filtros
                         dbc.Row([
@@ -77,7 +77,7 @@ def create_performance_layout():
                                     id="position-filter",
                                     options=[
                                         {"label": "All Positions", "value": "all"},
-                                        {"label": "Golakeeper", "value": "Goalkeeper"},
+                                        {"label": "Goalkeeper", "value": "Goalkeeper"},
                                         {"label": "Defender", "value": "Defender"},
                                         {"label": "Midfielder", "value": "Midfielder"},
                                         {"label": "Winger", "value": "Winger"},
@@ -116,18 +116,18 @@ def create_performance_layout():
                             ], md=4)
                         ])
                     ])
-                ], className="mb-4")  # MANTENER MARGEN INFERIOR
+                ], className="mb-4")
             ])
         ]),
         
-        # Indicadores de estado - CON MARGEN
+        # Indicadores de estado
         dbc.Row([
             dbc.Col([
                 html.Div(id="status-alerts")
             ])
-        ], className="mb-3"),  # AGREGAR MARGEN
+        ], className="mb-3"),  
         
-        # Métricas principales (KPIs) - CON MARGEN
+        # Métricas principales (KPIs) 
         dbc.Row([
             dbc.Col([
                 dbc.Card([
@@ -139,7 +139,7 @@ def create_performance_layout():
             ])
         ], className="mb-4"),
         
-        # Sección de gráficos principales - CON MARGEN
+        # Sección de gráficos principales
         dbc.Row([
             # Gráfico principal izquierdo
             dbc.Col([
@@ -174,7 +174,7 @@ def create_performance_layout():
             ], md=6)
         ], className="mb-4"),
         
-        # Sección de estadísticas detalladas - CON MARGEN
+        # Sección de estadísticas detalladas
         dbc.Row([
             # Tabla de top performers
             dbc.Col([
@@ -196,7 +196,7 @@ def create_performance_layout():
             dbc.Col([
                 dbc.Card([
                     dbc.CardHeader([
-                        html.H5("Analysis by positon", className="mb-0")
+                        html.H5("Analysis by Position", className="mb-0")
                     ]),
                     dbc.CardBody([
                         dcc.Loading(
@@ -209,7 +209,7 @@ def create_performance_layout():
             ], md=6)
         ], className="mb-4"),
         
-        # Gráfico de comparación (condicional para equipos/jugadores) - CON MARGEN
+        # Gráfico de comparación (condicional para equipos/jugadores)
         dbc.Row([
             dbc.Col([
                 dbc.Card([

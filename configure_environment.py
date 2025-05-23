@@ -9,6 +9,10 @@ import sys
 import subprocess
 import shutil
 from pathlib import Path
+from dotenv import load_dotenv
+
+# Cargar variables de entorno
+load_dotenv()
 
 def print_banner():
     """Imprime el banner de bienvenida."""
@@ -50,26 +54,28 @@ def create_directories():
 def setup_environment():
     """Configura las variables de entorno."""
     env_file = Path('.env')
-    env_example = Path('.env.example')
     
     if not env_file.exists():
-        if env_example.exists():
-            shutil.copy('.env.example', '.env')
-            print("✓ Archivo .env creado desde .env.example")
-            print("⚠️  IMPORTANTE: Revisa y ajusta las configuraciones en .env")
-        else:
-            # Crear un .env básico
-            basic_env = """# Configuración básica
+        # Crear un .env básico
+        basic_env = """# Configuración básica
+APP_NAME="Hong Kong Premier League Dashboard"
+APP_VERSION="1.0.0"
+DEBUG=True
+# Configuración de servidor
+HOST=127.0.0.1
+PORT=8050
+# Configuración de autenticación
 ADMIN_USER=admin
 ADMIN_PASSWORD=admin
 SECRET_KEY=dev-secret-key-change-in-production
-DEBUG=True
+# Configuración de cache
 CACHE_TYPE=filesystem
 CACHE_DIR=./cache
+CACHE_DEFAULT_TIMEOUT=300
 """
-            with open('.env', 'w') as f:
-                f.write(basic_env)
-            print("✓ Archivo .env básico creado")
+        with open('.env', 'w') as f:
+            f.write(basic_env)
+        print("✓ Archivo .env básico creado")
     else:
         print("✓ Archivo .env ya existe")
 
@@ -86,52 +92,6 @@ def install_dependencies():
         return True
     except subprocess.CalledProcessError as e:
         print(f"❌ Error instalando dependencias: {e}")
-        return False
-
-def verify_installation():
-    """Verifica que las dependencias principales estén instaladas."""
-    required_packages = [
-        'dash',
-        'plotly',
-        'pandas',
-        'flask_login',
-        'dash_bootstrap_components'
-    ]
-    
-    missing_packages = []
-    for package in required_packages:
-        try:
-            __import__(package)
-            print(f"✓ {package} - OK")
-        except ImportError:
-            missing_packages.append(package)
-            print(f"❌ {package} - FALTA")
-    
-    return len(missing_packages) == 0
-
-def create_sample_data():
-    """Crea archivos de datos de muestra si es necesario."""
-    # Este paso es opcional ya que nuestro sistema genera datos automáticamente
-    print("✓ Datos de muestra: Se generarán automáticamente")
-
-def run_tests():
-    """Ejecuta pruebas básicas del sistema."""
-    print("\n🧪 Ejecutando pruebas básicas...")
-    
-    try:
-        # Prueba de importación de módulos principales
-        from data import HongKongDataManager
-        from utils.auth import User
-        from utils.cache import init_cache
-        print("✓ Módulos principales - OK")
-        
-        # Prueba de inicialización del gestor de datos
-        data_manager = HongKongDataManager(auto_load=False)
-        print("✓ Gestor de datos - OK")
-        
-        return True
-    except Exception as e:
-        print(f"❌ Error en pruebas: {e}")
         return False
 
 def main():
@@ -157,20 +117,6 @@ def main():
     if not install_dependencies():
         print("❌ Error: No se pudieron instalar todas las dependencias")
         sys.exit(1)
-    
-    # 5. Verificar instalación
-    print("\n🔍 Verificando instalación...")
-    if not verify_installation():
-        print("❌ Error: Faltan dependencias importantes")
-        sys.exit(1)
-    
-    # 6. Crear datos de muestra
-    print("\n📊 Configurando datos...")
-    create_sample_data()
-    
-    # 7. Ejecutar pruebas
-    if not run_tests():
-        print("⚠️  Advertencia: Algunas pruebas fallaron")
     
     print("""
 ╔══════════════════════════════════════════════════════════════╗

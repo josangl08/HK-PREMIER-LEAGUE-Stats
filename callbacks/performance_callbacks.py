@@ -1,4 +1,4 @@
-from dash import Input, Output, State, callback, html, dash_table, dcc, no_update
+from dash import Input, Output, State, callback, html, dcc
 import dash_bootstrap_components as dbc
 from dash.dcc.express import send_bytes, send_string
 import plotly.express as px
@@ -7,28 +7,13 @@ from plotly.subplots import make_subplots
 import pandas as pd
 from dash.exceptions import PreventUpdate
 from datetime import datetime
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+from utils.common import format_season_short, validate_filters, safe_get_analysis_level
 
 # Importar nuestro gestor de datos
 from data import HongKongDataManager
 
 # Inicializar el gestor de datos globalmente
-data_manager = HongKongDataManager(auto_load=True, background_preload=True)
-
-# Agregar esta función helper al inicio del archivo (después de los imports):
-def format_season_short(season):
-    """Convierte '2024-25' a '24/25'"""
-    if not season or '-' not in season:
-        return season
-    
-    try:
-        year1, year2 = season.split('-')
-        short_year1 = year1[-2:]  # Últimos 2 dígitos
-        short_year2 = year2[-2:]  # Últimos 2 dígitos
-        return f"{short_year1}/{short_year2}"
-    except:
-        return season
+data_manager = HongKongDataManager(auto_load=True)
     
 
 # Callback para actualizar opciones de selectores basado en temporada
@@ -197,10 +182,8 @@ def update_main_kpis(performance_data, filters):
         return "Sin datos disponibles", html.Div("Selecciona filtros válidos")
     
     # VALIDAR QUE FILTERS NO SEA None
-    if filters is None or not isinstance(filters, dict):
-        filters = {'analysis_level': 'league', 'season': 'N/A'}
-    
-    analysis_level = filters.get('analysis_level', 'league')
+    filters = validate_filters(filters)
+    analysis_level = safe_get_analysis_level(filters)
     season = filters.get('season', 'N/A')
     
     # Aplicar filtros en el título

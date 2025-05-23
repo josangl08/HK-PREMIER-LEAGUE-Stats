@@ -1,10 +1,4 @@
-"""
-Procesador de datos de lesiones extraídos de Transfermarkt - VERSIÓN FINAL CORREGIDA.
-Limpia, normaliza y transforma los datos para uso en el dashboard.
-"""
-
 import pandas as pd
-import numpy as np
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import logging
@@ -13,7 +7,7 @@ from pathlib import Path
 
 class TransfermarktProcessor:
     """
-    Procesador de datos de lesiones de Transfermarkt - VERSIÓN FINAL CORREGIDA.
+    Procesador de datos de lesiones de Transfermarkt
     Maneja mejor el parsing de fechas, tipos de datos y validación.
     """
     
@@ -21,80 +15,40 @@ class TransfermarktProcessor:
         """Inicializa el procesador."""
         self.logger = logging.getLogger(__name__)
         
-        # Mapeos de normalización mejorados
-        self.position_mapping = {
-            'defensa central': 'Defender',
-            'lateral derecho': 'Defender', 
-            'lateral izquierdo': 'Defender',
-            'defensor': 'Defender',
-            'pivote': 'Midfielder',
-            'mediocentro': 'Midfielder',
-            'mediocampista': 'Midfielder',
-            'mediocentro ofensivo': 'Midfielder',
-            'mediocentro defensivo': 'Midfielder',
-            'medio': 'Midfielder',
-            'extremo izquierdo': 'Winger',
-            'extremo derecho': 'Winger',
-            'extremo': 'Winger',
-            'delantero centro': 'Forward',
-            'delantero': 'Forward',
-            'segundo delantero': 'Forward',
-            'portero': 'Goalkeeper',
-            'arquero': 'Goalkeeper'
+        # Mapeo de posiciones simplificado
+        self.position_groups = {
+            'Goalkeeper': ['portero', 'arquero', 'gk', 'goalie', 'keeper'],
+            'Defender': ['defensa', 'lateral', 'central', 'defense', 'back', 'stopper', 'lb', 'rb', 'cb'],
+            'Midfielder': ['medio', 'mediocampista', 'pivot', 'pivote', 'midfielder', 'dm', 'cm', 'am'],
+            'Winger': ['extremo', 'interior', 'wing', 'wide', 'winger', 'rw', 'lw', 'rwf', 'lwf'],
+            'Forward': ['delantero', 'punta', 'forward', 'striker', 'centre-forward', 'center forward', 'cf', 'st', 'ss']
         }
         
-        self.injury_severity = {
-            'contusión': 'Leve',
-            'esguince': 'Leve',
-            'sobrecarga': 'Leve',
-            'molestias': 'Leve',
-            'lesión muscular': 'Moderada',
-            'desgarro': 'Moderada',
-            'tendinitis': 'Moderada',
-            'lesión de rodilla': 'Moderada',
-            'lesión en la rodilla': 'Moderada',
-            'fractura': 'Grave',
-            'rotura de ligamento': 'Grave',
-            'rotura del ligamento': 'Grave',
-            'rotura fibrilar': 'Grave',
-            'cirugía': 'Grave'
+        # Mapeo de severidades simplificado
+        self.severity_levels = {
+            'Leve': ['contusión', 'esguince', 'sobrecarga', 'molestias'],
+            'Moderada': ['lesión muscular', 'desgarro', 'tendinitis', 'lesión de rodilla', 'lesión en la rodilla'],
+            'Grave': ['fractura', 'rotura de ligamento', 'rotura del ligamento', 'rotura fibrilar', 'cirugía']
         }
         
-        # Mapeo de partes del cuerpo mejorado
-        self.body_part_mapping = {
-            'cabeza': 'Cabeza',
-            'cara': 'Cabeza',
-            'nariz': 'Cabeza',
-            'nasal': 'Cabeza',
-            'boca': 'Cabeza',
-            'contusión': 'Cabeza',
-            'conmoción': 'Cabeza',
-            'hombro': 'Hombro',
-            'costilla': 'Costillas',
-            'tórax': 'Pecho',
-            'espalda': 'Espalda',
-            'columna': 'Espalda',
-            'codo': 'Codo',
-            'muñeca': 'Muñeca',
-            'cadera': 'Cadera',
-            'abductor': 'Cadera',
-            'aductor': 'Cadera',
-            'ingle': 'Cadera',
-            'rodilla': 'Rodilla',
-            'menisco': 'Rodilla',
-            'cruzado': 'rodilla',
-            'isquiotibiales': 'Isquiotibiales',
-            'cuádriceps': 'Cuádriceps',
-            'muslo': 'Cuádriceps',
-            'perone': 'Perone',
-            'gemelo': 'Gemelo',
-            'pantorrilla': 'Gemelo',
-            'tobillo': 'Tobillo',
-            'pie': 'Pie',
-            'ligamento': 'Ligamentos',
-            'tendón': 'Tendones',
-            
-        }
+        # Mapeo de regiones corporales simplificado
+        self.body_regions = {
+            'Cabeza': ['cabeza', 'cara', 'nariz', 'nasal', 'boca', 'contusión', 'conmoción'],
+            'Tronco': ['costilla', 'tórax', 'pecho', 'espalda', 'columna'],
+            'Brazos': ['hombro', 'codo', 'muñeca', 'brazo', 'antebrazo', 'mano'],
+            'Cadera': ['cadera', 'pubis', 'ingle'],
+            'Rodilla': ['rodilla', 'menisco', 'cruzado'],
+            'Cuádriceps': ['cuádriceps', 'muslo'], 
+            'Isquiotibiales': ['isquiotibiales'],
+            'Abductor': ['abductor'],
+            'Adductor': ['adductor'],
+            'Peroné': ['peroné'],
+            'Tibia': ['tibia'],
+            'Gemelo': ['gemelo'],
+            'Tobillo': ['tobillo'],
+            'Pie': ['pie'],
+            'General': ['ligamento', 'tendón', 'músculo', 'articulación']
+    }
     
     def process_injuries_data(self, raw_injuries: List[Dict]) -> pd.DataFrame:
         """
@@ -162,10 +116,7 @@ class TransfermarktProcessor:
         return df
     
     def _process_dates_improved(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Procesa las fechas de lesiones
-        Maneja diferentes formatos de fecha y casos especiales.
-        """
+        """Procesa las fechas de lesiones con mejor manejo de formatos."""
         self.logger.info("Procesando fechas de lesiones...")
         
         # Verificar que las columnas existan
@@ -174,67 +125,21 @@ class TransfermarktProcessor:
         
         if not available_columns:
             self.logger.warning("No se encontraron columnas de fecha")
-            # Crear fechas por defecto
-            df['injury_date'] = pd.NaT
-            df['return_date'] = pd.NaT
-            df['recovery_days'] = 0
-            return df
+            return self._initialize_default_dates(df)
         
-        # Procesar fecha de inicio (injury_date)
-        if 'date_from' in df.columns:
-            df['injury_date'] = df['date_from'].apply(self._parse_date_robust)
-            # Log del parsing de fechas
-            valid_dates = df['injury_date'].notna().sum()
-            self.logger.info(f"Fechas de inicio válidas: {valid_dates}/{len(df)}")
-        else:
-            df['injury_date'] = pd.NaT
+        # Procesar fechas de inicio y fin
+        df = self._process_injury_dates(df)
+        df = self._process_return_dates(df)
         
-        # Procesar fecha de retorno (return_date)
-        if 'date_until' in df.columns:
-            df['return_date'] = df['date_until'].apply(self._parse_date_robust)
-            valid_returns = df['return_date'].notna().sum()
-            self.logger.info(f"Fechas de retorno válidas: {valid_returns}/{len(df)}")
-        else:
-            df['return_date'] = pd.NaT
+        # Calcular y completar días de recuperación
+        df = self._calculate_recovery_days(df)
         
-        # Calcular días de recuperación
-        df['recovery_days'] = df['days'].copy() if 'days' in df.columns else 0
-        df['recovery_days'] = pd.to_numeric(df['recovery_days'], errors='coerce').fillna(0)
-        
-        # Para lesiones con fechas pero sin días, calcular
-        missing_days_mask = (
-            (df['recovery_days'] == 0) & 
-            df['injury_date'].notna() & 
-            df['return_date'].notna()
-        )
-        
-        if missing_days_mask.any():
-            calculated_days = (df.loc[missing_days_mask, 'return_date'] - 
-                df.loc[missing_days_mask, 'injury_date']).dt.days
-            df.loc[missing_days_mask, 'recovery_days'] = calculated_days.fillna(0)
-            self.logger.info(f"Días calculados para {missing_days_mask.sum()} lesiones")
-        
-        # Para lesiones sin fecha de retorno, estimar basado en días
-        missing_return_mask = (
-            df['return_date'].isna() & 
-            df['injury_date'].notna() & 
-            (df['recovery_days'] > 0)
-        )
-        
-        if missing_return_mask.any():
-            df.loc[missing_return_mask, 'return_date'] = (
-                df.loc[missing_return_mask, 'injury_date'] + 
-                pd.to_timedelta(df.loc[missing_return_mask, 'recovery_days'], unit='D')
-            )
-            self.logger.info(f"Fechas de retorno estimadas para {missing_return_mask.sum()} lesiones")
-        
-        # Para lesiones sin fechas, asignar fecha reciente por defecto
-        no_date_mask = df['injury_date'].isna()
-        if no_date_mask.any():
-            # Asignar fechas en el último mes
-            recent_date = datetime.now() - timedelta(days=30)
-            df.loc[no_date_mask, 'injury_date'] = pd.Timestamp(recent_date)
-            self.logger.info(f"Fechas por defecto asignadas a {no_date_mask.sum()} lesiones")
+        # Estimar fechas faltantes cuando injury_date es NaT pero return_date existe
+        mask = df['injury_date'].isna() & df['return_date'].notna()
+        if mask.any():
+            # Estimar fecha de lesión como 30 días antes del retorno
+            df.loc[mask, 'injury_date'] = df.loc[mask, 'return_date'] - pd.Timedelta(days=30)
+            df.loc[mask, 'recovery_days'] = 30
         
         # Limpiar columnas auxiliares
         columns_to_drop = ['date_from', 'date_until', 'days']
@@ -243,23 +148,69 @@ class TransfermarktProcessor:
                 df = df.drop(col, axis=1)
         
         return df
+
+    def _initialize_default_dates(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Inicializa columnas de fechas con valores por defecto."""
+        df['injury_date'] = pd.NaT
+        df['return_date'] = pd.NaT
+        df['recovery_days'] = 0
+        return df
+
+    def _calculate_recovery_days(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Calcula los días de recuperación entre la fecha de lesión y retorno."""
+        if 'injury_date' in df.columns and 'return_date' in df.columns:
+            # Calcular diferencia en días donde ambas fechas existen
+            mask = df['injury_date'].notna() & df['return_date'].notna()
+            df.loc[mask, 'recovery_days'] = (df.loc[mask, 'return_date'] - df.loc[mask, 'injury_date']).dt.days
+            
+            # Asegurar que los días sean no negativos
+            df['recovery_days'] = df['recovery_days'].fillna(0).clip(lower=0)
+        else:
+            df['recovery_days'] = 0
+        return df
+
+    def _process_injury_dates(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Procesa las fechas de inicio de lesión."""
+        if 'date_from' in df.columns:
+            df['injury_date'] = df['date_from'].apply(self._parse_date_robust)
+            # Log del parsing de fechas
+            valid_dates = df['injury_date'].notna().sum()
+            self.logger.info(f"Fechas de inicio válidas: {valid_dates}/{len(df)}")
+        else:
+            df['injury_date'] = pd.NaT
+        return df
+
+    def _process_return_dates(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Procesa las fechas de retorno de lesión."""
+        if 'date_until' in df.columns:
+            df['return_date'] = df['date_until'].apply(self._parse_date_robust)
+            valid_returns = df['return_date'].notna().sum()
+            self.logger.info(f"Fechas de retorno válidas: {valid_returns}/{len(df)}")
+        else:
+            df['return_date'] = pd.NaT
+        return df
     
     def _parse_date_robust(self, date_str) -> Optional[pd.Timestamp]:
-        """
-        Parsea fechas de forma robusta manejando diferentes formatos.
-        
-        Args:
-            date_str: String de fecha en diferentes formatos
-            
-        Returns:
-            Timestamp de pandas o None si no se puede parsear
-        """
+        """Parsea fechas de forma robusta manejando diferentes formatos."""
         if pd.isna(date_str) or not str(date_str).strip():
             return None
         
         date_str = str(date_str).strip()
         
-        # Lista de formatos a probar
+        # Primer intento: parsing automático de pandas (más simple y rápido)
+        try:
+            parsed_date = pd.to_datetime(date_str, dayfirst=True, errors='coerce')
+            if not pd.isna(parsed_date):
+                # Validar rango razonable
+                min_date = datetime.now() - timedelta(days=5*365)  # 5 años atrás
+                max_date = datetime.now() + timedelta(days=365)    # 1 año adelante
+                
+                if min_date <= parsed_date <= max_date:
+                    return parsed_date
+        except:
+            pass
+        
+        # Segundo intento: formatos específicos
         formats_to_try = [
             '%d/%m/%Y',      # 15/03/2024
             '%d-%m-%Y',      # 15-03-2024
@@ -271,29 +222,20 @@ class TransfermarktProcessor:
             '%m/%d/%Y',      # 03/15/2024 (formato americano)
         ]
         
-        # Intentar cada formato
         for fmt in formats_to_try:
             try:
                 parsed_date = datetime.strptime(date_str, fmt)
-                # Validar que la fecha es razonable (últimos 5 años)
-                if (datetime.now() - timedelta(days=5*365) <= parsed_date <= 
-                    datetime.now() + timedelta(days=365)):
+                # Validar rango razonable
+                min_date = datetime.now() - timedelta(days=5*365)
+                max_date = datetime.now() + timedelta(days=365)
+                
+                if min_date <= parsed_date <= max_date:
                     return pd.Timestamp(parsed_date)
             except ValueError:
                 continue
         
-        # Intentar parsing automático de pandas
-        try:
-            parsed_date = pd.to_datetime(date_str, dayfirst=True, errors='coerce')
-            if not pd.isna(parsed_date):
-                # Validar rango razonable
-                if (datetime.now() - timedelta(days=5*365) <= parsed_date <= 
-                    datetime.now() + timedelta(days=365)):
-                    return parsed_date
-        except:
-            pass
-        
-        # Si nada funciona, intentar extraer números y crear fecha
+        # Último intento: extracción de números
+        self.logger.debug(f"Intentando extracción numérica para fecha: '{date_str}'")
         try:
             numbers = re.findall(r'\d+', date_str)
             if len(numbers) >= 3:
@@ -306,8 +248,7 @@ class TransfermarktProcessor:
                 
                 # Validar rangos
                 if 1 <= month <= 12 and 1 <= day <= 31 and 2000 <= year <= 2030:
-                    parsed_date = datetime(year, month, day)
-                    return pd.Timestamp(parsed_date)
+                    return pd.Timestamp(datetime(year, month, day))
         except:
             pass
         
@@ -447,49 +388,67 @@ class TransfermarktProcessor:
         return df
     
     def _final_validation_improved(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Validación final de los datos - VERSIÓN MEJORADA.
-        Menos restrictiva para conservar más datos.
-        """
+        """Validación final de los datos mejorada."""
         initial_count = len(df)
+        self.logger.info(f"Iniciando validación final con {initial_count} registros")
         
-        # Asegurar que los campos numéricos sean válidos
+        # Validar campos numéricos
+        df = self._validate_numeric_fields(df)
+        
+        # Validar jugadores
+        df = self._validate_players(df)
+        
+        # Validar rangos
+        df = self._validate_data_ranges(df)
+        
+        # Ordenar y reset
+        df = self._finalize_dataset(df)
+        
+        final_count = len(df)
+        self.logger.info(f"Validación final: {final_count} lesiones conservadas de {initial_count} iniciales")
+        
+        return df
+
+    def _validate_numeric_fields(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Asegura que los campos numéricos tengan valores válidos."""
         numeric_fields = ['age', 'recovery_days', 'market_value', 'days_since_injury']
         for field in numeric_fields:
             if field in df.columns:
                 df[field] = pd.to_numeric(df[field], errors='coerce').fillna(0)
-        
-        # Solo eliminar lesiones con datos claramente inválidos
-        # Mantener lesiones incluso sin fechas perfectas
+        return df
+
+    def _validate_players(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Valida que los registros tengan jugadores válidos."""
         valid_mask = (
             df['player_name'].notna() & 
             (df['player_name'] != 'Desconocido') &
             (df['player_name'].str.strip() != '')
         )
         
-        df = df[valid_mask]
+        filtered_df = df[valid_mask]
+        eliminated = len(df) - len(filtered_df)
+        if eliminated > 0:
+            self.logger.info(f"Eliminados {eliminated} registros con jugadores inválidos")
         
-        if len(df) < initial_count:
-            eliminated = initial_count - len(df)
-            self.logger.info(f"Eliminadas {eliminated} lesiones por datos inválidos")
+        return filtered_df
+
+    def _validate_data_ranges(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Valida que los datos numéricos estén en rangos razonables."""
+        if 'age' in df.columns:
+            df = df[df['age'].between(0, 50) | (df['age'] == 0)]
         
+        if 'recovery_days' in df.columns:
+            df = df[df['recovery_days'].between(0, 1000)]
+        
+        return df
+
+    def _finalize_dataset(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Finaliza el dataset ordenándolo y reseteando índices."""
         # Ordenar por fecha de lesión (más recientes primero)
         if 'injury_date' in df.columns and df['injury_date'].notna().any():
             df = df.sort_values('injury_date', ascending=False, na_position='last')
         
-        df = df.reset_index(drop=True)
-        
-        # Validar rangos solo para campos críticos
-        if 'age' in df.columns:
-            df = df[df['age'].between(0, 50) | (df['age'] == 0)]  # Permitir edad 0 (desconocida)
-        
-        if 'recovery_days' in df.columns:
-            df = df[df['recovery_days'].between(0, 1000)]  # Rango más amplio
-        
-        final_count = len(df)
-        self.logger.info(f"Validación final: {final_count} lesiones conservadas de {initial_count} iniciales")
-        
-        return df
+        return df.reset_index(drop=True)
     
     # Métodos auxiliares (sin cambios significativos)
     
@@ -500,13 +459,20 @@ class TransfermarktProcessor:
         
         injury_lower = str(injury_type).lower()
         
-        for keyword, severity in self.injury_severity.items():
-            if keyword in injury_lower:
+        # Usar el nuevo mapeo simplificado
+        for severity, keywords in self.severity_levels.items():
+            if any(keyword in injury_lower for keyword in keywords):
                 return severity
+        
+        # Si no hay coincidencia directa, intentar una clasificación basada en palabras clave
+        if any(word in injury_lower for word in ['grave', 'seria', 'severa', 'importante']):
+            return 'Grave'
+        elif any(word in injury_lower for word in ['leve', 'menor', 'simple']):
+            return 'Leve'
         
         # Por defecto
         return 'Moderada'
-    
+
     def _determine_body_part(self, injury_type: str) -> str:
         """Determina la parte del cuerpo afectada basada en el tipo de lesión."""
         if not injury_type:
@@ -514,9 +480,15 @@ class TransfermarktProcessor:
         
         injury_lower = str(injury_type).lower()
         
-        for keyword, body_part in self.body_part_mapping.items():
-            if keyword in injury_lower:
-                return body_part
+        # Primero, intentar con el mapeo específico
+        for part, keywords in self.body_regions.items():
+            if any(keyword in injury_lower for keyword in keywords):
+                return part
+        
+        # Si no hay coincidencia específica, usar regiones más generales
+        for region, keywords in self.body_regions.items():
+            if any(keyword in injury_lower for keyword in keywords):
+                return region
         
         # Si no encuentra coincidencia específica
         return 'Otros'
@@ -528,9 +500,9 @@ class TransfermarktProcessor:
         
         position_lower = str(position).lower()
         
-        for keyword, group in self.position_mapping.items():
-            if keyword in position_lower:
-                return group
+        for group_name, keywords in self.position_groups.items():
+            if any(keyword in position_lower for keyword in keywords):
+                return group_name
         
         # Si no encuentra coincidencia
         return 'Otros'

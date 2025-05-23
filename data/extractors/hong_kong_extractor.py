@@ -7,10 +7,12 @@ import time
 from datetime import datetime
 from typing import Dict, Optional, Tuple
 from pathlib import Path
+import logging
 from dotenv import load_dotenv
 load_dotenv()
 
-
+# Configurar logger
+logger = logging.getLogger(__name__)
 class HongKongDataExtractor:
     """
     Extractor de datos para la Liga de Hong Kong desde GitHub.
@@ -18,6 +20,13 @@ class HongKongDataExtractor:
     """
     
     def __init__(self, cache_dir: str = "data/cache"):
+        """
+        Inicializa el extractor.
+        
+        Args:
+            cache_dir: Directorio para cache de datos
+        """
+        # Configuración de URLs (centralizada)
         self.base_url = "https://raw.githubusercontent.com/griffisben/Wyscout_Prospect_Research/adabd2a3f30e739aa8a048aaf51c08cda248e5fe/Main%20App"
         self.github_api_base = "https://api.github.com/repos/griffisben/Wyscout_Prospect_Research/contents/Main%20App"
         
@@ -47,9 +56,9 @@ class HongKongDataExtractor:
         self.github_token = os.getenv("GITHUB_TOKEN")
         if self.github_token:
             self.headers["Authorization"] = f"token {self.github_token}"
-            print("✅ Token de GitHub configurado correctamente")
+            logger.info("Token de GitHub configurado correctamente")
         else:
-            print("⚠️ No se encontró un token de GitHub. Se usarán límites de API reducidos.")
+            logger.warning("No se encontró un token de GitHub. Se usarán límites de API reducidos.")
     
     def _load_metadata(self) -> Dict:
         """Carga metadatos del cache local."""
@@ -58,7 +67,7 @@ class HongKongDataExtractor:
                 with open(self.metadata_file, 'r') as f:
                     return json.load(f)
             except json.JSONDecodeError:
-                print("Error leyendo metadatos, creando nuevos...")
+                logger.error("Error leyendo metadatos, creando nuevos...")
         return {}
     
     def _save_metadata(self):
@@ -73,7 +82,7 @@ class HongKongDataExtractor:
     def _get_github_file_info(self, filename: str) -> Optional[Dict]:
         """
         Obtiene información del archivo desde la API de GitHub.
-        Versión mejorada con mejor manejo de errores y caché.
+        Solo cachea info de la temporada actual para verificar actualizaciones.
         
         Args:
             filename: Nombre del archivo CSV
@@ -81,12 +90,15 @@ class HongKongDataExtractor:
         Returns:
             Diccionario con información del archivo o None si hay error
         """
-        # Verificar si tenemos esta información en caché
+        # Solo crear cache para la temporada actual (2024-25)
+        current_season_file = "Hong Kong Premier League 24-25.csv"
+        should_cache = filename == current_season_file
+        
         cache_key = f"file_info_{filename}"
         cached_info_file = Path(self.cache_dir) / f"{cache_key}.json"
         
-        # Usar caché si existe y no tiene más de 24 horas
-        if cached_info_file.exists():
+        # Usar caché solo para temporada actual y si existe y no tiene más de 24 horas
+        if should_cache and cached_info_file.exists():
             try:
                 file_age = datetime.now() - datetime.fromtimestamp(cached_info_file.stat().st_mtime)
                 if file_age.total_seconds() < 24 * 3600:  # Menos de 24 horas
@@ -98,19 +110,18 @@ class HongKongDataExtractor:
         try:
             api_url = f"{self.github_api_base}/{filename}"
             
-            # Añadir encabezado User-Agent para evitar algunos bloqueos
             headers = self.headers.copy()
             headers['User-Agent'] = 'HongKongLeagueDataExtractor/1.0'
             
             # Implementar retroceso exponencial
             max_retries = 3
-            retry_delay = 2  # segundos
+            retry_delay = 2
             
             for retry in range(max_retries):
                 try:
                     if retry > 0:
                         print(f"Intento {retry+1} de {max_retries} para acceder a GitHub API...")
-                        time.sleep(retry_delay * (2**retry))  # Retroceso exponencial
+                        time.sleep(retry_delay * (2**retry))
                     
                     response = requests.get(api_url, headers=headers, timeout=10)
                     
@@ -123,9 +134,13 @@ class HongKongDataExtractor:
                             'last_modified': file_info.get('git_url')
                         }
                         
-                        # Guardar en caché
-                        with open(cached_info_file, 'w') as f:
-                            json.dump(result, f)
+                        # Solo guardar en caché si es temporada actual
+                        if should_cache:
+                            with open(cached_info_file, 'w') as f:
+                                json.dump(result, f)
+                            print(f"✓ Info de GitHub cacheada para {filename}")
+                        else:
+                            print(f"✓ Info de GitHub obtenida (sin cache) para {filename}")
                         
                         return result
                     elif response.status_code == 403:
@@ -135,17 +150,21 @@ class HongKongDataExtractor:
                             reset_datetime = datetime.fromtimestamp(reset_time)
                             wait_time = (reset_datetime - datetime.now()).total_seconds()
                             print(f"Rate limit excedido. Se reiniciará en {wait_time/60:.1f} minutos")
-                            break  # No reintentar si es un problema de límite de tasa
+                            break
                         else:
                             print(f"Error de acceso a GitHub API: 403 - Acceso denegado")
                     else:
                         print(f"Error accediendo a GitHub API: {response.status_code}")
                 except requests.RequestException as e:
-                    if retry == max_retries - 1:  # Último intento
+                    if retry == max_retries - 1:
                         print(f"Error conectando a GitHub API: {e}")
-                    # Si no es el último intento, simplemente continuará con el siguiente
-            
-            # Si llegamos aquí, todos los intentos fallaron. Usar caché antiguo si existe
+                
+            # Si llegamos aquí, todos los intentos fallaron. Para temporadas pasadas, esto es aceptable
+            if not should_cache:
+                print(f"⚠️ No se pudo obtener info de GitHub para {filename} (temporada pasada, continuando...)")
+                return None
+                
+            # Para temporada actual, usar caché antiguo si existe
             if cached_info_file.exists():
                 try:
                     with open(cached_info_file, 'r') as f:
@@ -172,13 +191,16 @@ class HongKongDataExtractor:
         """
         try:
             file_url = f"{self.base_url}/{filename}"
+            logger.info(f"Descargando archivo CSV desde: {file_url}")
+            
             response = requests.get(file_url, timeout=30)
             response.raise_for_status()
             
+            logger.info(f"Archivo {filename} descargado exitosamente ({len(response.text)} bytes)")
             return response.text
             
         except requests.RequestException as e:
-            print(f"Error downloading {filename}: {e}")
+            logger.error(f"Error descargando {filename}: {e}")
             return None
     
     def _get_cached_file_path(self, season: str) -> Path:
@@ -240,7 +262,7 @@ class HongKongDataExtractor:
             DataFrame con los datos o None si hay error
         """
         if season not in self.available_seasons:
-            print(f"Temporada {season} no disponible")
+            logger.info(f"Temporada {season} no disponible")
             return None
         
         filename = self.available_seasons[season]
@@ -251,18 +273,18 @@ class HongKongDataExtractor:
         if not force_update and cached_file.exists():
             needs_update, message = self.check_for_updates(season)
             if not needs_update:
-                print(f"Usando datos en cache: {message}")
+                logger.info(f"Usando datos en cache: {message}")
                 return pd.read_csv(cached_file)
         
         # Descargar archivo
-        print(f"Descargando datos de {season}...")
+        logger.info(f"Descargando datos de {season}...")
         content = self._download_csv_content(filename)
         
         if content is None:
-            print(f"Error descargando {filename}")
+            logger.error(f"Error descargando {filename}")
             # Intentar usar cache si existe
             if cached_file.exists():
-                print("Usando datos en cache por error de descarga")
+                logger.info("Usando datos en cache por error de descarga")
                 return pd.read_csv(cached_file)
             return None
         
@@ -288,11 +310,11 @@ class HongKongDataExtractor:
             from io import StringIO
             df = pd.read_csv(StringIO(content))
             
-            print(f"✓ Datos de {season} descargados exitosamente ({len(df)} registros)")
+            logger.info(f"✓ Datos de {season} descargados exitosamente ({len(df)} registros)")
             return df
             
         except Exception as e:
-            print(f"Error procesando datos de {season}: {e}")
+            logger.error(f"Error procesando datos de {season}: {e}")
             return None
     
     def get_available_seasons(self) -> list:
@@ -337,7 +359,7 @@ class HongKongDataExtractor:
                 del self.metadata[season_key]
                 self._save_metadata()
             
-            print(f"Cache de {season} eliminado")
+            logger.info(f"Cache de {season} eliminado")
         else:
             # Limpiar todo
             for file in self.cache_dir.glob("hong_kong_*.csv"):
@@ -345,4 +367,4 @@ class HongKongDataExtractor:
             
             self.metadata.clear()
             self._save_metadata()
-            print("Todo el cache eliminado")
+            logger.info("Todo el cache eliminado")

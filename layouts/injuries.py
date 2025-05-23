@@ -26,20 +26,20 @@ def create_injuries_layout():
             dbc.Col([
                 dbc.Card([
                     dbc.CardHeader([
-                        html.H4("Filtros de Análisis", className="mb-0")
+                        html.H4("Analysis Filters", className="mb-0")
                     ]),
                     dbc.CardBody([
                         dbc.Row([
                             # Selector de tipo de análisis
                             dbc.Col([
-                                dbc.Label("Tipo de Análisis:", html_for="injury-analysis-type"),
+                                dbc.Label("Analysis Type:", html_for="injury-analysis-type"),
                                 dcc.Dropdown(
                                     id="injury-analysis-type",
                                     options=[
-                                        {"label": "🏥 Lesiones Generales", "value": "general"},
-                                        {"label": "🦵 Lesiones por Región", "value": "body_part"},
-                                        {"label": "📅 Tendencias Temporales", "value": "temporal"},
-                                        {"label": "⚽ Lesiones por Equipo", "value": "team"}
+                                        {"label": "🏥 General Injuries", "value": "general"},
+                                        {"label": "🦵 Injuries by Region", "value": "body_part"},
+                                        {"label": "📅 Temporal Trends", "value": "temporal"},
+                                        {"label": "⚽ Injuries by Team", "value": "team"}
                                     ],
                                     value="general",
                                     className="mb-3",
@@ -53,7 +53,8 @@ def create_injuries_layout():
                                 dcc.Dropdown(
                                     id="injury-team-selector",
                                     placeholder="Todos los equipos...",
-                                    className="mb-3"
+                                    className="mb-3",
+                                    value="all"  # ← AGREGAR VALOR POR DEFECTO
                                 )
                             ], md=3),
                             
@@ -69,24 +70,24 @@ def create_injuries_layout():
                                         {"label": "Última temporada", "value": "season"},
                                         {"label": "Todo el historial", "value": "all"}
                                     ],
-                                    value="3m",
+                                    value="season",  # ← CAMBIAR A 'season' POR DEFECTO
                                     className="mb-3"
                                 )
                             ], md=3),
                             
                             # Botones de acción
                             dbc.Col([
-                                dbc.Label("Acciones:", html_for="injury-action-buttons"),
+                                dbc.Label("Actions:", html_for="injury-action-buttons"),
                                 html.Div([
                                     dbc.Button(
-                                        "🔄 Actualizar",
+                                        "🔄 Refresh",
                                         id="injury-refresh-button",
                                         color="primary",
                                         size="sm",
                                         className="me-2"
                                     ),
                                     dbc.Button(
-                                        "📊 Exportar Reporte",
+                                        "📊 Export Report",
                                         id="injury-export-button",
                                         color="success",
                                         size="sm"
@@ -104,7 +105,7 @@ def create_injuries_layout():
             dbc.Col([
                 dbc.Card([
                     dbc.CardBody([
-                        html.H4("Métricas de Lesiones", className="card-title"),
+                        html.H4("Injury Metrics", className="card-title"),
                         html.Div(id="injury-main-kpis")
                     ])
                 ])
@@ -117,7 +118,7 @@ def create_injuries_layout():
             dbc.Col([
                 dbc.Card([
                     dbc.CardHeader([
-                        html.H5("Distribución de Lesiones", className="mb-0")
+                        html.H5("Injury Distribution", className="mb-0")
                     ]),
                     dbc.CardBody([
                         dcc.Loading(
@@ -133,7 +134,7 @@ def create_injuries_layout():
             dbc.Col([
                 dbc.Card([
                     dbc.CardHeader([
-                        html.H5("Tendencias de Lesiones", className="mb-0")
+                        html.H5("Injury Trends", className="mb-0")
                     ]),
                     dbc.CardBody([
                         dcc.Loading(
@@ -152,7 +153,7 @@ def create_injuries_layout():
             dbc.Col([
                 dbc.Card([
                     dbc.CardHeader([
-                        html.H5("Registro de Lesiones", className="mb-0")
+                        html.H5("Injury Records", className="mb-0")
                     ]),
                     dbc.CardBody([
                         dcc.Loading(
@@ -168,7 +169,7 @@ def create_injuries_layout():
             dbc.Col([
                 dbc.Card([
                     dbc.CardHeader([
-                        html.H5("Lesiones por Región", className="mb-0")
+                        html.H5("Injuries by Region", className="mb-0")
                     ]),
                     dbc.CardBody([
                         dcc.Loading(
@@ -186,7 +187,7 @@ def create_injuries_layout():
             dbc.Col([
                 dbc.Card([
                     dbc.CardHeader([
-                        html.H5("Análisis de Riesgo de Lesiones", className="mb-0")
+                        html.H5("Injury Risk Analysis", className="mb-0")
                     ]),
                     dbc.CardBody([
                         dcc.Loading(
