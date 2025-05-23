@@ -5,7 +5,7 @@ Versión limpia y optimizada que mantiene funcionalidad esencial.
 
 import pandas as pd
 from typing import Dict, List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 import json
 from pathlib import Path
@@ -201,7 +201,7 @@ class HongKongDataManager:
             # 3. Crear agregador
             aggregator = HongKongStatsAggregator(processed_data.copy())
             
-            # 4. SIEMPRE actualizar estado actual (ESTE ERA EL PROBLEMA)
+            # 4. SIEMPRE actualizar estado actual
             self.current_season = target_season
             self.raw_data = raw_data
             self.processed_data = processed_data
@@ -365,6 +365,61 @@ class HongKongDataManager:
             'season': target_season,
             'last_update': self.last_update[target_season].isoformat() if target_season in self.last_update else None
         }
+    
+    def should_check_for_updates(self, season: Optional[str] = None) -> bool:
+        """
+        Determina si se debe verificar actualizaciones para una temporada.
+        Para la temporada actual, solo verificar los lunes por la mañana.
+        Para temporadas anteriores, nunca verificar.
+        
+        Args:
+            season: Temporada a verificar (por defecto la actual)
+            
+        Returns:
+            True si se debe verificar actualizaciones
+        """
+        target_season = season or self.current_season
+        current_season = "2024-25"
+        
+        # Para temporadas anteriores, nunca verificar
+        if target_season != current_season:
+            logger.info(f"No se verifican actualizaciones para temporada anterior: {target_season}")
+            return False
+        
+        # Para temporada actual, verificar solo los lunes por la mañana
+        now = datetime.now()
+        is_monday = now.weekday() == 0  # 0 = Lunes
+        is_morning = now.hour < 12  # Antes de mediodía
+        
+        # Si hay forzado manual (desde UI), siempre verificar
+        last_manual_check = self.last_update.get(f"{target_season}_manual", None)
+        is_manual_check = False
+        
+        if last_manual_check:
+            # Si ha pasado menos de 5 minutos desde la última verificación manual
+            time_since_manual = datetime.now() - last_manual_check
+            is_manual_check = time_since_manual.total_seconds() < 300  # 5 minutos
+        
+        # TEMPORAL: Forzar verificación siempre para pruebas
+        logger.info(f"🧪 MODO PRUEBA: Verificando actualizaciones para {target_season} (forzado)")
+        return True
+        
+        # CÓDIGO ORIGINAL (comentado temporalmente):
+        # if is_monday and is_morning:
+        #     # Verificar si ya se comprobó hoy
+        #     last_update = self.last_update.get(target_season)
+        #     if last_update and last_update.date() == now.date():
+        #         logger.info(f"Ya se verificaron actualizaciones hoy para {target_season}")
+        #         return False
+        #     
+        #     logger.info(f"Verificando actualizaciones para {target_season} (lunes por la mañana)")
+        #     return True
+        # elif is_manual_check:
+        #     logger.info(f"Verificando actualizaciones para {target_season} (solicitud manual)")
+        #     return True
+        # else:
+        #     logger.info(f"No es momento de verificar actualizaciones automáticas para {target_season}")
+        #     return False
     
     def _check_data_availability(self) -> bool:
         """Verifica si hay datos disponibles."""

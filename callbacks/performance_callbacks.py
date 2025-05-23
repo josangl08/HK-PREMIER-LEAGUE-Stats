@@ -9,6 +9,11 @@ from dash.exceptions import PreventUpdate
 from datetime import datetime
 from utils.common import format_season_short, validate_filters, safe_get_analysis_level
 
+from utils.performance_helpers import (
+    validate_performance_data, get_analysis_title, 
+    create_kpi_structure, handle_performance_error
+)
+
 # Importar nuestro gestor de datos
 from data import HongKongDataManager
 
@@ -75,6 +80,9 @@ def load_performance_data(season, team, player, position_filter, age_range):
         # Si season es None, usar la temporada actual
         if not season:
             season = data_manager.current_season
+            # Asegurar que los datos de la temporada actual estén disponibles
+            if not data_manager._check_data_availability():
+                data_manager.refresh_data(season)       
 
         # Cambiar temporada si es necesario
         if season != data_manager.current_season:
@@ -126,20 +134,20 @@ def load_performance_data(season, team, player, position_filter, age_range):
         # Alert de éxito mejorado
         if analysis_level == 'league':
                 status_alert = dbc.Alert(
-                    f"✅ Datos cargados exitosamente - Liga ({format_season_short(season)})",
+                    f"✅ Data successfully loaded - League ({format_season_short(season)})",
                     color="success",
                     dismissable=True,
                     duration=3000
                 )
         elif analysis_level == 'team':
             status_alert = dbc.Alert(
-                f"✅ Datos cargados exitosamente - Equipo: {team} ({format_season_short(season)})",
+                f"✅ Data successfully loaded - Team: {team} ({format_season_short(season)})",
                 color="success",
                 dismissable=True,
                 duration=3000
             )
         elif analysis_level == 'player':
-            player_message = f"✅ Datos cargados exitosamente - Jugador: {player}"
+            player_message = f"✅ Data successfully loaded - Player: {player}"
             if team:
                 player_message += f" ({team})"
             status_alert = dbc.Alert(
@@ -178,183 +186,33 @@ def load_performance_data(season, team, player, position_filter, age_range):
 def update_main_kpis(performance_data, filters):
     """Actualiza los KPIs principales según los datos."""
     
-    if not performance_data or 'error' in performance_data:
+    # Validar datos usando función auxiliar
+    if not validate_performance_data(performance_data, "KPIs"):
         return "Sin datos disponibles", html.Div("Selecciona filtros válidos")
     
-    # VALIDAR QUE FILTERS NO SEA None
-    filters = validate_filters(filters)
-    analysis_level = safe_get_analysis_level(filters)
-    season = filters.get('season', 'N/A')
-    
-    # Aplicar filtros en el título
-    filter_info = []
-    if filters.get('position_filter') and filters.get('position_filter') != 'all':
-        filter_info.append(f"Pos: {filters['position_filter']}")
-    if filters.get('age_range') and filters['age_range'] != [15, 45]:
-        filter_info.append(f"Edad: {filters['age_range'][0]}-{filters['age_range'][1]}")
-    
-    filter_suffix = f" ({', '.join(filter_info)})" if filter_info else ""
-    
-    # KPIs para la liga
-    if analysis_level == 'league' and 'overview' in performance_data:
-        overview = performance_data['overview']
-        title = f"Liga de Hong Kong - {season}{filter_suffix}"
+    try:
+        # Obtener título usando función auxiliar
+        title = get_analysis_title(filters, performance_data)
         
-        kpis = dbc.Row([
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardBody([
-                        html.H4(overview.get('total_players', 0), className="text-primary"),
-                        html.P("Jugadores", className="card-text")
-                    ])
-                ])
-            ], md=2),
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardBody([
-                        html.H4(overview.get('total_teams', 0), className="text-success"),
-                        html.P("Equipos", className="card-text")
-                    ])
-                ])
-            ], md=2),
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardBody([
-                        html.H4(overview.get('total_goals', 0), className="text-warning"),
-                        html.P("Goles Totales", className="card-text")
-                    ])
-                ])
-            ], md=2),
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardBody([
-                        html.H4(overview.get('total_assists', 0), className="text-info"),
-                        html.P("Asistencias", className="card-text")
-                    ])
-                ])
-            ], md=2),
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardBody([
-                        html.H4(f"{overview.get('average_age', 0)}", className="text-secondary"),
-                        html.P("Edad Promedio", className="card-text")
-                    ])
-                ])
-            ], md=2),
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardBody([
-                        html.H4(f"{overview.get('avg_goals_per_player', 0)}", className="text-primary"),
-                        html.P("Goles/Jugador", className="card-text")
-                    ])
-                ])
-            ], md=2)
-        ])
+        # Validar filtros y obtener nivel de análisis
+        filters = validate_filters(filters)
+        analysis_level = safe_get_analysis_level(filters)
+        
+        # Crear estructura de KPIs usando función auxiliar
+        kpi_data = create_kpi_structure(analysis_level, performance_data)
+        
+        if not kpi_data:
+            return "Datos no disponibles", html.Div("Error procesando datos")
+        
+        # Crear fila de KPIs usando utilidad común
+        from utils.common import create_kpi_cards_row
+        kpis = create_kpi_cards_row(kpi_data)
         
         return title, kpis
-    
-    # KPIs para equipo
-    elif analysis_level == 'team' and 'overview' in performance_data:
-        overview = performance_data['overview']
-        title = f"{overview.get('team_name', 'Equipo')} - {season}{filter_suffix}"
         
-        kpis = dbc.Row([
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardBody([
-                        html.H4(overview.get('total_players', 0), className="text-primary"),
-                        html.P("Jugadores", className="card-text")
-                    ])
-                ])
-            ], md=3),
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardBody([
-                        html.H4(overview.get('total_goals', 0), className="text-warning"),
-                        html.P("Goles Totales", className="card-text")
-                    ])
-                ])
-            ], md=3),
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardBody([
-                        html.H4(overview.get('total_assists', 0), className="text-info"),
-                        html.P("Asistencias", className="card-text")
-                    ])
-                ])
-            ], md=3),
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardBody([
-                        html.H4(f"{overview.get('avg_age', 0)}", className="text-secondary"),
-                        html.P("Edad Promedio", className="card-text")
-                    ])
-                ])
-            ], md=3)
-        ])
-        
-        return title, kpis
-    
-    # KPIs para jugador
-    elif analysis_level == 'player' and 'basic_info' in performance_data:
-        basic_info = performance_data['basic_info']
-        performance_stats = performance_data.get('performance_stats', {})
-        title = f"{basic_info.get('name', 'Jugador')} - {basic_info.get('team', 'N/A')}"
-        
-        kpis = dbc.Row([
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardBody([
-                        html.H4(basic_info.get('age', 'N/A'), className="text-primary"),
-                        html.P("Edad", className="card-text")
-                    ])
-                ])
-            ], md=2),
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardBody([
-                        html.H4(basic_info.get('matches_played', 0), className="text-success"),
-                        html.P("Partidos", className="card-text")
-                    ])
-                ])
-            ], md=2),
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardBody([
-                        html.H4(performance_stats.get('goals', 0), className="text-warning"),
-                        html.P("Goles", className="card-text")
-                    ])
-                ])
-            ], md=2),
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardBody([
-                        html.H4(performance_stats.get('assists', 0), className="text-info"),
-                        html.P("Asistencias", className="card-text")
-                    ])
-                ])
-            ], md=2),
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardBody([
-                        html.H4(basic_info.get('position_group', 'N/A'), className="text-secondary"),
-                        html.P("Posición", className="card-text")
-                    ])
-                ])
-            ], md=2),
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardBody([
-                        html.H4(f"{performance_stats.get('minutes_per_match', 0):.0f}", className="text-primary"),
-                        html.P("Min/Partido", className="card-text")
-                    ])
-                ])
-            ], md=2)
-        ])
-        
-        return title, kpis
-    
-    return "Datos no disponibles", html.Div("Error procesando datos")
+    except Exception as e:
+        error_info = handle_performance_error(e, "actualizando KPIs")
+        return "Error", html.Div(str(error_info.get('error', 'Error desconocido')))
 
 # Callback para gráfico principal
 @callback(
@@ -490,6 +348,10 @@ def update_main_chart(chart_data, filters):
                     # Obtener valores
                     p_val = player_values[i]
                     pos_val = position_avg[i]
+
+                    # ARREGLO: Convertir None a 0 para evitar error en abs()
+                    p_val = p_val if p_val is not None else 0
+                    pos_val = pos_val if pos_val is not None else 0
                     
                     # Si ambos valores son cercanos a cero, usamos valores base
                     if abs(p_val) < 0.001 and abs(pos_val) < 0.001:

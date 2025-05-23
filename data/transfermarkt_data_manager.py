@@ -213,10 +213,15 @@ class TransfermarktDataManager:
             self.aggregator = TransfermarktStatsAggregator(self.processed_injuries)
             
             # 5. Actualizar timestamp solo si fue actualización real
-            if force_scraping or self._should_update_data():
+            if force_scraping:
+                # Actualización MANUAL - crear timestamp separado
+                self._save_manual_update_timestamp(datetime.now())
+                logger.info("Timestamp de actualización MANUAL guardado")
+            elif self._should_update_data():
+                # Actualización AUTOMÁTICA - timestamp regular
                 self.last_update = datetime.now()
                 self._save_last_update()
-                logger.info("Timestamp de actualización guardado")
+                logger.info("Timestamp de actualización AUTOMÁTICA guardado")
             
             logger.info(f"✅ Datos actualizados: {len(self.processed_injuries)} lesiones")
             return True
