@@ -140,9 +140,16 @@ def update_system_status(n_clicks, pathname):
         injuries_updated = False
         update_errors = []
         
-        # Si se hizo click en actualizar, procesar ambos sistemas
-        if n_clicks and n_clicks > 0:
-            logger.info("Actualizando datos manualmente desde el botón...")
+        # Verificar si necesitamos actualización automática (lunes por la mañana)
+        auto_update_needed = False
+        if dm.should_check_for_updates() or tm._should_update_data():
+            logger.info("🔔 Actualización automática programada detectada")
+            auto_update_needed = True
+
+        # Si se hizo click en actualizar O hay actualización automática programada
+        if (n_clicks and n_clicks > 0) or auto_update_needed:
+            if auto_update_needed and not (n_clicks and n_clicks > 0):
+                logger.info("🤖 Ejecutando actualización automática...")
             
             # Actualizar performance
             perf_success, perf_error = update_performance_data(dm, force_update=True)
@@ -157,24 +164,38 @@ def update_system_status(n_clicks, pathname):
                 injuries_updated = True
             elif inj_error:
                 update_errors.append(inj_error)
+
+        else:
+            # VERIFICACIÓN AUTOMÁTICA: Solo los lunes por la mañana
+            # Verificar si hay actualizaciones automáticas necesarias
             
-            # Si hubo errores críticos y no se actualizó nada
-            if update_errors and not (performance_updated or injuries_updated):
-                return dbc.Alert(
-                    [
-                        html.H6("❌ Error de Actualización", className="alert-heading"),
-                        html.P("No se pudieron actualizar los datos:"),
-                        html.Ul([html.Li(error) for error in update_errors]),
-                        html.Hr(),
-                        html.P("Mostrando información en cache.", className="mb-0")
-                    ],
-                    color="danger"
-                )
+            # Performance - verificar y actualizar automáticamente si es necesario
+            if dm.should_check_for_updates():
+                update_check = dm.check_for_updates()
+                if update_check.get('needs_update', False):
+                    logger.info("🤖 Actualización automática de performance iniciada...")
+                    perf_success, perf_error = update_performance_data(dm, force_update=True)
+                    if perf_success:
+                        performance_updated = True
+                        logger.info("🤖 Performance actualizada automáticamente")
+                    elif perf_error:
+                        update_errors.append(f"Auto-update performance: {perf_error}")
+            
+            # Injuries - verificar y actualizar automáticamente si es necesario  
+            if tm._should_update_data():
+                logger.info("🤖 Actualización automática de injuries iniciada...")
+                inj_success, inj_error = update_injuries_data(tm, force_update=True)
+                if inj_success:
+                    injuries_updated = True
+                    logger.info("🤖 Injuries actualizadas automáticamente")
+                elif inj_error:
+                    update_errors.append(f"Auto-update injuries: {inj_error}")
         
         # Obtener estados actuales
         performance_status = dm.get_data_status()
         injuries_data = tm.get_injuries_data()
         injuries_stats = tm.get_statistics_summary()
+
         
         # Verificar disponibilidad de datos
         cached_seasons = performance_status.get('cached_seasons', [])
@@ -192,11 +213,19 @@ def update_system_status(n_clicks, pathname):
         status_items.append(create_injuries_section(injuries_data, injuries_stats, tm))
         
         # Estado general
-        status_items.append(create_overall_status_section(performance_data_available, injuries_available))
+        status_items.append(create_overall_status_section(
+            performance_data_available, 
+            injuries_available, 
+            dm,  # data_manager
+            tm   # transfermarkt_manager    
+        ))
         
-        # Resultados de actualización (si corresponde)
+        # Resultados de actualización (manual o automática)
+        any_performance_updated = performance_updated
+        any_injuries_updated = injuries_updated
+
         update_results_item = create_update_results_section(
-            performance_updated, injuries_updated, dm, tm, update_errors
+            any_performance_updated, any_injuries_updated, dm, tm, update_errors
         )
         if update_results_item:
             status_items.append(update_results_item)

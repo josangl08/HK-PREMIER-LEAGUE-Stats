@@ -211,7 +211,8 @@ class HongKongDataManager:
             self._add_to_cache(target_season, raw_data, processed_data, aggregator)
             self.last_update[target_season] = datetime.now()
             self._save_update_timestamps()
-            
+
+
             logger.info(f"Datos refrescados exitosamente para {target_season}")
             return True
             
@@ -371,12 +372,6 @@ class HongKongDataManager:
         Determina si se debe verificar actualizaciones para una temporada.
         Para la temporada actual, solo verificar los lunes por la mañana.
         Para temporadas anteriores, nunca verificar.
-        
-        Args:
-            season: Temporada a verificar (por defecto la actual)
-            
-        Returns:
-            True si se debe verificar actualizaciones
         """
         target_season = season or self.current_season
         current_season = "2024-25"
@@ -400,26 +395,21 @@ class HongKongDataManager:
             time_since_manual = datetime.now() - last_manual_check
             is_manual_check = time_since_manual.total_seconds() < 300  # 5 minutos
         
-        # TEMPORAL: Forzar verificación siempre para pruebas
-        logger.info(f"🧪 MODO PRUEBA: Verificando actualizaciones para {target_season} (forzado)")
-        return True
-        
-        # CÓDIGO ORIGINAL (comentado temporalmente):
-        # if is_monday and is_morning:
-        #     # Verificar si ya se comprobó hoy
-        #     last_update = self.last_update.get(target_season)
-        #     if last_update and last_update.date() == now.date():
-        #         logger.info(f"Ya se verificaron actualizaciones hoy para {target_season}")
-        #         return False
-        #     
-        #     logger.info(f"Verificando actualizaciones para {target_season} (lunes por la mañana)")
-        #     return True
-        # elif is_manual_check:
-        #     logger.info(f"Verificando actualizaciones para {target_season} (solicitud manual)")
-        #     return True
-        # else:
-        #     logger.info(f"No es momento de verificar actualizaciones automáticas para {target_season}")
-        #     return False
+        if is_monday and is_morning:
+            # Verificar si ya se comprobó hoy
+            last_update = self.last_update.get(target_season)
+            if last_update and last_update.date() == now.date():
+                logger.info(f"Ya se verificaron actualizaciones hoy para {target_season}")
+                return False
+            
+            logger.info(f"Verificando actualizaciones para {target_season} (lunes por la mañana)")
+            return True
+        elif is_manual_check:
+            logger.info(f"Verificando actualizaciones para {target_season} (solicitud manual)")
+            return True
+        else:
+            logger.debug(f"No es momento de verificar actualizaciones automáticas para {target_season}")
+            return False
     
     def _check_data_availability(self) -> bool:
         """Verifica si hay datos disponibles."""
@@ -427,6 +417,7 @@ class HongKongDataManager:
             logger.warning(f"Datos no disponibles para temporada {self.current_season}")
             return False
         return True
+    
     
     def clear_all_cache(self):
         """Limpia todos los caches."""

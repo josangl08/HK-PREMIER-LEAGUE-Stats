@@ -136,31 +136,62 @@ def create_injuries_section(injuries_data, injuries_stats, transfermarkt_manager
         ])
     ])
 
-def create_overall_status_section(performance_data_available, injuries_available):
+def create_overall_status_section(performance_data_available, injuries_available, data_manager=None, transfermarkt_manager=None):
     """
     Crea la sección de estado general del sistema.
-    
-    Args:
-        performance_data_available (bool): Si hay datos de performance
-        injuries_available (bool): Si hay datos de lesiones
-        
-    Returns:
-        dbc.ListGroupItem: Item con estado general
+    Versión simplificada que confía en la lógica mejorada de verificación.
     """
-    overall_status = "success" if (performance_data_available and injuries_available) else "warning" if (performance_data_available or injuries_available) else "danger"
-    
+    # Estado básico del sistema
     if performance_data_available and injuries_available:
+        overall_status = "success"
         overall_message = "All systems operational"
     elif performance_data_available or injuries_available:
+        overall_status = "warning" 
         overall_message = "Partial systems operational"
     else:
+        overall_status = "danger"
         overall_message = "Systems not available"
     
-    return dbc.ListGroupItem([
-        html.Div([
-            html.Strong("🔧 Overall Status: "),
-            dbc.Badge(overall_message, color=overall_status, className="ms-2")
+    # Verificar actualizaciones disponibles 
+    updates_available = []
+    
+    # Verificar actualizaciones de performance
+    if performance_data_available and data_manager:
+        try:
+            performance_updates = data_manager.check_for_updates()
+            if performance_updates.get('needs_update', False):
+                updates_available.append("Performance data")
+                logger.debug(f"🔔 Performance update needed: {performance_updates.get('message')}")
+            else:
+                logger.debug(f"✅ Performance up to date: {performance_updates.get('message')}")
+        except Exception as e:
+            logger.warning(f"Error checking performance updates: {e}")
+    
+    # Crear componente de estado
+    status_content = [
+        html.Strong("🔧 Status: "),
+        dbc.Badge(overall_message, color=overall_status, className="ms-2")
+    ]
+    
+    # Mostrar estado de actualizaciones
+    if updates_available:
+        status_content.extend([
+            html.Br(),
+            html.Br(),
+            html.Strong("🔔 Updates Available: "),
+            html.Br(),
+            html.Small(f"• {', '.join(updates_available)} can be updated", className="text-warning")
         ])
+        if overall_status == "success":
+            overall_status = "info"
+    else:
+        status_content.extend([
+            html.Br(),
+            html.Small("✅ All data is up to date", className="text-success")
+        ])
+    
+    return dbc.ListGroupItem([
+        html.Div(status_content)
     ], color="light")
 
 def create_update_results_section(performance_updated, injuries_updated, data_manager, transfermarkt_manager, update_errors):
@@ -201,13 +232,16 @@ def create_update_results_section(performance_updated, injuries_updated, data_ma
             logger.warning(f"Error getting updated injuries stats: {e}")
     
     if update_results:
+        # Determinar si fue manual o automático basado en el contexto
+        update_type = "Manual" if any("manual" in str(result).lower() for result in update_results) else "Automatic"
+        
         return dbc.ListGroupItem([
             dbc.Alert([
-                html.Strong("✅ Data Update Completed"),
+                html.Strong(f"✅ {update_type} Data Update Completed"),
                 html.Br(),
                 *[html.Div([html.Small(result)]) for result in update_results]
             ], color="success", className="mb-0")
-        ])
+        ])                                                                
     elif update_errors:
         return dbc.ListGroupItem([
             dbc.Alert([
