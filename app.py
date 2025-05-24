@@ -20,7 +20,14 @@ load_dotenv()
 try:
     from utils.auth import load_user
     from utils.cache import init_cache
-    import callbacks # Esto registrará los callbacks automáticamente
+    
+    # CAMBIO: Importar callbacks explícitamente para evitar importaciones circulares
+    import callbacks.auth_callbacks
+    import callbacks.navigation_callbacks
+    import callbacks.home_callbacks
+    import callbacks.performance_callbacks
+    import callbacks.injuries_callbacks
+    
     logger.info("✓ Módulos y callbacks importados correctamente")   
 except ImportError as e:
     logger.error(f"❌ Error importando utilidades: {e}")

@@ -134,40 +134,58 @@ class TransfermarktDataManager:
         """
         Determina si los datos deben actualizarse.
         Solo los lunes por la mañana y si no se ha actualizado hoy.
+        Versión optimizada con cache temporal para evitar verificaciones duplicadas.
         
         Returns:
             True si se debe realizar una actualización
         """
+        # Cache temporal para evitar verificaciones duplicadas en la misma sesión
+        cache_key = '_should_update_cache'
+        cache_timestamp_key = '_should_update_cache_time'
+        
+        # Si tenemos un resultado cacheado de los últimos 30 segundos, usarlo
+        if hasattr(self, cache_key) and hasattr(self, cache_timestamp_key):
+            cache_age = (datetime.now() - getattr(self, cache_timestamp_key)).total_seconds()
+            if cache_age < 30:  # Cache válido por 30 segundos
+                cached_result = getattr(self, cache_key)
+                logger.debug(f"📋 Usando resultado cacheado de _should_update_data: {cached_result}")
+                return cached_result
+        
         # Si no hay última actualización, siempre actualizar
         if self.last_update is None:
-            logger.info("No hay actualización previa, actualizando datos...")
-            return True
-        
-        now = datetime.now()
-        
-        # Verificar si es lunes (0 = lunes)
-        is_monday = now.weekday() == 0
-        
-        # Verificar si es por la mañana (antes de las 12:00)
-        is_morning = now.hour < 12
-        
-        # Verificar si ya se actualizó hoy
-        last_update_date = self.last_update.date()
-        is_different_day = last_update_date < now.date()
-        
-        # Actualizar solo si es lunes por la mañana y no se ha actualizado hoy
-        should_update = is_monday and is_morning and is_different_day
-        
-        if should_update:
-            logger.info("Es lunes por la mañana, programando actualización automática...")
+            logger.info("🔄 No hay actualización previa, programando actualización...")
+            result = True
         else:
-            logger.info("No es momento de actualización automática (solo lunes por la mañana)")
+            now = datetime.now()
+            
+            # Verificar si es lunes (0 = lunes)
+            is_monday = now.weekday() == 0
+            
+            # Verificar si es por la mañana (antes de las 12:00)
+            is_morning = now.hour < 12
+            
+            # Verificar si ya se actualizó hoy
+            last_update_date = self.last_update.date()
+            is_different_day = last_update_date < now.date()
+            
+            # Actualizar solo si es lunes por la mañana y no se ha actualizado hoy
+            result = is_monday and is_morning and is_different_day
+            
+            if result:
+                logger.info("📅 Es lunes por la mañana, programando actualización automática...")
+            else:
+                logger.debug("⏸️ No es momento de actualización automática (solo lunes por la mañana)")
         
-        return should_update
+        # Guardar resultado en cache temporal
+        setattr(self, cache_key, result)
+        setattr(self, cache_timestamp_key, datetime.now())
+        
+        return result
     
     def refresh_data(self, force_scraping: bool = False) -> bool:
         """
         Actualiza los datos (extrae, procesa y cachea).
+        Versión optimizada sin verificaciones duplicadas.
         
         Args:
             force_scraping: Forzar scraping ignorando la lógica de lunes
@@ -176,58 +194,62 @@ class TransfermarktDataManager:
             True si la operación fue exitosa
         """
         try:
-            # Verificar si debe actualizar (excepto si es forzado)
-            if not force_scraping and not self._should_update_data():
-                # Intentar cargar desde cache del extractor
-                if self._load_from_cache():
-                    logger.info("Usando datos desde cache existente")
-                    return True
+            # Si es forzado, saltar verificaciones automáticas
+            if force_scraping:
+                logger.info("🔄 Actualización forzada de lesiones desde Transfermarkt...")
+            else:
+                # Solo verificar si debe actualizar cuando NO es forzado
+                if not self._should_update_data():
+                    # Intentar cargar desde cache del extractor
+                    if self._load_from_cache():
+                        logger.info("📖 Usando datos desde cache existente")
+                        return True
+                    else:
+                        logger.debug("⏸️ No hay cache válido, pero no es momento de actualizar")
+                        return False
                 else:
-                    logger.info("No hay cache válido, pero no es momento de actualizar")
-                    return False
-            
-            logger.info("Actualizando datos de lesiones desde Transfermarkt...")
+                    logger.info("🤖 Actualización automática programada de lesiones...")
             
             # 1. Extraer datos
             self.raw_injuries = self.extractor.extract_all_injuries(force_refresh=force_scraping)
             
             if not self.raw_injuries:
-                logger.warning("No se pudieron extraer datos de lesiones")
+                logger.warning("⚠️ No se pudieron extraer datos de lesiones")
                 return False
             
             # 2. Procesar datos
             df_processed = self.processor.process_injuries_data(self.raw_injuries)
             
             if df_processed.empty:
-                logger.warning("No se pudieron procesar los datos")
+                logger.warning("⚠️ No se pudieron procesar los datos")
                 return False
             
             # 3. Convertir a formato dashboard
             self.processed_injuries = self._convert_to_dashboard_format(df_processed)
             
             if not self.processed_injuries:
-                logger.warning("Error convirtiendo a formato dashboard")
+                logger.warning("⚠️ Error convirtiendo a formato dashboard")
                 return False
             
             # 4. Inicializar agregador
             self.aggregator = TransfermarktStatsAggregator(self.processed_injuries)
             
-            # 5. Actualizar timestamp solo si fue actualización real
+            # 5. Actualizar timestamp según el tipo de actualización
             if force_scraping:
                 # Actualización MANUAL - crear timestamp separado
                 self._save_manual_update_timestamp(datetime.now())
-                logger.info("Timestamp de actualización MANUAL guardado")
-            elif self._should_update_data():
+                logger.info("💾 Timestamp de actualización MANUAL guardado")
+            else:
                 # Actualización AUTOMÁTICA - timestamp regular
                 self.last_update = datetime.now()
                 self._save_last_update()
-                logger.info("Timestamp de actualización AUTOMÁTICA guardado")
+                logger.info("💾 Timestamp de actualización AUTOMÁTICA guardado")
             
-            logger.info(f"✅ Datos actualizados: {len(self.processed_injuries)} lesiones")
+            logger.info(f"✅ Datos de lesiones actualizados: {len(self.processed_injuries)} lesiones")
             return True
             
         except Exception as e:
-            logger.error(f"Error actualizando datos: {e}")
+            logger.error(f"❌ Error actualizando datos de lesiones: {e}")
             # Intentar cargar desde cache como fallback
             return self._load_from_cache()
     

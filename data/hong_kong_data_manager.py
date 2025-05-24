@@ -179,6 +179,13 @@ class HongKongDataManager:
         """
         try:
             target_season = season or self.current_season
+            # 🔧 VERIFICACIÓN TEMPRANA - Si ya tenemos los datos en memoria y es la misma temporada
+            if (not force_download and 
+                target_season == self.current_season and 
+                self._check_data_availability()):
+                logger.debug(f"📋 Datos ya disponibles en memoria para {target_season}, evitando reprocesamiento")
+                return True
+            
             logger.info(f"Refrescando datos para temporada {target_season}")
             
             # Si no es forzado y la temporada ya existe en cache, usar cache
@@ -207,13 +214,28 @@ class HongKongDataManager:
             self.processed_data = processed_data
             self.aggregator = aggregator
             
-            # 5. Actualizar cache y timestamps
+            # 5. Actualizar cache y timestamps correctamente
             self._add_to_cache(target_season, raw_data, processed_data, aggregator)
-            self.last_update[target_season] = datetime.now()
+
+            current_time = datetime.now()
+
+            if force_download:
+                # Actualización MANUAL
+                self.last_update[f"{target_season}_manual"] = current_time
+                
+                # Solo crear timestamp base si NO EXISTE (primera vez para esta temporada)
+                if target_season not in self.last_update:
+                    self.last_update[target_season] = current_time
+                    logger.info(f"Datos refrescados exitosamente para {target_season} (MANUAL - primera vez)")
+                else:
+                    logger.info(f"Datos refrescados exitosamente para {target_season} (MANUAL - preservando timestamp automático)")
+            else:
+                # Actualización AUTOMÁTICA - siempre actualizar timestamp base
+                self.last_update[target_season] = current_time
+                logger.info(f"Datos refrescados exitosamente para {target_season} (AUTOMÁTICO)")
+
+            # Guardar timestamps
             self._save_update_timestamps()
-
-
-            logger.info(f"Datos refrescados exitosamente para {target_season}")
             return True
             
         except Exception as e:
