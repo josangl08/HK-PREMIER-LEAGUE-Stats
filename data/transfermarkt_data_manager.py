@@ -350,10 +350,26 @@ class TransfermarktDataManager:
     def check_for_updates(self) -> Dict:
         """
         Verifica si hay actualizaciones disponibles.
+        Versión de producción.
         
         Returns:
             Diccionario con información de actualizaciones
         """
+        # Verificar si hay actualización manual reciente (últimos 5 minutos)
+        if self.last_update:
+            time_since_update = datetime.now() - self.last_update
+            
+            # Si la última actualización fue hace menos de 5 minutos, considerar actualizado
+            if time_since_update.total_seconds() < 300:  # 5 minutos
+                logger.info(f"Transfermarkt actualización manual reciente ({time_since_update.total_seconds():.0f}s)")
+                return {
+                    'needs_update': False,
+                    'message': "Datos actualizados recientemente (manual)",
+                    'last_update': self.last_update.isoformat(),
+                    'next_auto_update': "Próximo lunes antes de las 12:00"
+                }
+        
+        # Verificar si debe actualizar según la lógica de lunes por la mañana
         needs_update = self._should_update_data()
         
         if needs_update:

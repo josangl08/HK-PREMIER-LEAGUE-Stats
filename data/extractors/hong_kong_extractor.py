@@ -178,6 +178,7 @@ class HongKongDataExtractor:
         except Exception as e:
             print(f"Error inesperado accediendo a GitHub API: {e}")
             return None
+        
     
     def _download_csv_content(self, filename: str) -> Optional[str]:
         """
@@ -226,6 +227,24 @@ class HongKongDataExtractor:
         
         filename = self.available_seasons[season]
         season_key = f"hong_kong_{season}"
+        
+        # VERIFICAR SI HUBO ACTUALIZACIÓN MANUAL RECIENTE (últimos 10 minutos)
+        if season_key in self.metadata:
+            local_metadata = self.metadata[season_key]
+            last_updated_str = local_metadata.get('last_updated')
+            
+            if last_updated_str:
+                try:
+                    last_updated = datetime.fromisoformat(last_updated_str)
+                    time_since_update = datetime.now() - last_updated
+                    
+                    # Si la última actualización fue hace menos de 10 minutos, considerar actualizado
+                    if time_since_update.total_seconds() < 600:  # 10 minutos
+                        logger.info(f"Actualización manual reciente detectada para {season} ({time_since_update.total_seconds():.0f}s)")
+                        return False, "Datos actualizados recientemente"
+                        
+                except Exception as e:
+                    logger.warning(f"Error parseando última actualización: {e}")
         
         # Obtener información actual del archivo en GitHub
         github_info = self._get_github_file_info(filename)
@@ -338,6 +357,7 @@ class HongKongDataExtractor:
             return {}
         
         return self.metadata
+    
     
     def clear_cache(self, season: Optional[str] = None):
         """
