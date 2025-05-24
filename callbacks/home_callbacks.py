@@ -62,10 +62,6 @@ def update_performance_data(data_manager, force_update=False):
         tuple: (success, error_message)
     """
     try:
-        if force_update:
-            current_season = get_current_season()
-            data_manager.last_update[f"{current_season}_manual"] = datetime.now()
-            data_manager._save_update_timestamps()
         
         success = data_manager.refresh_data(force_download=force_update)
         
@@ -115,13 +111,13 @@ def update_injuries_data(transfermarkt_manager, force_update=False):
 @callback(
     Output('system-status-info', 'children'),
     [Input('refresh-data-button', 'n_clicks'),
-     Input('url', 'pathname')],
+    Input('url', 'pathname')],
     prevent_initial_call=False
 )
 def update_system_status(n_clicks, pathname):
     """
     Callback principal que actualiza la información del estado del sistema.
-    Versión simplificada usando funciones auxiliares.
+    Versión optimizada sin verificaciones duplicadas.
     """
     # Solo ejecutar en la página home
     if pathname != "/":
@@ -140,16 +136,20 @@ def update_system_status(n_clicks, pathname):
         injuries_updated = False
         update_errors = []
         
-        # Verificar si necesitamos actualización automática (lunes por la mañana)
-        auto_update_needed = False
-        if dm.should_check_for_updates() or tm._should_update_data():
-            logger.info("🔔 Actualización automática programada detectada")
-            auto_update_needed = True
-
-        # Si se hizo click en actualizar O hay actualización automática programada
-        if (n_clicks and n_clicks > 0) or auto_update_needed:
-            if auto_update_needed and not (n_clicks and n_clicks > 0):
-                logger.info("🤖 Ejecutando actualización automática...")
+        # VERIFICACIÓN ÚNICA - Evitar duplicaciones
+        is_manual_update = n_clicks and n_clicks > 0
+        performance_needs_auto_update = dm.should_check_for_updates() if not is_manual_update else False
+        injuries_needs_auto_update = tm._should_update_data() if not is_manual_update else False
+        
+        # Log de estado para debugging
+        if is_manual_update:
+            logger.info("🔄 Actualización MANUAL solicitada")
+        elif performance_needs_auto_update or injuries_needs_auto_update:
+            logger.info("🤖 Actualización AUTOMÁTICA programada detectada")
+        
+        # ACTUALIZACIÓN MANUAL
+        if is_manual_update:
+            logger.info("🔄 Ejecutando actualización manual...")
             
             # Actualizar performance
             perf_success, perf_error = update_performance_data(dm, force_update=True)
@@ -164,16 +164,16 @@ def update_system_status(n_clicks, pathname):
                 injuries_updated = True
             elif inj_error:
                 update_errors.append(inj_error)
-
-        else:
-            # VERIFICACIÓN AUTOMÁTICA: Solo los lunes por la mañana
-            # Verificar si hay actualizaciones automáticas necesarias
+                
+        # ACTUALIZACIÓN AUTOMÁTICA (solo si es necesario)
+        elif performance_needs_auto_update or injuries_needs_auto_update:
+            logger.info("🤖 Ejecutando actualización automática...")
             
-            # Performance - verificar y actualizar automáticamente si es necesario
-            if dm.should_check_for_updates():
+            # Performance - SOLO si necesita actualización
+            if performance_needs_auto_update:
                 update_check = dm.check_for_updates()
                 if update_check.get('needs_update', False):
-                    logger.info("🤖 Actualización automática de performance iniciada...")
+                    logger.info("🤖 Actualizando performance automáticamente...")
                     perf_success, perf_error = update_performance_data(dm, force_update=True)
                     if perf_success:
                         performance_updated = True
@@ -181,9 +181,9 @@ def update_system_status(n_clicks, pathname):
                     elif perf_error:
                         update_errors.append(f"Auto-update performance: {perf_error}")
             
-            # Injuries - verificar y actualizar automáticamente si es necesario  
-            if tm._should_update_data():
-                logger.info("🤖 Actualización automática de injuries iniciada...")
+            # Injuries - SOLO si necesita actualización
+            if injuries_needs_auto_update:
+                logger.info("🤖 Actualizando injuries automáticamente...")
                 inj_success, inj_error = update_injuries_data(tm, force_update=True)
                 if inj_success:
                     injuries_updated = True
@@ -191,11 +191,14 @@ def update_system_status(n_clicks, pathname):
                 elif inj_error:
                     update_errors.append(f"Auto-update injuries: {inj_error}")
         
+        # MODO SOLO LECTURA (no hay actualizaciones necesarias)
+        else:
+            logger.debug("📖 Modo solo lectura - no hay actualizaciones programadas")
+        
         # Obtener estados actuales
         performance_status = dm.get_data_status()
         injuries_data = tm.get_injuries_data()
         injuries_stats = tm.get_statistics_summary()
-
         
         # Verificar disponibilidad de datos
         cached_seasons = performance_status.get('cached_seasons', [])
@@ -221,11 +224,8 @@ def update_system_status(n_clicks, pathname):
         ))
         
         # Resultados de actualización (manual o automática)
-        any_performance_updated = performance_updated
-        any_injuries_updated = injuries_updated
-
         update_results_item = create_update_results_section(
-            any_performance_updated, any_injuries_updated, dm, tm, update_errors
+            performance_updated, injuries_updated, dm, tm, update_errors
         )
         if update_results_item:
             status_items.append(update_results_item)
