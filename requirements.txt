@@ -1,30 +1,35 @@
-# Framework principal
-dash==2.14.1
-dash-bootstrap-components==1.5.0
-plotly==5.18.0
-Flask==2.3.3
+# == Framework Principal ==
+# Librerías centrales para la aplicación web y visualizaciones.
+dash==3.2.0
+dash-bootstrap-components==1.6.0
+plotly==5.22.0
+Flask==3.0.3
 
-# Autenticación
+# == Autenticación y Sesiones ==
+# Manejo de logins y sesiones de usuario.
 Flask-Login==0.6.3
 
-# Procesamiento de datos
-pandas==2.1.1
-numpy==1.26.0
+# == Procesamiento y Análisis de Datos ==
+# Manipulación de datos y cálculos numéricos.
+pandas==2.2.2
+numpy==1.26.4
 
-# Web scraping y requests
+# == Extracción de Datos (Web Scraping) ==
+# Para obtener datos de fuentes web.
 requests==2.31.0
 beautifulsoup4==4.12.2
-lxml==4.9.3
+lxml==5.2.2  # Parser de alto rendimiento para BeautifulSoup
 
-# Generación de PDFs
+# == Generación de Documentos ==
+# Creación de reportes en formato PDF.
 reportlab==4.4.1
 
-# Utilidades
+# == Utilidades de Desarrollo ==
+# Herramientas para caché, variables de entorno y logging.
 python-dotenv==1.0.0
 Flask-Caching==2.1.0
+colorlog==6.7.0  # Para logs con colores en la consola
 
-# Servidor de producción
+# == Servidor de Producción ==
+# Servidor WSGI para despliegue en entornos de producción.
 gunicorn==21.2.0
-
-# Logging (opcional pero recomendado)
-colorlog==6.7.0

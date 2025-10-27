@@ -27,8 +27,8 @@ class HongKongDataExtractor:
             cache_dir: Directorio para cache de datos
         """
         # Configuración de URLs (centralizada)
-        self.base_url = "https://raw.githubusercontent.com/griffisben/Wyscout_Prospect_Research/adabd2a3f30e739aa8a048aaf51c08cda248e5fe/Main%20App"
-        self.github_api_base = "https://api.github.com/repos/griffisben/Wyscout_Prospect_Research/contents/Main%20App"
+        self.base_url = "https://raw.githubusercontent.com/josangl08/Hong-Kong-Data/main"
+        self.github_api_base = "https://api.github.com/repos/josangl08/Hong-Kong-Data/contents/"
         
         # Configuración de temporadas disponibles
         self.available_seasons = {
@@ -194,7 +194,7 @@ class HongKongDataExtractor:
             file_url = f"{self.base_url}/{filename}"
             logger.info(f"Descargando archivo CSV desde: {file_url}")
             
-            response = requests.get(file_url, timeout=30)
+            response = requests.get(file_url, headers=self.headers, timeout=30)
             response.raise_for_status()
             
             logger.info(f"Archivo {filename} descargado exitosamente ({len(response.text)} bytes)")
