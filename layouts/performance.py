@@ -11,18 +11,19 @@ def create_performance_layout():
         Layout del dashboard de performance
     """
     
-    layout = dbc.Container([
-        # Header del dashboard
-        dbc.Row([
-            dbc.Col([
-                html.H1(
-                    "Performance Dashboard", 
-                    className="text-center mb-4",
-                    style={'color': '#27ae60'}
-                ),
-                html.Hr()
-            ])
-        ]),
+    layout = html.Div([
+        dbc.Container([
+            # Header del dashboard
+            dbc.Row([
+                dbc.Col([
+                    html.H1(
+                        "Performance Dashboard",
+                        className="text-center mb-4",
+                        style={'color': '#27ae60'}
+                    ),
+                    html.Hr()
+                ])
+            ]),
         
         # Panel de control / Filtros mejorado
         dbc.Row([
@@ -37,33 +38,42 @@ def create_performance_layout():
                             # Selector de temporada
                             dbc.Col([
                                 dbc.Label("Season:", html_for="season-selector"),
-                                dcc.Dropdown(
-                                    id="season-selector",
-                                    options=[],  # Se llena dinámicamente
-                                    value="2024-25",
-                                    className="mb-3"
+                                html.Div(
+                                    dcc.Dropdown(
+                                        id="season-selector",
+                                        options=[],  # Se llena dinámicamente
+                                        value="2024-25",
+                                        className="mb-3"
+                                    ),
+                                    className="filter-container"
                                 )
                             ], md=4),
                             
                             # Selector de equipo
                             dbc.Col([
                                 dbc.Label("Team:", html_for="team-selector"),
-                                dcc.Dropdown(
-                                    id="team-selector",
-                                    placeholder="All teams...",
-                                    className="mb-3",
-                                    clearable=True
+                                html.Div(
+                                    dcc.Dropdown(
+                                        id="team-selector",
+                                        placeholder="All teams...",
+                                        className="mb-3",
+                                        clearable=True
+                                    ),
+                                    className="filter-container"
                                 )
                             ], md=4),
                             
                             # Selector de jugador
                             dbc.Col([
                                 dbc.Label("Player:", html_for="player-selector"),
-                                dcc.Dropdown(
-                                    id="player-selector",
-                                    placeholder="All players...",
-                                    className="mb-3",
-                                    clearable=True
+                                html.Div(
+                                    dcc.Dropdown(
+                                        id="player-selector",
+                                        placeholder="All players...",
+                                        className="mb-3",
+                                        clearable=True
+                                    ),
+                                    className="filter-container"
                                 )
                             ], md=4)
                         ], className="mb-3"),
@@ -73,18 +83,21 @@ def create_performance_layout():
                             # Filtro por posición
                             dbc.Col([
                                 dbc.Label("Position:", html_for="position-filter"),
-                                dcc.Dropdown(
-                                    id="position-filter",
-                                    options=[
-                                        {"label": "All Positions", "value": "all"},
-                                        {"label": "Goalkeeper", "value": "Goalkeeper"},
-                                        {"label": "Defender", "value": "Defender"},
-                                        {"label": "Midfielder", "value": "Midfielder"},
-                                        {"label": "Winger", "value": "Winger"},
-                                        {"label": "Forward", "value": "Forward"}
-                                    ],
-                                    value="all",
-                                    className="mb-3"
+                                html.Div(
+                                    dcc.Dropdown(
+                                        id="position-filter",
+                                        options=[
+                                            {"label": "All Positions", "value": "all"},
+                                            {"label": "Goalkeeper", "value": "Goalkeeper"},
+                                            {"label": "Defender", "value": "Defender"},
+                                            {"label": "Midfielder", "value": "Midfielder"},
+                                            {"label": "Winger", "value": "Winger"},
+                                            {"label": "Forward", "value": "Forward"}
+                                        ],
+                                        value="all",
+                                        className="mb-3"
+                                    ),
+                                    className="filter-container"
                                 )
                             ], md=4),
                             
@@ -107,7 +120,10 @@ def create_performance_layout():
                                 dbc.Label("Options:", html_for="action-buttons"),
                                 html.Div([
                                     dbc.Button(
-                                        "📊 Export PDF",
+                                        [
+                                            html.I(className="bi bi-file-earmark-pdf me-2"),
+                                            "Export PDF"
+                                        ],
                                         id="export-pdf-button",
                                         color="success",
                                         size="sm"
@@ -116,7 +132,7 @@ def create_performance_layout():
                             ], md=4)
                         ])
                     ])
-                ], className="mb-4")
+                ], className="mb-4 has-dropdowns")
             ])
         ]),
         
@@ -234,7 +250,8 @@ def create_performance_layout():
         
         # Download component para PDF
         dcc.Download(id="download-performance-pdf")
-        
-    ], fluid=True, className="py-4")
-    
+
+        ], fluid=True, className="py-4")
+    ], className="main-container")
+
     return layout
