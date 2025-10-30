@@ -534,35 +534,41 @@ class TransfermarktExtractor:
     
     def extract_all_injuries(self, force_refresh: bool = False) -> List[Dict]:
         """
-        Extrae lesiones de todos los equipos de la liga
-        
+        Extrae lesiones de todos los equipos de la liga.
+        -- DESACTIVADO TEMPORALMENTE --
+
         Args:
             force_refresh: Forzar actualización ignorando cache
-            
+
         Returns:
-            Lista de diccionarios con todas las lesiones
+            Lista vacía, ya que la funcionalidad está desactivada.
         """
-        # 1. Verificar y usar caché si es posible
-        if not force_refresh:
-            cached_data = self._try_load_from_cache()
-            if cached_data:
-                return cached_data
-        
-        # 2. Obtener lista de equipos
-        teams = self.extract_teams(force_refresh=force_refresh)
-        if not teams:
-            self.logger.error("No se pudieron obtener equipos")
-            return []
-        
-        # 3. Extraer lesiones de todos los equipos
-        all_injuries, successful_teams = self._extract_injuries_from_teams(teams)
-        
-        # 4. Guardar en caché si hay datos
-        if all_injuries:
-            self._save_injuries_to_cache(all_injuries, teams, successful_teams)
-        
-        self.logger.info(f"Extracción completada: {len(all_injuries)} lesiones de {successful_teams}/{len(teams)} equipos")
-        return all_injuries
+        self.logger.info("La extracción de lesiones está desactivada. Saltando proceso.")
+        return []
+
+        # Código original comentado
+        #
+        # # 1. Verificar y usar caché si es posible
+        # if not force_refresh:
+        #     cached_data = self._try_load_from_cache()
+        #     if cached_data:
+        #         return cached_data
+        #
+        # # 2. Obtener lista de equipos
+        # teams = self.extract_teams(force_refresh=force_refresh)
+        # if not teams:
+        #     self.logger.error("No se pudieron obtener equipos")
+        #     return []
+        #
+        # # 3. Extraer lesiones de todos los equipos
+        # all_injuries, successful_teams = self._extract_injuries_from_teams(teams)
+        #
+        # # 4. Guardar en caché si hay datos
+        # if all_injuries:
+        #     self._save_injuries_to_cache(all_injuries, teams, successful_teams)
+        #
+        # self.logger.info(f"Extracción completada: {len(all_injuries)} lesiones de {successful_teams}/{len(teams)} equipos")
+        # return all_injuries
 
     def _try_load_from_cache(self) -> Optional[List[Dict]]:
         """Intenta cargar lesiones desde el caché."""

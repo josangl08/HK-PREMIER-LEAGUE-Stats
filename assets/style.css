@@ -1,291 +1,359 @@
-/* Estilos generales y tema principal */
+@import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap');
+
+/* Estilos generales y tema principal (HKFA Style) */
 
 :root {
-    --primary-color: #6ea4da;
-    --secondary-color: #3498db;
+    /* Nueva paleta de colores HKFA */
+    --background-primary: #18181A;
+    --background-secondary: #232326;
+    --accent-primary: #ED1C24;
+    --text-primary: #FFFFFF;
+    --text-secondary: #A7A7A7;
+    --border-color: #3A3A3C;
+
+    /* Radios de borde */
+    --border-radius-card: 12px;
+    --border-radius-button: 8px;
+
+    /* Otros */
+    --transition: all 0.3s ease;
+
+    /* Colores heredados mapeados para compatibilidad temporal */
+    --primary-color: #ED1C24;
+    --secondary-color: #A7A7A7;
     --success-color: #27ae60;
     --danger-color: #e74c3c;
     --warning-color: #f39c12;
     --info-color: #17a2b8;
-    --light-color: #2d3748;
-    --dark-color: #343a40;
-    --background-color: #313131;
-    --card-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
-    --border-radius: 8px;
-    --transition: all 0.3s ease;
+    --light-color: #A7A7A7;
+    --dark-color: #232326;
+    --background-color: #18181A;
+    --card-shadow: none; /* Las nuevas tarjetas no usan sombra */
+    --border-radius: 8px; /* Mantener para componentes no actualizados */
 }
 
 body {
-    font-family: 'Inter', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    background-color: var(--background-color);
+    font-family: 'Roboto', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background-color: var(--background-primary);
+    color: var(--text-primary);
     margin: 0;
     padding: 0;
     line-height: 1.6;
-    color: #153764;
-;
 }
 
-/* Personalización de headers */
-h1, h2, h3, h4, h5, h6 {
-    font-weight: 600;
-    color: var(--primary-color);
-    margin-bottom: 1rem;
+/* Jerarquía de Tipografía (HKFA Style) */
+h1, .h1 {
+    font-family: 'Roboto', sans-serif;
+    font-weight: 700;
+    font-size: 2.5rem; /* 40px */
+    text-transform: uppercase;
+    color: var(--text-primary);
 }
 
-h1 {
-    font-size: 2rem;
-    color: var(--primary-color);
+h2, .h2 {
+    font-family: 'Roboto', sans-serif;
+    font-weight: 700;
+    font-size: 2rem; /* 32px */
+    text-transform: uppercase;
+    color: var(--text-primary);
 }
 
-h2 {
-    font-size: 1.75rem;
-    color: var(--secondary-color);
+h3, .h3 {
+    font-family: 'Roboto', sans-serif;
+    font-weight: 700;
+    font-size: 1.5rem; /* 24px */
+    text-transform: none;
+    color: var(--text-primary);
 }
 
-h3 {
-    font-size: 1.5rem;
+/* Estilo para cuerpo de texto y subtítulos */
+p, .body-text {
+    font-family: 'Roboto', sans-serif;
+    font-weight: 400;
+    font-size: 1rem; /* 16px */
+    color: var(--text-primary);
 }
 
-/* Personalización de cards */
-.card {
+.subtitle, .label {
+    font-family: 'Roboto', sans-serif;
+    font-weight: 500;
+    font-size: 0.875rem; /* 14px */
+    text-transform: uppercase;
+    color: var(--text-secondary);
+}
+
+a, .link {
+    font-family: 'Roboto', sans-serif;
+    font-weight: 500;
+    font-size: 1rem; /* 16px */
+    color: var(--accent-primary);
+    text-decoration: none;
     transition: var(--transition);
-    border-radius: var(--border-radius);
-    box-shadow: var(--card-shadow);
+}
+
+a:hover, .link:hover {
+    color: var(--text-primary);
+    text-decoration: underline;
+}
+
+/* Personalización de Cards (HKFA Style) */
+.card {
+    background-color: var(--background-secondary); /* #232326 */
+    border-radius: var(--border-radius-card); /* 12px */
     border: none;
-    margin-bottom: 1.5rem;
-    background-color: #2d3748;
-    color: #e2e8f0;
-    
+    box-shadow: none;
+    padding: 24px;
+    margin-bottom: 16px; /* Gap entre componentes */
+    color: var(--text-primary);
+    transition: var(--transition);
 }
 
 .card:hover {
-    transform: translateY(-5px);
-    box-shadow: 0 8px 15px rgba(0, 0, 0, 0.15);
+    transform: none;
+    box-shadow: none;
 }
 
 .card-header {
-    background-color: #4a5568;
-    color: #e2e8f0;
-    border-bottom: 2px solid var(--secondary-color);
-    font-weight: 600;
-    padding: 1rem 1.25rem;
+    background-color: transparent;
+    color: var(--text-primary);
+    border-bottom: 1px solid var(--border-color); /* #3A3A3C */
+    font-weight: 700;
+    padding: 0 0 16px 0; /* Padding solo abajo */
+    margin-bottom: 16px;
+    font-size: 1.5rem; /* Usando H3 como referencia */
 }
 
 .card-body {
-    padding: 1.5rem;
+    padding: 0;
 }
 
-#main-kpis .card {
-    background-color: #6ea4da;
-}
 
-#injury-main-kpis .card {
-    background-color: #6ea4da;
-}
-
-#position-analysis-container .card{
-    background-color: #6ea4da;
-}
-
-#top-performers-container .card {
-    background-color: #6ea4da;
-}
-
-/* Personalización del navbar */
+/* Personalización del Navbar (HKFA Style) */
 .navbar {
-    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+    background-color: rgba(24, 24, 26, 0.8); /* Fondo primario con transparencia */
+    backdrop-filter: blur(10px);
+    position: sticky;
+    top: 0;
+    z-index: 1020;
     padding: 0.75rem 1rem;
+    box-shadow: none;
+    border-bottom: 1px solid var(--border-color);
 }
 
 .navbar-brand {
     font-weight: 700;
     font-size: 1.5rem;
+    color: var(--text-primary) !important;
 }
 
 .nav-link {
+    color: var(--text-secondary) !important; /* Gris Claro */
     font-weight: 500;
     transition: var(--transition);
+    position: relative;
+    padding-bottom: 4px;
 }
 
-.nav-link:hover {
-    color: var(--warning-color) !important;
+.nav-link:hover,
+.nav-link.active {
+    color: var(--text-primary) !important; /* Blanco Puro */
 }
 
-/* Botones mejorados */
+/* Sutil subrayado rojo en hover/active */
+.nav-link:hover::after,
+.nav-link.active::after {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    height: 2px;
+    background-color: var(--accent-primary);
+}
+
+/* Botones (HKFA Style) */
 .btn {
-    border-radius: var(--border-radius);
+    border-radius: var(--border-radius-button); /* 8px */
     padding: 0.5rem 1.5rem;
     font-weight: 500;
     transition: var(--transition);
-    border: none;
-    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    border: 1px solid transparent;
+    box-shadow: none;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
 }
 
 .btn:hover {
     transform: translateY(-2px);
-    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+    box-shadow: none;
 }
 
+/* Botón Primario */
 .btn-primary {
-    background: linear-gradient(45deg, var(--primary-color), var(--secondary-color));
+    background-color: var(--accent-primary);
+    color: var(--text-primary);
+    border-color: var(--accent-primary);
+}
+.btn-primary:hover {
+    filter: brightness(1.1);
+    background-color: var(--accent-primary);
+    color: var(--text-primary);
 }
 
+/* Botón Secundario */
+.btn-secondary {
+    background-color: transparent;
+    color: var(--accent-primary);
+    border-color: var(--accent-primary);
+}
+.btn-secondary:hover {
+    background-color: var(--accent-primary);
+    color: var(--text-primary);
+}
+
+/* Otros botones (manteniendo consistencia) */
 .btn-success {
-    background: linear-gradient(45deg, var(--success-color), #2ecc71);
+    background-color: var(--success-color);
+    border-color: var(--success-color);
+    color: var(--text-primary);
 }
-
 .btn-danger {
-    background: linear-gradient(45deg, var(--danger-color), #c0392b);
+    background-color: var(--danger-color);
+    border-color: var(--danger-color);
+    color: var(--text-primary);
 }
-
 .btn-warning {
-    background: linear-gradient(45deg, var(--warning-color), #e67e22);
+    background-color: var(--warning-color);
+    border-color: var(--warning-color);
+    color: var(--text-primary);
 }
-
 .btn-info {
-    background: linear-gradient(45deg, var(--info-color), #3498db);
+    background-color: var(--info-color);
+    border-color: var(--info-color);
+    color: var(--text-primary);
 }
 
-/* Formularios mejorados */
-.form-control {
-    border: 2px solid #e1e8ed;
-    border-radius: var(--border-radius);
+/* Formularios y Dropdowns (HKFA Style) */
+.form-control, .Select-control {
+    background-color: transparent;
+    border: 1px solid var(--border-color) !important;
+    border-radius: var(--border-radius-button) !important; /* 8px */
     padding: 0.75rem 1rem;
-    transition: var(--transition);
-    background-color: #fff;
-}
-
-.form-control:focus {
-    border-color: var(--secondary-color);
-    box-shadow: 0 0 0 0.2rem rgba(52, 152, 219, 0.25);
-    background-color: #fff;
-}
-
-/* Dropdowns personalizados */
-.Select-control {
-    border: 2px solid #e1e8ed !important;
-    border-radius: var(--border-radius) !important;
-    box-shadow: none !important;
     transition: var(--transition) !important;
-
+    color: var(--text-primary) !important;
+    box-shadow: none !important;
 }
-/* Color del texto del valor seleccionado */
+
+.form-control::placeholder, .Select-placeholder {
+    color: var(--text-secondary) !important;
+}
+
+.form-control:focus, .Select--is-focused .Select-control {
+    border-color: var(--accent-primary) !important;
+    box-shadow: 0 0 0 1px var(--accent-primary) !important;
+    background-color: transparent !important;
+}
+
+/* Opciones de Dropdown */
 .VirtualizedSelectOption {
-    color: #2c3e50 !important; /* Color del texto en las opciones */
-    background-color: white !important;
-    padding: 8px 12px !important;
+    color: var(--text-primary) !important;
+    background-color: var(--background-secondary) !important;
 }
 
-/* Color cuando pasas el mouse sobre una opción */
-.VirtualizedSelectOption:hover {
-    color: #ffffff !important; /* Texto blanco al hacer hover */
-    background-color: var(--primary-color) !important; /* Fondo azul al hacer hover */
-}
-.Select-control:hover {
-    border-color: var(--secondary-color) !important;
+.VirtualizedSelectOption:hover, .VirtualizedSelectFocusedOption {
+    color: var(--text-primary) !important;
+    background-color: var(--accent-primary) !important;
 }
 
-.Select--is-focused .Select-control {
-    border-color: var(--secondary-color) !important;
-    box-shadow: 0 0 0 1px var(--secondary-color) !important;
-}
-/* Asegurar que los contenedores padre no interfieran */
-.card,
-.card-body,
-dbc-card,
-.container-fluid {
-    position: relative !important;
-    /* z-index: auto !important; */
+/* Layout y Espaciado (HKFA Style) */
+.main-container {
+    max-width: 1400px;
+    margin-left: auto;
+    margin-right: auto;
+    padding-left: 16px; /* Padding para móviles */
+    padding-right: 16px;
 }
 
-/* Specific para contenedores de filtros */
-.mb-4 .card,
-.performance-filters {
-    overflow: visible !important;
-    position: static !important;
+.section-padding {
+    padding: 32px;
 }
 
-/* Contenedor principal del dashboard */
+/* Flecha del Dropdown */
+.Select-arrow {
+    border-color: var(--text-secondary) transparent transparent;
+}
+
+/* Dropdowns de filtros - Solución optimizada para z-index */
+.filter-container {
+    position: relative;
+    z-index: 100;
+    overflow: visible;
+}
+
+/* Permitir que dropdowns se expandan fuera de tarjetas */
+.card.has-dropdowns {
+    overflow: visible;
+}
+
+/* Contenedores principales - permitir overflow para dropdowns */
 .container-fluid,
-.container {
-    overflow: visible !important;
-}
-
-#system-status-info .list-group-item {
-    background-color: #2d3748 !important; 
-    color: #e2e8f0 !important;
-
-}
-/* Filas y columnas */ 
+.container,
 .row {
-    overflow: visible !important;
+    overflow: visible;
 }
-
-.col,
-[class*="col-"] {
-    overflow: visible !important;
-}
-/* Todo el contenedor de filtros con posición */
-div[class*="row"]:nth-child(2) .card {
-    overflow: visible !important;
-    z-index: 2000 !important;
-    position: relative !important;
-}
-/* Tablas mejoradas */
-.dash-table-container table {
-    border-collapse: collapse;
-    font-size: 0.9rem;
-}
-
-.dash-table-container .dash-spreadsheet-container .dash-spreadsheet-inner th {
-    background-color: var(--primary-color) !important;
-    color: white !important;
-    font-weight: 600;
-    padding: 1rem 0.75rem;
-    border: none !important;
-}
-
-.dash-table-container .dash-spreadsheet-container .dash-spreadsheet-inner td {
-    padding: 0.75rem;
-    border: 1px solid #e1e8ed;
-    transition: var(--transition);
-}
-
-.dash-table-container .dash-spreadsheet-container .dash-spreadsheet-inner tr:hover td {
-    background-color: #f8f9fa !important;
-}
-
-/* Alertas mejoradas */
+/* Alertas (HKFA Style) */
 .alert {
-    border-radius: var(--border-radius);
+    border-radius: var(--border-radius-button);
     padding: 1rem 1.25rem;
     margin-bottom: 1rem;
-    border: none;
-    box-shadow: var(--card-shadow);
+    border: 1px solid transparent;
+    border-left-width: 4px;
+    box-shadow: none;
+    color: var(--text-primary);
 }
 
 .alert-success {
-    background-color: #d4edda;
-    color: #155724;
-    border-left: 4px solid var(--success-color);
+    background-color: rgba(39, 174, 96, 0.2);
+    border-color: var(--success-color);
 }
 
 .alert-danger {
-    background-color: #f8d7da;
-    color: #721c24;
-    border-left: 4px solid var(--danger-color);
+    background-color: rgba(231, 76, 60, 0.2);
+    border-color: var(--danger-color);
 }
 
 .alert-warning {
-    background-color: #fff3cd;
-    color: #856404;
-    border-left: 4px solid var(--warning-color);
+    background-color: rgba(243, 156, 18, 0.2);
+    border-color: var(--warning-color);
 }
 
 .alert-info {
-    background-color: #d1ecf1;
-    color: #0c5460;
-    border-left: 4px solid var(--info-color);
+    background-color: rgba(23, 162, 184, 0.2);
+    border-color: var(--info-color);
+}
+
+/* Tablas (HKFA Style) */
+.dash-table-container .dash-spreadsheet-container .dash-spreadsheet-inner th {
+    background-color: var(--background-secondary) !important;
+    color: var(--text-primary) !important;
+    border-bottom: 2px solid var(--accent-primary) !important;
+}
+
+.dash-table-container .dash-spreadsheet-container .dash-spreadsheet-inner td {
+    background-color: transparent !important;
+    color: var(--text-secondary) !important;
+    border: 1px solid var(--border-color) !important;
+}
+
+.dash-table-container .dash-spreadsheet-container .dash-spreadsheet-inner tr:hover td {
+    background-color: rgba(255, 255, 255, 0.05) !important;
+}
+
+/* Limpieza de estilos obsoletos */
+#system-status-info .list-group-item {
+    background-color: var(--background-secondary) !important;
+    color: var(--text-secondary) !important;
+    border-color: var(--border-color) !important;
 }
 
 /* Badges mejorados */
@@ -296,91 +364,93 @@ div[class*="row"]:nth-child(2) .card {
     border-radius: 50px;
 }
 
-/* KPIs y métricas */
+/* KPIs y métricas - Versión HKFA */
 .metric-card {
-    text-align: center;
+    background-color: var(--background-secondary);
+    border-radius: var(--border-radius-card);
+    border-top: 3px solid var(--accent-primary);
     padding: 1.5rem;
-    border-radius: var(--border-radius);
-    background: linear-gradient(135deg, #fff, #f8f9fa);
-    box-shadow: var(--card-shadow);
+    text-align: center;
     transition: var(--transition);
 }
 
 .metric-card:hover {
-    transform: translateY(-3px);
-    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.15);
+    transform: translateY(-2px);
+    border-top-color: var(--text-primary);
 }
 
 .metric-value {
     font-size: 2.5rem;
     font-weight: 700;
     margin: 0;
-    color: var(--primary-color);
+    color: var(--accent-primary);
 }
 
 .metric-label {
-    font-size: 0.9rem;
-    color: #6c757d;
+    font-size: 0.875rem;
+    color: var(--text-secondary);
     text-transform: uppercase;
     letter-spacing: 0.5px;
-    margin: 0;
+    margin: 0.5rem 0 0 0;
 }
 
-/* Loading indicators */
+/* Loading indicators - Versión HKFA */
 ._dash-loading {
     margin: 2rem 0;
 }
 
 ._dash-loading-callback {
-    background-color: rgba(255, 255, 255, 0.8);
-    border-radius: var(--border-radius);
+    background-color: rgba(35, 35, 38, 0.9);
+    border-radius: var(--border-radius-button);
+    border: 1px solid var(--accent-primary);
 }
 
-/* Progress bars */
+/* Progress bars - Versión HKFA */
 .progress {
     height: 8px;
     border-radius: 10px;
-    background-color: #e9ecef;
+    background-color: var(--border-color);
     overflow: hidden;
 }
 
 .progress-bar {
     border-radius: 10px;
+    background-color: var(--accent-primary);
     transition: width 0.6s ease;
 }
 
-/* Layout específico para el home */
+/* Layout específico para el home - Versión HKFA */
 .home-welcome {
-    background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
-    color: white;
+    background-color: var(--background-secondary);
+    border-left: 4px solid var(--accent-primary);
+    border-radius: var(--border-radius-card);
     padding: 3rem 2rem;
-    border-radius: var(--border-radius);
     text-align: center;
     margin-bottom: 2rem;
 }
 
 .home-welcome h1 {
-    color: white;
-    font-size: 3rem;
+    color: var(--text-primary);
+    font-size: 2.5rem;
     margin-bottom: 1rem;
 }
 
 .home-welcome .lead {
     font-size: 1.2rem;
-    opacity: 0.9;
+    color: var(--text-secondary);
 }
 
-/* Dashboard específico */
+/* Dashboard específico - Versión HKFA */
 .dashboard-header {
-    background: linear-gradient(135deg, #667eea, #764ba2);
-    color: white;
+    background-color: var(--background-secondary);
+    border-top: 3px solid var(--accent-primary);
+    border-radius: var(--border-radius-card);
     padding: 2rem;
-    border-radius: var(--border-radius);
     margin-bottom: 2rem;
 }
 
 .dashboard-header h1 {
-    color: white;
+    color: var(--text-primary);
     margin-bottom: 0.5rem;
 }
 
@@ -388,6 +458,26 @@ div[class*="row"]:nth-child(2) .card {
 .js-plotly-plot {
     border-radius: var(--border-radius);
     overflow: hidden;
+}
+
+/* Iconografía - Bootstrap Icons */
+i[class^="bi-"],
+i[class*=" bi-"] {
+    color: var(--text-secondary);
+    font-size: 20px;
+    transition: var(--transition);
+}
+
+i[class^="bi-"]:hover,
+i[class*=" bi-"]:hover {
+    color: var(--text-primary);
+}
+
+/* Iconos en botones */
+.btn i[class^="bi-"],
+.btn i[class*=" bi-"] {
+    margin-right: 0.5rem;
+    vertical-align: middle;
 }
 
 /* Animaciones */
@@ -459,4 +549,11 @@ div[class*="row"]:nth-child(2) .card {
 .p-2 { padding: 0.5rem; }
 .p-3 { padding: 1rem; }
 .p-4 { padding: 1.5rem; }
+/* Estilos para deshabilitar visualmente */
+.greyscale {
+    filter: grayscale(100%);
+    opacity: 0.6;
+    pointer-events: none; /* Opcional: deshabilita eventos de ratón */
+}
+
 .p-5 { padding: 3rem; }

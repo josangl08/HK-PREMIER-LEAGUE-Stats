@@ -32,7 +32,8 @@ app = dash.Dash(
     suppress_callback_exceptions=True,
     external_stylesheets=[
         dbc.themes.BOOTSTRAP,
-        "https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap"
+        "https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap",
+        "https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"
     ],
     meta_tags=[
         {"name": "viewport", "content": "width=device-width, initial-scale=1"},
@@ -116,8 +117,11 @@ app.layout = dbc.Container([
     # Container para el navbar (se llena dinámicamente)
     html.Div(id='navbar-container'),
     
-    # Container para el contenido de la página
-    html.Div(id='page-content', className="fadeIn"),
+    # Container para el contenido de la página, envuelto en el nuevo contenedor principal
+    html.Div(
+        html.Div(id='page-content', className="fadeIn"),
+        className="main-container"
+    ),
     
     # Stores globales para la aplicación
     dcc.Store(id='login-status', storage_type='session'),
@@ -156,8 +160,8 @@ def run_app(debug=None, host=None, port=None):
             port=port_number,
             dev_tools_ui=debug_mode,
             dev_tools_props_check=debug_mode,
-            dev_tools_hot_reload=False,  
-            use_reloader=False       
+            dev_tools_hot_reload=True,
+            use_reloader=True       
         )
     except Exception as e:
         logger.error(f"❌ Error al iniciar la aplicación: {e}")

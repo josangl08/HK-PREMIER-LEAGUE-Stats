@@ -9,25 +9,31 @@ def create_navbar(pathname):
     nav_items = [
         dbc.NavItem(
             dbc.NavLink(
-                "Home", 
-                href="/", 
+                [
+                    html.I(className="bi bi-house me-2"),
+                    "Home"
+                ],
+                href="/",
                 active=pathname == "/"
             )
         ),
         dbc.NavItem(
             dbc.NavLink(
-                "Performance", 
-                href="/performance", 
+                [
+                    html.I(className="bi bi-bar-chart me-2"),
+                    "Performance"
+                ],
+                href="/performance",
                 active=pathname == "/performance"
             )
         ),
-        dbc.NavItem(
-            dbc.NavLink(
-                "Injuries", 
-                href="/injuries", 
-                active=pathname == "/injuries"
-            )
-        ),
+        # dbc.NavItem(
+        #     dbc.NavLink(
+        #         "Injuries",
+        #         href="/injuries",
+        #         active=pathname == "/injuries"
+        #     )
+        # ),
     ]
     
     # Agregar información de usuario y botón de logout
@@ -36,7 +42,10 @@ def create_navbar(pathname):
             dbc.NavItem(
                 [
                     html.Span(
-                        f"User: {current_user.id}" if current_user.is_authenticated else "",
+                        [
+                            html.I(className="bi bi-person-circle me-2"),
+                            f"User: {current_user.id}" if current_user.is_authenticated else ""
+                        ],
                         className="navbar-text text-light me-3"
                     )
                 ],
@@ -44,7 +53,10 @@ def create_navbar(pathname):
             ),
             dbc.NavItem(
                 dbc.Button(
-                    "Logout", 
+                    [
+                        html.I(className="bi bi-box-arrow-right me-2"),
+                        "Logout"
+                    ],
                     id="logout-button",
                     color="danger",
                     size="sm",
