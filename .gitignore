@@ -212,3 +212,9 @@ data/test_aggregator.py
 data/test_extractor.py
 data/test_player_processor.py
 data/test_transfermarkt.py
+
+# .claude
+.claude/
+CLAUDE.md
+.mcp.json
+.github/
