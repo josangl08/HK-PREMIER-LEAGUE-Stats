@@ -20,15 +20,8 @@ load_dotenv()
 try:
     from utils.auth import load_user
     from utils.cache import init_cache
-    
-    # CAMBIO: Importar callbacks explícitamente para evitar importaciones circulares
-    import callbacks.auth_callbacks
-    import callbacks.navigation_callbacks
-    import callbacks.home_callbacks
-    import callbacks.performance_callbacks
-    import callbacks.injuries_callbacks
-    
-    logger.info("✓ Módulos y callbacks importados correctamente")   
+    from data.hong_kong_data_manager import HongKongDataManager
+    logger.info("✓ Módulos y utilidades importados correctamente")
 except ImportError as e:
     logger.error(f"❌ Error importando utilidades: {e}")
     raise
@@ -81,6 +74,39 @@ login_manager.login_message_category = 'info'
 def load_user_from_id(user_id):
     """Callback requerido por Flask-Login para cargar usuarios."""
     return load_user(user_id)
+
+# ==============================================================================
+# INICIALIZACIÓN DEL GESTOR DE DATOS
+# ==============================================================================
+logger.info("Inicializando el gestor de datos y refrescando al inicio...")
+try:
+    data_manager = HongKongDataManager(auto_load=False)
+    if not data_manager.refresh_data():
+        logger.warning("No se pudieron refrescar los datos iniciales. La app podría usar datos desactualizados.")
+    else:
+        logger.info("✓ Datos iniciales refrescados y listos.")
+except Exception as e:
+    logger.critical(f"❌ Error fatal al inicializar DataManager: {e}", exc_info=True)
+    class DummyDataManager:
+        def __getattr__(self, name):
+            def method(*args, **kwargs):
+                logger.error(f"Llamada a '{name}' en DataManager dummy debido a un error de inicialización.")
+                return {} if "get" in name or "status" in name else []
+            return method
+    data_manager = DummyDataManager()
+
+# ==============================================================================
+# IMPORTACIÓN DE CALLBACKS
+# ==============================================================================
+# Se importan después de que 'app' y 'data_manager' están definidos para
+# que puedan acceder a ellos sin problemas de importación circular.
+# ==============================================================================
+import callbacks.auth_callbacks
+import callbacks.navigation_callbacks
+import callbacks.home_callbacks
+import callbacks.performance_callbacks
+import callbacks.injuries_callbacks
+logger.info("✓ Callbacks importados correctamente.")
 
 # Definir layout principal de la aplicación
 app.layout = dbc.Container([
