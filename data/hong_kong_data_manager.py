@@ -168,78 +168,62 @@ class HongKongDataManager:
     
     def refresh_data(self, season: Optional[str] = None, force_download: bool = False) -> bool:
         """
-        Refresca datos para una temporada específica.
-        
-        Args:
-            season: Temporada a cargar (por defecto actual)
-            force_download: Forzar descarga desde GitHub
-            
-        Returns:
-            True si la operación fue exitosa
+        Refresca datos para una temporada específica, centralizando la lógica de actualización.
         """
         try:
             target_season = season or self.current_season
-            # 🔧 VERIFICACIÓN TEMPRANA - Si ya tenemos los datos en memoria y es la misma temporada
-            if (not force_download and 
-                target_season == self.current_season and 
-                self._check_data_availability()):
-                logger.debug(f"📋 Datos ya disponibles en memoria para {target_season}, evitando reprocesamiento")
+            
+            # 1. VERIFICACIÓN TEMPRANA: Si los datos ya están en memoria, no hacer nada.
+            if not force_download and target_season == self.current_season and self._check_data_availability():
+                logger.debug(f"Datos para {target_season} ya en memoria.")
                 return True
+
+            logger.info(f"Iniciando refresco de datos para la temporada: {target_season}")
+
+            # 2. CENTRALIZAR LÓGICA DE ACTUALIZACIÓN
+            needs_update, message = self.extractor.check_for_updates(target_season)
+            logger.info(f"Verificación de actualizaciones para {target_season}: {message}")
+
+            # Determinar si se debe forzar la descarga
+            should_force_download = force_download or needs_update
             
-            logger.info(f"Refrescando datos para temporada {target_season}")
-            
-            # Si no es forzado y la temporada ya existe en cache, usar cache
-            if not force_download and target_season != self.current_season:
+            # Si no se requiere descarga, intentar cargar desde el cache
+            if not should_force_download:
                 if self._load_from_cache(target_season):
+                    logger.info(f"Datos para {target_season} cargados desde cache.")
                     return True
             
-            # 1. Extraer datos
-            raw_data = self.extractor.download_season_data(target_season, force_download)
+            # 3. EXTRAER DATOS (descargar si es necesario)
+            raw_data = self.extractor.download_season_data(target_season, force_update=should_force_download)
             if raw_data is None:
-                logger.error(f"Error extrayendo datos para {target_season}")
-                return False
-            
-            # 2. Procesar datos
+                logger.error(f"No se pudieron extraer los datos para {target_season}.")
+                return self._load_from_cache(target_season) # Fallback al cache
+
+            # 4. PROCESAR Y AGREGAR DATOS
             processed_data = self.processor.process_season_data(raw_data, target_season)
-            if processed_data.empty:
-                logger.error("Error procesando datos")
-                return False
-            
-            # 3. Crear agregador
             aggregator = HongKongStatsAggregator(processed_data.copy())
             
-            # 4. SIEMPRE actualizar estado actual
+            # 5. ACTUALIZAR ESTADO INTERNO
             self.current_season = target_season
             self.raw_data = raw_data
             self.processed_data = processed_data
             self.aggregator = aggregator
-            
-            # 5. Actualizar cache y timestamps correctamente
             self._add_to_cache(target_season, raw_data, processed_data, aggregator)
 
-            current_time = datetime.now()
-
-            if force_download:
-                # Actualización MANUAL
-                self.last_update[f"{target_season}_manual"] = current_time
-                
-                # Solo crear timestamp base si NO EXISTE (primera vez para esta temporada)
-                if target_season not in self.last_update:
-                    self.last_update[target_season] = current_time
-                    logger.info(f"Datos refrescados exitosamente para {target_season} (MANUAL - primera vez)")
-                else:
-                    logger.info(f"Datos refrescados exitosamente para {target_season} (MANUAL - preservando timestamp automático)")
-            else:
-                # Actualización AUTOMÁTICA - siempre actualizar timestamp base
+            # 6. GESTIONAR TIMESTAMPS SOLO SI HUBO CAMBIOS
+            if should_force_download:
+                current_time = datetime.now()
                 self.last_update[target_season] = current_time
-                logger.info(f"Datos refrescados exitosamente para {target_season} (AUTOMÁTICO)")
+                if force_download: # Solicitud manual
+                    self.last_update[f"{target_season}_manual"] = current_time
+                self._save_update_timestamps()
+                logger.info(f"Timestamps actualizados para {target_season}.")
 
-            # Guardar timestamps
-            self._save_update_timestamps()
+            logger.info(f"Refresco de datos para {target_season} completado exitosamente.")
             return True
-            
+
         except Exception as e:
-            logger.error(f"Error refrescando datos: {str(e)}")
+            logger.error(f"Error crítico refrescando datos para {target_season}: {e}", exc_info=True)
             return False
     
     def get_league_overview(self, position_filter: Optional[str] = None, age_range: Optional[List[int]] = None) -> Dict:
@@ -388,50 +372,6 @@ class HongKongDataManager:
             'season': target_season,
             'last_update': self.last_update[target_season].isoformat() if target_season in self.last_update else None
         }
-    
-    def should_check_for_updates(self, season: Optional[str] = None) -> bool:
-        """
-        Determina si se debe verificar actualizaciones para una temporada.
-        Para la temporada actual, solo verificar los lunes por la mañana.
-        Para temporadas anteriores, nunca verificar.
-        """
-        target_season = season or self.current_season
-        current_season = "2024-25"
-        
-        # Para temporadas anteriores, nunca verificar
-        if target_season != current_season:
-            logger.info(f"No se verifican actualizaciones para temporada anterior: {target_season}")
-            return False
-        
-        # Para temporada actual, verificar solo los lunes por la mañana
-        now = datetime.now()
-        is_monday = now.weekday() == 0  # 0 = Lunes
-        is_morning = now.hour < 12  # Antes de mediodía
-        
-        # Si hay forzado manual (desde UI), siempre verificar
-        last_manual_check = self.last_update.get(f"{target_season}_manual", None)
-        is_manual_check = False
-        
-        if last_manual_check:
-            # Si ha pasado menos de 5 minutos desde la última verificación manual
-            time_since_manual = datetime.now() - last_manual_check
-            is_manual_check = time_since_manual.total_seconds() < 300  # 5 minutos
-        
-        if is_monday and is_morning:
-            # Verificar si ya se comprobó hoy
-            last_update = self.last_update.get(target_season)
-            if last_update and last_update.date() == now.date():
-                logger.info(f"Ya se verificaron actualizaciones hoy para {target_season}")
-                return False
-            
-            logger.info(f"Verificando actualizaciones para {target_season} (lunes por la mañana)")
-            return True
-        elif is_manual_check:
-            logger.info(f"Verificando actualizaciones para {target_season} (solicitud manual)")
-            return True
-        else:
-            logger.debug(f"No es momento de verificar actualizaciones automáticas para {target_season}")
-            return False
     
     def _check_data_availability(self) -> bool:
         """Verifica si hay datos disponibles."""
