@@ -211,94 +211,37 @@ class HongKongDataExtractor:
     def check_for_updates(self, season: str = "2024-25") -> Tuple[bool, str]:
         """
         Verifica si hay actualizaciones disponibles para una temporada.
-        Versión mejorada que evita estados inconsistentes.
-        
-        Args:
-            season: Temporada a verificar
-            
-        Returns:
-            Tupla (needs_update: bool, message: str)
+        Prioriza la comparación de SHA de GitHub para mayor fiabilidad.
         """
-        current_season = "2024-25"
-        if season != current_season:
-            return False, f"Temporada {season} archivada (no se actualizan temporadas anteriores)"
-        
+        if season != "2024-25":
+            return False, f"La temporada {season} está archivada y no se actualiza."
+
         if season not in self.available_seasons:
-            return False, f"Temporada {season} no disponible"
-        
+            return False, f"La temporada {season} no está disponible."
+
         filename = self.available_seasons[season]
-        season_key = f"hong_kong_{season}"
         cached_file = self._get_cached_file_path(season)
-        
-        # Si no existe el archivo local, necesitamos descargarlo
+
         if not cached_file.exists():
-            return True, "Primera descarga de la temporada"
-        
-        # VERIFICAR ACTUALIZACIÓN MANUAL RECIENTE (últimos 5 minutos)
-        if season_key in self.metadata:
-            local_metadata = self.metadata[season_key]
-            last_updated_str = local_metadata.get('last_updated')
-            
-            if last_updated_str:
-                try:
-                    last_updated = datetime.fromisoformat(last_updated_str)
-                    time_since_update = (datetime.now() - last_updated).total_seconds()
-                    
-                    # Si la actualización fue muy reciente, considerar actualizado
-                    if time_since_update < 300:  # 5 minutos
-                        logger.info(f"Actualización manual reciente para {season} ({time_since_update:.0f}s)")
-                        return False, "Datos actualizados recientemente"
-                            
-                except Exception as e:
-                    logger.warning(f"Error parseando timestamp: {e}")
-                    # Si hay error, limpiar metadatos corruptos
-                    if season_key in self.metadata:
-                        del self.metadata[season_key]
-                        self._save_metadata()
-        
-        # Obtener información actual del archivo en GitHub
+            return True, "Datos no encontrados en cache, se requiere descarga."
+
+        # Obtener metadatos de GitHub
         github_info = self._get_github_file_info(filename)
-        if not github_info:
-            # Si no podemos verificar GitHub, asumir que está actualizado
-            # para evitar actualizaciones innecesarias
-            return False, "No se pudo verificar el estado en GitHub (asumiendo actualizado)"
-        
-        # Si no tenemos metadatos locales, verificar por última modificación del archivo
-        if season_key not in self.metadata:
-            try:
-                # Usar la fecha de modificación del archivo local
-                file_mtime = datetime.fromtimestamp(cached_file.stat().st_mtime)
-                
-                # Si el archivo es de hoy, probablemente está actualizado
-                if file_mtime.date() == datetime.now().date():
-                    return False, "Archivo local reciente"
-                else:
-                    return True, "Verificando actualizaciones para archivo antiguo"
-                    
-            except Exception:
-                return True, "Error verificando archivo local"
-        
-        local_metadata = self.metadata[season_key]
-        
-        # Comparar SHA de GitHub (más confiable)
+        if not github_info or not github_info.get('sha'):
+            return False, "No se pudo verificar el estado en GitHub; se asume actualizado."
+
+        # Comparar SHA de GitHub con los metadatos locales
+        season_key = f"hong_kong_{season}"
+        local_metadata = self.metadata.get(season_key, {})
         local_sha = local_metadata.get('github_sha')
-        github_sha = github_info.get('sha')
-        
-        if local_sha and github_sha:
-            if local_sha != github_sha:
-                logger.info(f"SHA diferente - Local: {local_sha[:8]}, GitHub: {github_sha[:8]}")
-                return True, "Archivo actualizado en GitHub"
-        
-        # Comparar tamaño como verificación adicional
-        local_size = local_metadata.get('file_size')
-        github_size = github_info.get('size')
-        
-        if local_size and github_size:
-            if local_size != github_size:
-                logger.info(f"Tamaño diferente - Local: {local_size}, GitHub: {github_size}")
-                return True, "Tamaño de archivo modificado"
-        
-        return False, "Archivo actualizado"
+
+        if local_sha and local_sha == github_info['sha']:
+            return False, "Los datos locales coinciden con la versión de GitHub (SHA)."
+
+        if not local_sha:
+            return True, "No se encontró SHA local; se recomienda actualizar."
+
+        return True, "El SHA de GitHub no coincide con el local; se necesita actualizar."
     
     def download_season_data(self, season: str = "2024-25", force_update: bool = False) -> Optional[pd.DataFrame]:
         """
