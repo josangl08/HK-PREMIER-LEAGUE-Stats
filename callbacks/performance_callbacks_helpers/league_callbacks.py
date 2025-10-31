@@ -13,13 +13,6 @@ import dash_bootstrap_components as dbc
 import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
-from utils.common import create_kpi_cards_row, safe_get_analysis_level, validate_filters
-from utils.performance_helpers import (
-    validate_performance_data,
-    get_analysis_title,
-    create_kpi_structure,
-    handle_performance_error
-)
 from .helpers import (
     validate_data,
     create_empty_state,
@@ -27,53 +20,7 @@ from .helpers import (
 )
 
 
-# CALLBACK 1: Main KPIs for league view
-@callback(
-    [Output('kpi-title', 'children'),
-     Output('main-kpis', 'children')],
-    [Input('performance-data-store', 'data'),
-     Input('current-filters-store', 'data')]
-)
-def update_main_kpis(performance_data, filters):
-    """
-    Actualiza los KPIs principales según los datos.
-
-    DESIGN NOTES:
-    - Handles all analysis levels (league/team/player)
-    - Returns title and KPI cards
-    - Uses helper functions for consistency
-    """
-    # Validar datos usando función auxiliar
-    if not validate_performance_data(performance_data, "KPIs"):
-        return "Sin datos disponibles", html.Div("Selecciona filtros válidos")
-
-    try:
-        # Obtener título usando función auxiliar
-        title = get_analysis_title(filters, performance_data)
-
-        # Validar filtros y obtener nivel de análisis
-        filters = validate_filters(filters)
-        analysis_level = safe_get_analysis_level(filters)
-
-        # Crear estructura de KPIs usando función auxiliar
-        kpi_data = create_kpi_structure(analysis_level, performance_data)
-
-        if not kpi_data:
-            return "Datos no disponibles", html.Div("Error procesando datos")
-
-        # Crear fila de KPIs usando utilidad común
-        kpis = create_kpi_cards_row(kpi_data)
-
-        return title, kpis
-
-    except Exception as e:
-        error_info = handle_performance_error(e, "actualizando KPIs")
-        return "Error", html.Div(
-            str(error_info.get('error', 'Error desconocido'))
-        )
-
-
-# CALLBACK 2: Main chart for league view
+# CALLBACK 1: Main chart for league view
 @callback(
     Output('main-chart-container', 'children', allow_duplicate=True),
     [Input('chart-data-store', 'data'),
