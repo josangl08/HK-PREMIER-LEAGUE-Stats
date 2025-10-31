@@ -75,9 +75,10 @@ def update_main_kpis(performance_data, filters):
 
 # CALLBACK 2: Main chart for league view
 @callback(
-    Output('main-chart-container', 'children'),
+    Output('main-chart-container', 'children', allow_duplicate=True),
     [Input('chart-data-store', 'data'),
-     Input('current-filters-store', 'data')]
+     Input('current-filters-store', 'data')],
+    prevent_initial_call=True
 )
 def update_league_main_chart(chart_data, filters):
     """
@@ -122,9 +123,10 @@ def update_league_main_chart(chart_data, filters):
 
 # CALLBACK 3: Secondary chart for league view
 @callback(
-    Output('secondary-chart-container', 'children'),
+    Output('secondary-chart-container', 'children', allow_duplicate=True),
     [Input('chart-data-store', 'data'),
-     Input('current-filters-store', 'data')]
+     Input('current-filters-store', 'data')],
+    prevent_initial_call=True
 )
 def update_league_secondary_chart(chart_data, filters):
     """
@@ -233,9 +235,10 @@ def update_league_secondary_chart(chart_data, filters):
 
 # CALLBACK 4: Top performers for league view
 @callback(
-    Output('top-performers-container', 'children'),
+    Output('top-performers-container', 'children', allow_duplicate=True),
     [Input('performance-data-store', 'data'),
-     Input('current-filters-store', 'data')]
+     Input('current-filters-store', 'data')],
+    prevent_initial_call=True
 )
 def update_league_performers(performance_data, filters):
     """
@@ -339,9 +342,10 @@ def update_league_performers(performance_data, filters):
 
 # CALLBACK 5: Position analysis for league view
 @callback(
-    Output('position-analysis-container', 'children'),
+    Output('position-analysis-container', 'children', allow_duplicate=True),
     [Input('performance-data-store', 'data'),
-     Input('current-filters-store', 'data')]
+     Input('current-filters-store', 'data')],
+    prevent_initial_call=True
 )
 def update_league_position_analysis(performance_data, filters):
     """
