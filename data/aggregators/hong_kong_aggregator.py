@@ -3,27 +3,33 @@ import numpy as np
 from typing import Dict, List, Optional, Union, Any
 import logging
 
+from data.aggregators.tactical_analyzer import TacticalAnalyzer
+from utils.efficiency_metrics import EfficiencyMetricsCalculator, PercentileRankingSystem
+from data.validators.advanced_metrics_validator import AdvancedMetricsValidator
+
+logger = logging.getLogger(__name__)
+
 class HongKongStatsAggregator:
     """
     Agregador de estadísticas para la Liga de Hong Kong.
     """
-    
+
     def __init__(self, processed_data: pd.DataFrame):
         """
         Inicializa el agregador con datos procesados.
-        
+
         Args:
             processed_data: DataFrame procesado por HongKongPlayerProcessor
         """
         self.data = processed_data.copy()
         self.season = processed_data['Season'].iloc[0] if 'Season' in processed_data.columns and len(processed_data) > 0 else 'Unknown'
-        
+
         # Cache para optimizar consultas repetidas
         self._cache = {}
-        
+
         # Inicializar logger para la clase
         self.logger = logging.getLogger(__name__)
-        
+
         # Definir métricas clave por posición
         self.position_metrics = {
             'Goalkeeper': ['Clean sheets', 'Save rate, %', 'Conceded goals', 'xG against'],
@@ -32,12 +38,115 @@ class HongKongStatsAggregator:
             'Winger': ['Successful dribbles, %', 'Crosses per 90', 'Assists', 'Goals'],
             'Forward': ['Goals', 'xG', 'Goal conversion, %', 'Shots on target, %']
         }
-        
+
         # Métricas generales para todos los jugadores
         self.general_metrics = [
             'Goals', 'Assists', 'Matches played', 'Minutes played',
             'Yellow cards', 'Red cards', 'Duels won, %'
         ]
+
+        # NEW: Initialize tactical components
+        self.tactical_analyzer = TacticalAnalyzer(processed_data)
+        self.efficiency_calculator = EfficiencyMetricsCalculator(processed_data)
+        self.percentile_system = PercentileRankingSystem(processed_data)
+        self.validator = AdvancedMetricsValidator(processed_data)
+
+        # Validate data quality (using a subset of required columns for now)
+        required_cols = [
+            'Position_Group', 'Team', 'Player', 'Passes per 90',
+            'Tackles per 90', 'Interceptions per 90', 'xG', 'xA', 'Goals', 'Assists'
+        ]
+        if not self.validator.validate_schema(required_cols):
+            self.logger.warning("Algunas columnas necesarias para análisis táctico o de eficiencia faltan.")
+
+    # NEW: Tactical Methods
+    def get_tactical_profile(self, identifier: str,
+                            level: str = 'player') -> Dict:
+        """
+        Comprehensive tactical profile for player/team/position.
+        Combines tempo, pressing, transitions, and formation data.
+        """
+        if level == 'player':
+            player_data = self.data[self.data['Player'] == identifier]
+            if player_data.empty:
+                return {'error': f'Player {identifier} not found'}
+
+            return {
+                'tempo': self.tactical_analyzer.analyze_tempo(),
+                'pressing': self.tactical_analyzer.analyze_pressing_intensity(),
+                'transitions': self.tactical_analyzer.analyze_transitions(),
+                'formation': self.tactical_analyzer.analyze_formation_fingerprint(),
+                'player_name': identifier,
+                'position': player_data.iloc[0].get('Position_Group', 'Unknown')
+            }
+
+        elif level == 'team':
+            team_data = self.data[self.data['Team'] == identifier]
+            if team_data.empty:
+                return {'error': f'Team {identifier} not found'}
+
+            return {
+                'tempo': self.tactical_analyzer.analyze_tempo('team'),
+                'pressing': self.tactical_analyzer.analyze_pressing_intensity('team'),
+                'transitions': self.tactical_analyzer.analyze_transitions('team'),
+                'formation': self.tactical_analyzer.analyze_formation_fingerprint('team'),
+                'team_name': identifier
+            }
+
+        return {}
+
+    def get_efficiency_metrics(self, identifier: str,
+                              level: str = 'player') -> Dict:
+        """Comprehensive efficiency report."""
+        if level == 'player':
+            # Simplified for now, will be more complex with actual implementation
+            return {
+                'goals_xg_ratio': self.efficiency_calculator.calculate_goals_xg_ratio(group_by=None),
+                'assists_xa_ratio': self.efficiency_calculator.calculate_assists_xa_ratio(group_by=None),
+                'shot_accuracy': self.efficiency_calculator.calculate_shot_accuracy(group_by=None)
+            }
+        elif level == 'team':
+             return {
+                'goals_xg_ratio': self.efficiency_calculator.calculate_goals_xg_ratio(group_by='team'),
+                'assists_xa_ratio': self.efficiency_calculator.calculate_assists_xa_ratio(group_by='team'),
+                'shot_accuracy': self.efficiency_calculator.calculate_shot_accuracy(group_by='team')
+            }
+        return {}
+
+    def get_player_advanced_stats(self, player_name: str) -> Dict:
+        """
+        Complete advanced statistics for player.
+        Combines existing stats with tactical and efficiency metrics.
+        """
+        base_stats = self.get_player_statistics(player_name)
+
+        player_data = self.data[self.data['Player'] == player_name]
+        if not player_data.empty:
+            position = player_data.iloc[0].get('Position_Group', 'Unknown')
+
+            advanced_stats = {
+                **base_stats,
+                'tactical_profile': {
+                    'position_percentiles': self.percentile_system.get_player_percentiles(
+                        player_name,
+                        by_position=True
+                    ),
+                    'league_rankings': self.percentile_system.get_league_rankings(
+                        'Goals', # Example metric
+                        min_matches=5,
+                        top_n=10
+                    )
+                },
+                'efficiency_metrics': self.get_efficiency_metrics(player_name, level='player'),
+                'data_quality': {
+                    'completeness_score': round(
+                        self.validator.get_data_readiness_score(), 1
+                    ),
+                    'validation_report': self.validator.generate_quality_report()
+                }
+            }
+            return advanced_stats
+        return base_stats
     
     def apply_filters(self, df: pd.DataFrame, position_filter: Optional[str] = None, age_range: Optional[List[int]] = None) -> pd.DataFrame:
         """
