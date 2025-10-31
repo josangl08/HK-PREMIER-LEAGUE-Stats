@@ -1,0 +1,559 @@
+# ABOUTME: Team view callbacks
+# ABOUTME: All visualizations for team-level analysis
+
+"""
+Team view callbacks for performance dashboard.
+
+This module contains all callbacks specific to team-level analysis,
+including squad analysis, player minutes, and team comparisons.
+"""
+
+from dash import Input, Output, callback, html, dcc
+import dash_bootstrap_components as dbc
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from .helpers import (
+    validate_data,
+    create_empty_state,
+    create_error_alert
+)
+
+
+# CALLBACK 1: Main chart for team view
+@callback(
+    Output('main-chart-container', 'children', allow_duplicate=True),
+    [Input('chart-data-store', 'data'),
+     Input('current-filters-store', 'data')],
+    prevent_initial_call=True
+)
+def update_team_main_chart(chart_data, filters):
+    """
+    Actualiza el gráfico principal para vista de equipo.
+
+    DESIGN NOTES:
+    - Guard pattern for team view only
+    - Shows player minutes distribution or age analysis
+    - Multiple chart options based on available data
+    """
+    # GUARD: Only render for team view
+    if not filters or filters.get('analysis_level') != 'team':
+        return html.Div()
+
+    # GUARD: Validate data
+    if not validate_data(chart_data):
+        return create_empty_state()
+
+    try:
+        team_name = filters.get('team', 'Equipo')
+
+        # Primera opción: Distribución de minutos por jugador
+        if 'player_minutes' in chart_data:
+            data = chart_data['player_minutes']
+
+            fig = px.bar(
+                x=data['players'],
+                y=data['minutes'],
+                title=f"Minutos Jugados por Jugador - {team_name}",
+                labels={'x': 'Jugadores', 'y': 'Minutos'},
+                color=data['minutes'],
+                color_continuous_scale='Greens'
+            )
+            fig.update_layout(
+                height=400,
+                showlegend=False,
+                xaxis={'categoryorder': 'total descending'}
+            )
+            fig.update_xaxes(tickangle=45)
+            return dcc.Graph(figure=fig)
+
+        # Segunda opción: Análisis de edad del plantel
+        elif 'squad_analysis' in chart_data:
+            squad_data = chart_data.get('squad_analysis', {})
+
+            if 'age_stats' in squad_data:
+                age_data = squad_data['age_stats']
+
+                # Crear gráfico de gauge para edades
+                fig = go.Figure()
+
+                fig.add_trace(go.Indicator(
+                    mode="gauge+number",
+                    value=age_data.get('average', 0),
+                    title={'text': f"Edad Promedio - {team_name}"},
+                    gauge={
+                        'axis': {'range': [15, 40]},
+                        'bar': {'color': "#2ecc71"},
+                        'steps': [
+                            {'range': [15, 23], 'color': "#3498db"},
+                            {'range': [23, 30], 'color': "#2ecc71"},
+                            {'range': [30, 40], 'color': "#f39c12"}
+                        ],
+                        'threshold': {
+                            'line': {'color': "red", 'width': 4},
+                            'thickness': 0.75,
+                            'value': age_data.get('average', 0)
+                        }
+                    }
+                ))
+
+                fig.update_layout(
+                    height=400,
+                    margin=dict(l=20, r=20, t=50, b=20)
+                )
+
+                return dcc.Graph(figure=fig)
+
+        # Fallback: Mensaje informativo
+        return html.Div([
+            html.H4(
+                f"Análisis de Equipo - {team_name}",
+                className="text-center"
+            ),
+            html.P(
+                "Seleccione diferentes filtros para ver análisis detallados",
+                className="text-center text-muted"
+            )
+        ], className="p-5 text-center")
+
+    except Exception as e:
+        return create_error_alert(str(e), "Error en Gráfico de Equipo")
+
+
+# CALLBACK 2: Secondary chart for team view
+@callback(
+    Output('secondary-chart-container', 'children', allow_duplicate=True),
+    [Input('chart-data-store', 'data'),
+     Input('current-filters-store', 'data')],
+    prevent_initial_call=True
+)
+def update_team_secondary_chart(chart_data, filters):
+    """
+    Actualiza el gráfico secundario para equipo.
+
+    DESIGN NOTES:
+    - Guard pattern for team view
+    - Shows age vs goals scatter
+    """
+    # GUARD: Only render for team view
+    if not filters or filters.get('analysis_level') != 'team':
+        return html.Div()
+
+    # GUARD: Validate data
+    if not validate_data(chart_data):
+        return create_empty_state()
+
+    try:
+        if 'age_vs_goals' in chart_data:
+            data = chart_data['age_vs_goals']
+            fig = px.scatter(
+                x=data['ages'],
+                y=data['goals'],
+                hover_name=data['players'],
+                title="Edad vs Goles",
+                labels={'x': 'Edad', 'y': 'Goles'}
+            )
+            fig.update_layout(height=400)
+            return dcc.Graph(figure=fig)
+        else:
+            return html.Div(
+                "Gráfico secundario no disponible",
+                className="text-center p-4"
+            )
+
+    except Exception as e:
+        return create_error_alert(str(e), "Error en Gráfico Secundario")
+
+
+# CALLBACK 3: Top performers for team view
+@callback(
+    Output('top-performers-container', 'children', allow_duplicate=True),
+    [Input('performance-data-store', 'data'),
+     Input('current-filters-store', 'data')],
+    prevent_initial_call=True
+)
+def update_team_performers(performance_data, filters):
+    """
+    Actualiza top performers para equipo.
+
+    DESIGN NOTES:
+    - Guard pattern for team view
+    - Shows key player cards
+    - Falls back to team overview if no top_players
+    """
+    # GUARD: Only render for team view
+    if not filters or filters.get('analysis_level') != 'team':
+        return html.Div()
+
+    # GUARD: Validate data
+    if not validate_data(performance_data):
+        return create_empty_state()
+
+    try:
+        team_name = filters.get('team', 'Equipo')
+
+        # Primera opción: Jugadores destacados
+        if 'top_players' in performance_data:
+            top_players = performance_data['top_players']
+            card_content = []
+
+            # Máximo goleador
+            if 'top_scorer' in top_players and top_players['top_scorer']:
+                scorer = top_players['top_scorer']
+                card_content.append(
+                    dbc.Card([
+                        dbc.CardHeader("Máximo Goleador"),
+                        dbc.CardBody([
+                            html.H5(
+                                scorer.get('name', 'N/A'),
+                                className="card-title"
+                            ),
+                            html.P(
+                                f"{scorer.get('goals', 0)} goles",
+                                className="card-text"
+                            ),
+                            html.Small(
+                                scorer.get('position', ''),
+                                className="text-muted"
+                            )
+                        ])
+                    ], className="h-100")
+                )
+
+            # Máximo asistente
+            if 'top_assister' in top_players and top_players['top_assister']:
+                assister = top_players['top_assister']
+                card_content.append(
+                    dbc.Card([
+                        dbc.CardHeader("Máximo Asistente"),
+                        dbc.CardBody([
+                            html.H5(
+                                assister.get('name', 'N/A'),
+                                className="card-title"
+                            ),
+                            html.P(
+                                f"{assister.get('assists', 0)} asistencias",
+                                className="card-text"
+                            ),
+                            html.Small(
+                                assister.get('position', ''),
+                                className="text-muted"
+                            )
+                        ])
+                    ], className="h-100")
+                )
+
+            # Jugador con más minutos
+            if 'most_played' in top_players and top_players['most_played']:
+                played = top_players['most_played']
+                card_content.append(
+                    dbc.Card([
+                        dbc.CardHeader("Más Minutos"),
+                        dbc.CardBody([
+                            html.H5(
+                                played.get('name', 'N/A'),
+                                className="card-title"
+                            ),
+                            html.P(
+                                f"{played.get('minutes', 0)} minutos",
+                                className="card-text"
+                            ),
+                            html.Small(
+                                f"{played.get('matches', 0)} partidos",
+                                className="text-muted"
+                            )
+                        ])
+                    ], className="h-100")
+                )
+
+            if card_content:
+                # Crear filas con las cards
+                rows = []
+                for i in range(0, len(card_content), 2):
+                    cards_in_row = card_content[i:i+2]
+                    row = dbc.Row([
+                        dbc.Col(card, md=6, className="mb-3")
+                        for card in cards_in_row
+                    ])
+                    rows.append(row)
+
+                return html.Div([
+                    html.H4(
+                        f"Jugadores Destacados - {team_name}",
+                        className="text-center mb-3"
+                    ),
+                    html.Div(rows)
+                ])
+
+        # Segunda opción: Overview del equipo
+        if 'overview' in performance_data:
+            overview = performance_data['overview']
+
+            return html.Div([
+                html.H4(
+                    f"Estadísticas del Equipo - {team_name}",
+                    className="text-center mb-3"
+                ),
+                dbc.Card([
+                    dbc.CardHeader("Resumen del Equipo"),
+                    dbc.CardBody([
+                        dbc.Row([
+                            dbc.Col([
+                                html.H5(
+                                    "Estadísticas Ofensivas",
+                                    className="mb-3"
+                                ),
+                                html.P([
+                                    html.Strong("Total Goles: "),
+                                    html.Span(overview.get('total_goals', 0))
+                                ]),
+                                html.P([
+                                    html.Strong("Total Asistencias: "),
+                                    html.Span(overview.get('total_assists', 0))
+                                ]),
+                                html.P([
+                                    html.Strong("Goles por Jugador: "),
+                                    html.Span(
+                                        f"{overview.get('goals_per_player', 0):.2f}"
+                                    )
+                                ])
+                            ], md=6),
+                            dbc.Col([
+                                html.H5(
+                                    "Estadísticas del Plantel",
+                                    className="mb-3"
+                                ),
+                                html.P([
+                                    html.Strong("Jugadores: "),
+                                    html.Span(overview.get('total_players', 0))
+                                ]),
+                                html.P([
+                                    html.Strong("Edad Promedio: "),
+                                    html.Span(
+                                        f"{overview.get('avg_age', 0):.1f} años"
+                                    )
+                                ]),
+                                html.P([
+                                    html.Strong("Minutos Totales: "),
+                                    html.Span(overview.get('total_minutes', 0))
+                                ])
+                            ], md=6)
+                        ])
+                    ])
+                ])
+            ])
+
+        # Fallback
+        return html.Div([
+            html.H4(f"Equipo: {team_name}", className="text-center"),
+            dbc.Alert(
+                "No se encontraron datos de jugadores destacados.",
+                color="warning"
+            )
+        ])
+
+    except Exception as e:
+        return create_error_alert(str(e), "Error en Top Performers")
+
+
+# CALLBACK 4: Position analysis for team view
+@callback(
+    Output('position-analysis-container', 'children', allow_duplicate=True),
+    [Input('performance-data-store', 'data'),
+     Input('current-filters-store', 'data')],
+    prevent_initial_call=True
+)
+def update_team_position_breakdown(performance_data, filters):
+    """
+    Actualiza el análisis por posición para equipo.
+
+    DESIGN NOTES:
+    - Guard pattern for team view
+    - Shows position breakdown cards
+    """
+    # GUARD: Only render for team view
+    if not filters or filters.get('analysis_level') != 'team':
+        return html.Div()
+
+    # GUARD: Validate data
+    if not validate_data(performance_data):
+        return create_empty_state()
+
+    try:
+        if 'position_breakdown' in performance_data:
+            breakdown = performance_data['position_breakdown']
+
+            cards = []
+            for position, stats in breakdown.items():
+                card = dbc.Card([
+                    dbc.CardBody([
+                        html.H6(position, className="card-title"),
+                        html.P(
+                            f"Jugadores: {stats['count']}",
+                            className="card-text"
+                        ),
+                        html.P(
+                            f"Goles: {stats['total_goals']}",
+                            className="card-text"
+                        ),
+                        html.P(
+                            f"Asistencias: {stats['total_assists']}",
+                            className="card-text"
+                        ),
+                        html.Small(
+                            f"Edad promedio: {stats['avg_age']}",
+                            className="text-muted"
+                        )
+                    ])
+                ], className="h-100")
+
+                cards.append(dbc.Col(card, md=6, lg=4, className="mb-3"))
+
+            return dbc.Row(cards)
+        else:
+            return html.Div(
+                "Análisis por posición no disponible",
+                className="text-center p-4"
+            )
+
+    except Exception as e:
+        return create_error_alert(str(e), "Error en Análisis de Posición")
+
+
+# CALLBACK 5: Comparison chart for team view
+@callback(
+    [Output('comparison-card', 'style'),
+     Output('comparison-chart-title', 'children'),
+     Output('comparison-chart-container', 'children')],
+    [Input('current-filters-store', 'data'),
+     Input('performance-data-store', 'data'),
+     Input('chart-data-store', 'data')],
+    prevent_initial_call=True
+)
+def update_team_comparison(filters, performance_data, chart_data):
+    """
+    Actualiza el gráfico de comparación para equipo.
+
+    DESIGN NOTES:
+    - Guard pattern for team view
+    - Compares team vs league averages
+    - Uses subplots for different metrics
+    """
+    # GUARD: Only render for team view
+    if not filters or filters.get('analysis_level') != 'team':
+        return {"display": "none"}, "", html.Div()
+
+    # Verificar disponibilidad de datos
+    if not performance_data:
+        return {"display": "block"}, "Comparación", html.Div(
+            "No hay datos disponibles", className="text-center p-4"
+        )
+
+    try:
+        team_name = filters.get('team', 'Equipo')
+
+        # Si tenemos overview
+        if 'overview' in performance_data:
+            overview = performance_data['overview']
+
+            # Definir las métricas a comparar
+            metrics = ["Goles", "Asistencias", "Jugadores", "Edad Promedio"]
+
+            # Valores del equipo
+            team_values = [
+                overview.get('total_goals', 0),
+                overview.get('total_assists', 0),
+                overview.get('total_players', 0),
+                overview.get('avg_age', 0)
+            ]
+
+            # Valores de la liga
+            league_values = [
+                overview.get('league_avg_goals', 15),
+                overview.get('league_avg_assists', 10),
+                overview.get('league_avg_players', 20),
+                overview.get('league_avg_age', 25)
+            ]
+
+            # Crear subplots
+            fig = make_subplots(
+                rows=len(metrics),
+                cols=1,
+                subplot_titles=metrics,
+                vertical_spacing=0.05
+            )
+
+            # Colores
+            colors = {
+                'team': '#3498db',
+                'league': '#e74c3c'
+            }
+
+            # Añadir barras para cada métrica
+            for i, metric in enumerate(metrics):
+                team_val = team_values[i]
+                league_val = league_values[i]
+
+                if metric == "Edad Promedio":
+                    team_val = round(team_val, 1)
+                    league_val = round(league_val, 1)
+
+                fig.add_trace(
+                    go.Bar(
+                        x=[team_val],
+                        y=[team_name],
+                        orientation='h',
+                        name=team_name if i == 0 else None,
+                        marker_color=colors['team'],
+                        showlegend=i == 0
+                    ),
+                    row=i+1, col=1
+                )
+
+                fig.add_trace(
+                    go.Bar(
+                        x=[league_val],
+                        y=["Promedio Liga"],
+                        orientation='h',
+                        name="Promedio Liga" if i == 0 else None,
+                        marker_color=colors['league'],
+                        showlegend=i == 0
+                    ),
+                    row=i+1, col=1
+                )
+
+            # Actualizar layout
+            fig.update_layout(
+                height=100 + 150 * len(metrics),
+                title_text=f"Comparación de {team_name} vs Promedio de Liga",
+                margin=dict(t=80, l=120, r=50, b=50),
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="center",
+                    x=0.5
+                ),
+                showlegend=True
+            )
+
+            # Ajustar rangos
+            for i in range(len(metrics)):
+                max_val = max(team_values[i], league_values[i]) * 1.1
+                fig.update_xaxes(range=[0, max_val], row=i+1, col=1)
+
+            return (
+                {"display": "block"},
+                f"Comparación - {team_name}",
+                dcc.Graph(figure=fig)
+            )
+
+        # Fallback
+        return {"display": "block"}, f"Comparación - {team_name}", html.Div(
+            "No hay datos suficientes", className="text-center p-4"
+        )
+
+    except Exception as e:
+        return {"display": "block"}, "Error en Comparación", create_error_alert(
+            str(e), "Error al generar comparación"
+        )
