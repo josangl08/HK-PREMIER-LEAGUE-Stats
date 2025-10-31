@@ -51,8 +51,11 @@ class HongKongDataProcessor:
             
             # 6. Agregar columnas calculadas
             processed_df = self._add_calculated_fields(processed_df, season)
-            
-            # 7. Validación final
+
+            # 7. Preprocesamiento táctico para nuevas métricas
+            processed_df = self._tactical_preprocessing(processed_df)
+
+            # 8. Validación final
             processed_df = self._final_cleanup(processed_df)
             
             logger.info(f"Datos procesados: {len(processed_df)} jugadores, {len(processed_df.columns)} columnas")
@@ -289,6 +292,45 @@ class HongKongDataProcessor:
         
         return df
     
+    def _tactical_preprocessing(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Realiza preprocesamiento específico para métricas tácticas y de eficiencia.
+        Asegura que las columnas existan y tengan el tipo de dato correcto.
+        """
+        logger.info("Realizando preprocesamiento táctico...")
+
+        # Definir columnas esperadas y su tratamiento de nulos/tipo
+        tactical_columns = {
+            'Passes per 90': 0, 'Accurate passes, %': 0,
+            'Forward passes per 90': 0, 'Backward passes per 90': 0,
+            'Long passes per 90': 0, 'Through passes per 90': 0,
+            'Tackles per 90': 0, 'Interceptions per 90': 0,
+            'Defensive duels won, %': 0, 'Duels won, %': 0,
+            'Crosses per 90': 0, 'Shots': 0, 'xG': 0,
+            'Assists': 0, 'xA': 0, 'Shots on target, %': 0
+        }
+
+        for col, default_value in tactical_columns.items():
+            if col not in df.columns:
+                df[col] = default_value
+            else:
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(default_value)
+                # Asegurar que los porcentajes estén en rango 0-100
+                if '%' in col:
+                    df[col] = self._validate_metric_range(df[col])
+
+        # Columnas que pueden tener NaN y que necesitan un tratamiento específico o son de texto
+        text_columns = ['Position_Group', 'Team', 'Player']
+        for col in text_columns:
+            if col in df.columns:
+                df[col] = df[col].fillna('Unknown')
+
+        return df
+
+    def _validate_metric_range(self, series: pd.Series, lower_bound=0, upper_bound=100) -> pd.Series:
+        """Valida que los valores de una serie estén dentro de un rango específico."""
+        return series.clip(lower=lower_bound, upper=upper_bound)
+
     def _create_minimal_dataset(self, df: pd.DataFrame, season: str) -> pd.DataFrame:
         """Crea un dataset mínimo en caso de error total."""
         logger.warning("Creando dataset mínimo debido a errores en el procesamiento")

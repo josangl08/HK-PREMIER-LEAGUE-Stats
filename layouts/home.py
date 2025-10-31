@@ -7,7 +7,7 @@ layout = html.Div([
         dbc.Row([
             dbc.Col([
                 html.H1("Welcome to Hong Kong Premier League Dashboard", className="text-center my-4"),
-            html.Div([
+                html.Div([
                 html.P([
                     "This application provides sports performance analysis and data management for  ",
                     "teams and athletes in the Hong Kong League. ",
@@ -81,5 +81,6 @@ layout = html.Div([
                 
             ], className="p-4 bg-primary-subtle rounded shadow")
         ], width=12, lg=10, className="mx-auto")
+    ])  # Cierra dbc.Row
     ], fluid=True, className="py-4")
 ], className="main-container")
