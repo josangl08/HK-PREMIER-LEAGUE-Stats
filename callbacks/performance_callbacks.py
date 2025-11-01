@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 try:
     from .performance_callbacks_helpers import (
         shared_callbacks,
+        view_dispatcher,  # Master callback for view switching
         league_callbacks,
         team_callbacks,
         player_callbacks,
@@ -38,6 +39,7 @@ except ImportError as e:
 
 __all__ = [
     "shared_callbacks",
+    "view_dispatcher",
     "league_callbacks",
     "team_callbacks",
     "player_callbacks",

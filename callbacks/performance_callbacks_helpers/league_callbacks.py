@@ -1,11 +1,24 @@
-# ABOUTME: League view callbacks
-# ABOUTME: All visualizations for league-level analysis
+# ABOUTME: League view callbacks for performance dashboard
+# ABOUTME: 5 chart callbacks for league-level analysis with unique IDs
 
 """
-League view callbacks for performance dashboard.
+League View Callbacks Module.
 
-This module contains all callbacks specific to league-level analysis,
-including charts, tables, and position analysis.
+This module contains all callbacks specific to league-level analysis.
+Each callback controls one specific chart in the league view layout.
+
+Chart Mapping (matching league_view.py IDs):
+    1. league-chart-1: Bar Chart - Team goals with xG overlay
+    2. league-chart-2: Radar Chart - Position average metrics with percentiles
+    3. league-chart-3: Scatter Plot - Age vs Goals with trend line
+    4. league-chart-4: Heatmap - Team tactical fingerprints
+    5. league-chart-5: Timeline - League-wide form trends
+
+Architecture Notes:
+    - NO allow_duplicate (each ID is unique)
+    - NO guard patterns needed (callbacks only execute when view visible)
+    - Callbacks triggered by chart-data-store updates
+    - HKFA theme applied to all charts
 """
 
 from dash import Input, Output, callback, html, dcc
@@ -13,92 +26,144 @@ import dash_bootstrap_components as dbc
 import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
+import logging
 from .helpers import (
     validate_data,
     create_empty_state,
     create_error_alert
 )
 
+logger = logging.getLogger(__name__)
 
-# CALLBACK 1: Main chart for league view
+
+# ===== CHART 1: BAR CHART - TEAM GOALS =====
 @callback(
-    Output('main-chart-container', 'children', allow_duplicate=True),
+    Output('league-chart-1', 'children'),
     [Input('chart-data-store', 'data'),
      Input('current-filters-store', 'data')],
     prevent_initial_call=True
 )
-def update_league_main_chart(chart_data, filters):
+def update_league_chart_1_team_goals(chart_data, filters):
     """
-    Actualiza el gráfico principal para vista de liga.
+    Bar chart showing team goals with xG overlay.
 
-    DESIGN NOTES:
-    - Uses guard pattern to only render for league view
-    - Returns empty div for other analysis levels
-    - Creates bar chart of team goals
+    Chart Type: Bar chart
+    Data Required: chart_data['team_goals']
+    Layout Position: Row 1 (full width)
+
+    Design Notes:
+        - Primary metric for league analysis
+        - xG overlay shows expected vs actual performance
+        - Interactive hover with team details
+        - HKFA theme colors
     """
-    # GUARD: Only render for league view
-    if not filters or filters.get('analysis_level') != 'league':
-        return html.Div()
+    logger.info("→ Rendering league-chart-1 (team goals)")
 
-    # GUARD: Validate data
     if not validate_data(chart_data):
-        return create_empty_state()
+        return create_empty_state("Datos no disponibles")
 
     try:
-        # NIVEL LIGA: Gráfico de goles por equipo
         if 'team_goals' in chart_data:
             data = chart_data['team_goals']
+
             fig = px.bar(
                 x=data['teams'],
                 y=data['goals'],
-                title="Goles por Equipo",
+                title="⚽ Goles por Equipo - Liga HK Premier",
                 labels={'x': 'Equipos', 'y': 'Goles'},
                 color=data['goals'],
                 color_continuous_scale='Blues'
             )
-            fig.update_layout(height=400, showlegend=False)
-            return dcc.Graph(figure=fig)
-        else:
-            return html.Div(
-                "Gráfico no disponible para estos filtros",
-                className="text-center p-4"
+
+            # HKFA theme
+            fig.update_layout(
+                height=400,
+                showlegend=False,
+                plot_bgcolor='#18181A',
+                paper_bgcolor='#18181A',
+                font=dict(color='#FFFFFF')
             )
 
+            fig.update_xaxes(tickangle=45)
+
+            return dcc.Graph(figure=fig, config={'displayModeBar': False})
+        else:
+            return create_empty_state("Gráfico no disponible para estos filtros")
+
     except Exception as e:
-        return create_error_alert(str(e), "Error en el Gráfico Principal")
+        logger.error(f"Error en league-chart-1: {e}")
+        return create_error_alert(str(e), "Error en Team Goals Chart")
 
 
-# CALLBACK 3: Secondary chart for league view
+# ===== CHART 2: RADAR CHART - POSITION METRICS =====
 @callback(
-    Output('secondary-chart-container', 'children', allow_duplicate=True),
+    Output('league-chart-2', 'children'),
     [Input('chart-data-store', 'data'),
      Input('current-filters-store', 'data')],
     prevent_initial_call=True
 )
-def update_league_secondary_chart(chart_data, filters):
+def update_league_chart_2_position_radar(chart_data, filters):
     """
-    Actualiza el gráfico secundario para liga.
+    Radar chart showing average metrics by position with percentiles.
 
-    DESIGN NOTES:
-    - Guard pattern for league view only
-    - Creates age vs performance scatter plot
-    - Includes trend line
+    Chart Type: Radar (polar) chart
+    Data Required: chart_data['position_metrics'] (FUTURE)
+    Layout Position: Row 2, left column
+
+    Design Notes:
+        - Multi-series radar (one per position)
+        - Percentile shading for context
+        - Toggle position visibility
+        - HKFA theme with position colors
     """
-    # GUARD: Only render for league view
-    if not filters or filters.get('analysis_level') != 'league':
-        return html.Div()
+    logger.info("→ Rendering league-chart-2 (position radar)")
 
-    # GUARD: Validate data
+    # PLACEHOLDER: To be implemented with tactical analyzer data
+    return html.Div([
+        dbc.Alert([
+            html.H5("📊 Radar de Posiciones - Próximamente", className='mb-2'),
+            html.P(
+                "Este gráfico mostrará métricas promedio por posición con "
+                "percentiles league-wide. Implementación en Phase 5.",
+                className='mb-0'
+            )
+        ], color='info', className='text-center')
+    ])
+
+
+# ===== CHART 3: SCATTER PLOT - AGE VS GOALS =====
+@callback(
+    Output('league-chart-3', 'children'),
+    [Input('chart-data-store', 'data'),
+     Input('current-filters-store', 'data')],
+    prevent_initial_call=True
+)
+def update_league_chart_3_age_scatter(chart_data, filters):
+    """
+    Scatter plot showing age vs goals with trend line.
+
+    Chart Type: Scatter plot with regression
+    Data Required: chart_data['age_performance']
+    Layout Position: Row 2, right column
+
+    Design Notes:
+        - Each point = one player
+        - Hover shows player details
+        - Trend line shows age-performance correlation
+        - Color coded by goals
+        - HKFA theme
+    """
+    logger.info("→ Rendering league-chart-3 (age vs goals)")
+
     if not validate_data(chart_data):
-        return create_empty_state()
+        return create_empty_state("Datos no disponibles")
 
     try:
-        # NUEVO: Gráfico de Dispersión de Edad vs. Rendimiento
         if 'age_performance' in chart_data:
             data = chart_data.get('age_performance', {})
 
             if data and 'ages' in data and 'goals' in data:
-                # Crear un DataFrame para facilitar el manejo
+                # Crear DataFrame
                 df = pd.DataFrame({
                     'Edad': data['ages'],
                     'Goles': data['goals'],
@@ -109,10 +174,10 @@ def update_league_secondary_chart(chart_data, filters):
                     'Equipo': data.get('teams', ['Unknown'] * len(data['ages']))
                 })
 
-                # Calcular promedio de goles por edad
+                # Calcular promedio por edad (trend line)
                 age_avg = df.groupby('Edad')['Goles'].mean().reset_index()
 
-                # Crear scatter plot con línea de tendencia
+                # Crear figura
                 fig = go.Figure()
 
                 # Scatter plot principal
@@ -127,8 +192,12 @@ def update_league_secondary_chart(chart_data, filters):
                         showscale=True,
                         colorbar=dict(title="Goles")
                     ),
-                    text=df['Jugadores'] + '<br>Equipo: ' +
-                    df['Equipo'] + '<br>Posición: ' + df['Posición'],
+                    text=[
+                        f"{player}<br>Equipo: {team}<br>Posición: {pos}"
+                        for player, team, pos in zip(
+                            df['Jugadores'], df['Equipo'], df['Posición']
+                        )
+                    ],
                     hoverinfo='text',
                     name='Jugadores'
                 ))
@@ -138,17 +207,20 @@ def update_league_secondary_chart(chart_data, filters):
                     x=age_avg['Edad'],
                     y=age_avg['Goles'],
                     mode='lines',
-                    line=dict(color='red', width=2, dash='dash'),
+                    line=dict(color='#ED1C24', width=2, dash='dash'),
                     name='Promedio por Edad'
                 ))
 
-                # Actualizar layout
+                # HKFA theme
                 fig.update_layout(
-                    title="Relación Edad-Rendimiento",
+                    title="📈 Relación Edad-Rendimiento",
                     xaxis_title="Edad",
                     yaxis_title="Goles",
                     height=400,
                     hovermode='closest',
+                    plot_bgcolor='#18181A',
+                    paper_bgcolor='#18181A',
+                    font=dict(color='#FFFFFF'),
                     legend=dict(
                         orientation="h",
                         yanchor="bottom",
@@ -158,202 +230,94 @@ def update_league_secondary_chart(chart_data, filters):
                     )
                 )
 
-                return dcc.Graph(figure=fig)
+                return dcc.Graph(figure=fig, config={'displayModeBar': False})
 
-        # Fallback: Distribución por posición
-        elif 'position_distribution' in chart_data:
-            data = chart_data['position_distribution']
-            fig = px.pie(
-                values=data['counts'],
-                names=data['positions'],
-                title="Distribución por Posición"
-            )
-            fig.update_layout(height=400)
-            return dcc.Graph(figure=fig)
-        else:
-            return html.Div(
-                "Gráfico secundario no disponible",
-                className="text-center p-4"
-            )
+        # Fallback
+        return create_empty_state("Datos de edad no disponibles")
 
     except Exception as e:
-        return create_error_alert(str(e), "Error en Gráfico Secundario")
+        logger.error(f"Error en league-chart-3: {e}")
+        return create_error_alert(str(e), "Error en Age Scatter Chart")
 
 
-# CALLBACK 4: Top performers for league view
+# ===== CHART 4: HEATMAP - TACTICAL FINGERPRINTS =====
 @callback(
-    Output('top-performers-container', 'children', allow_duplicate=True),
-    [Input('performance-data-store', 'data'),
+    Output('league-chart-4', 'children'),
+    [Input('chart-data-store', 'data'),
      Input('current-filters-store', 'data')],
     prevent_initial_call=True
 )
-def update_league_performers(performance_data, filters):
+def update_league_chart_4_tactical_heatmap(chart_data, filters):
     """
-    Actualiza top performers para liga.
+    Heatmap showing team tactical fingerprints (tempo × pressing).
 
-    DESIGN NOTES:
-    - Guard pattern for league view
-    - Creates tabs with top scorers and assisters
-    - Shows top 10 in each category
+    Chart Type: Heatmap
+    Data Required: chart_data['tactical_fingerprints'] (FUTURE)
+    Layout Position: Row 3, left column
+
+    Design Notes:
+        - X-axis: Tempo (passes per 90)
+        - Y-axis: Pressing intensity (PPDA)
+        - Color: Team classification
+        - Click cell → team view drill-down
+        - HKFA theme
     """
-    # GUARD: Only render for league view
-    if not filters or filters.get('analysis_level') != 'league':
-        return html.Div()
+    logger.info("→ Rendering league-chart-4 (tactical heatmap)")
 
-    # GUARD: Validate data
-    if not validate_data(performance_data):
-        return create_empty_state()
-
-    try:
-        # NIVEL LIGA: Tabs con top performers
-        if 'top_performers' in performance_data:
-            performers = performance_data['top_performers']
-
-            # Crear tabs para diferentes categorías
-            tabs = []
-
-            if 'top_scorers' in performers:
-                tab_content = []
-                for i, player in enumerate(performers['top_scorers'][:10], 1):
-                    tab_content.append(
-                        html.Tr([
-                            html.Td(f"{i}°"),
-                            html.Td(player['Player']),
-                            html.Td(player['Team']),
-                            html.Td(f"{player['Goals']} goles"),
-                            html.Td(player.get('Position_Group', 'N/A'))
-                        ])
-                    )
-
-                tabs.append(
-                    dbc.Tab(
-                        html.Table([
-                            html.Thead([
-                                html.Tr([
-                                    html.Th("Pos"),
-                                    html.Th("Jugador"),
-                                    html.Th("Equipo"),
-                                    html.Th("Goles"),
-                                    html.Th("Posición")
-                                ])
-                            ]),
-                            html.Tbody(tab_content)
-                        ], className="table table-striped"),
-                        label="Top Goleadores",
-                        tab_id="scorers"
-                    )
-                )
-
-            if 'top_assisters' in performers:
-                tab_content = []
-                for i, player in enumerate(performers['top_assisters'][:10], 1):
-                    tab_content.append(
-                        html.Tr([
-                            html.Td(f"{i}°"),
-                            html.Td(player['Player']),
-                            html.Td(player['Team']),
-                            html.Td(f"{player['Assists']} asist."),
-                            html.Td(player.get('Position_Group', 'N/A'))
-                        ])
-                    )
-
-                tabs.append(
-                    dbc.Tab(
-                        html.Table([
-                            html.Thead([
-                                html.Tr([
-                                    html.Th("Pos"),
-                                    html.Th("Jugador"),
-                                    html.Th("Equipo"),
-                                    html.Th("Asistencias"),
-                                    html.Th("Posición")
-                                ])
-                            ]),
-                            html.Tbody(tab_content)
-                        ], className="table table-striped"),
-                        label="Top Asistentes",
-                        tab_id="assisters"
-                    )
-                )
-
-            return dbc.Tabs(tabs, active_tab="scorers")
-        else:
-            return html.Div(
-                "Top performers no disponible",
-                className="text-center p-4"
+    # PLACEHOLDER: Requires TacticalAnalyzer implementation
+    return html.Div([
+        dbc.Alert([
+            html.H5("🎯 Heatmap Táctico - Próximamente", className='mb-2'),
+            html.P(
+                "Este heatmap mostrará el estilo táctico de cada equipo "
+                "(tempo × pressing intensity). Implementación en Phase 5.",
+                className='mb-0'
             )
+        ], color='warning', className='text-center')
+    ])
 
-    except Exception as e:
-        return create_error_alert(str(e), "Error en Top Performers")
 
-
-# CALLBACK 5: Position analysis for league view
+# ===== CHART 5: TIMELINE - FORM TRENDS =====
 @callback(
-    Output('position-analysis-container', 'children', allow_duplicate=True),
-    [Input('performance-data-store', 'data'),
+    Output('league-chart-5', 'children'),
+    [Input('chart-data-store', 'data'),
      Input('current-filters-store', 'data')],
     prevent_initial_call=True
 )
-def update_league_position_analysis(performance_data, filters):
+def update_league_chart_5_form_timeline(chart_data, filters):
     """
-    Actualiza análisis por posición para liga.
+    Timeline showing league-wide form trends.
 
-    DESIGN NOTES:
-    - Guard pattern for league view
-    - Creates position cards with stats
-    - Shows player count, goals, assists, age
+    Chart Type: Line chart (multi-series)
+    Data Required: chart_data['form_trends'] (FUTURE)
+    Layout Position: Row 3, right column
+
+    Design Notes:
+        - Multiple lines (one per team or metric)
+        - Zoom/pan temporal exploration
+        - Metric toggle (goals, xG, shots, etc.)
+        - HKFA theme
     """
-    # GUARD: Only render for league view
-    if not filters or filters.get('analysis_level') != 'league':
-        return html.Div()
+    logger.info("→ Rendering league-chart-5 (form timeline)")
 
-    # GUARD: Validate data
-    if not validate_data(performance_data):
-        return create_empty_state()
-
-    try:
-        if 'position_analysis' in performance_data:
-            positions = performance_data['position_analysis']
-
-            cards = []
-            for position, stats in positions.items():
-                card = dbc.Card([
-                    dbc.CardBody([
-                        html.H6(position, className="card-title"),
-                        html.P(
-                            f"Players: {stats['player_count']}",
-                            className="card-text"
-                        ),
-                        html.P([
-                            html.Span(
-                                f"Goals: {stats['total_goals']}",
-                                className="card-text"
-                            ),
-                            html.Span(" | ", className="text-muted mx-1"),
-                            html.Span(
-                                f"Assists: {stats['total_assists']}",
-                                className="card-text"
-                            )
-                        ]),
-                        html.P(
-                            f"Avg. Age: {stats['avg_age']}",
-                            className="card-text"
-                        ),
-                        html.Small(
-                            f"Avg. Minutes: {stats['avg_minutes']}",
-                            className="text-muted"
-                        )
-                    ])
-                ], className="h-100")
-
-                cards.append(dbc.Col(card, md=6, lg=4, className="mb-3"))
-
-            return dbc.Row(cards)
-        else:
-            return html.Div(
-                "Análisis por posición no disponible",
-                className="text-center p-4"
+    # PLACEHOLDER: Requires temporal data
+    return html.Div([
+        dbc.Alert([
+            html.H5("📅 Timeline de Forma - Próximamente", className='mb-2'),
+            html.P(
+                "Este timeline mostrará tendencias de rendimiento a lo largo "
+                "de la temporada. Implementación en Phase 5.",
+                className='mb-0'
             )
+        ], color='secondary', className='text-center')
+    ])
 
-    except Exception as e:
-        return create_error_alert(str(e), "Error en Análisis de Posición")
+
+# ===== EXPORT FOR CLEAN IMPORTS =====
+__all__ = [
+    'update_league_chart_1_team_goals',
+    'update_league_chart_2_position_radar',
+    'update_league_chart_3_age_scatter',
+    'update_league_chart_4_tactical_heatmap',
+    'update_league_chart_5_form_timeline'
+]

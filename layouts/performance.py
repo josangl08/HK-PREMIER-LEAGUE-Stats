@@ -155,93 +155,30 @@ def create_performance_layout():
             ])
         ], className="mb-4"),
         
-        # Sección de gráficos principales
-        dbc.Row([
-            # Gráfico principal izquierdo
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardHeader([
-                        html.H5("Main Chart", className="mb-0")
-                    ]),
-                    dbc.CardBody([
-                        dcc.Loading(
-                            id="loading-main-chart",
-                            children=[html.Div(id="main-chart-container")],
-                            type="default"
-                        )
-                    ])
-                ])
-            ], md=6),
-            
-            # Gráfico secundario derecho
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardHeader([
-                        html.H5("Secondary Chart", className="mb-0")
-                    ]),
-                    dbc.CardBody([
-                        dcc.Loading(
-                            id="loading-secondary-chart",
-                            children=[html.Div(id="secondary-chart-container")],
-                            type="default"
-                        )
-                    ])
-                ])
-            ], md=6)
-        ], className="mb-4"),
-        
-        # Sección de estadísticas detalladas
-        dbc.Row([
-            # Tabla de top performers
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardHeader([
-                        html.H5("Top Performers", className="mb-0")
-                    ]),
-                    dbc.CardBody([
-                        dcc.Loading(
-                            id="loading-top-performers",
-                            children=[html.Div(id="top-performers-container")],
-                            type="default"
-                        )
-                    ])
-                ])
-            ], md=6),
-            
-            # Estadísticas por posición
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardHeader([
-                        html.H5("Analysis by Position", className="mb-0")
-                    ]),
-                    dbc.CardBody([
-                        dcc.Loading(
-                            id="loading-position-analysis",
-                            children=[html.Div(id="position-analysis-container")],
-                            type="default"
-                        )
-                    ])
-                ])
-            ], md=6)
-        ], className="mb-4"),
-        
-        # Gráfico de comparación (condicional para equipos/jugadores)
-        dbc.Row([
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardHeader([
-                        html.H5(id="comparison-chart-title", className="mb-0")
-                    ]),
-                    dbc.CardBody([
-                        dcc.Loading(
-                            id="loading-comparison-chart",
-                            children=[html.Div(id="comparison-chart-container")],
-                            type="default"
-                        )
-                    ])
-                ], id="comparison-card", style={"display": "none"})
-            ])
-        ], className="mb-4"),
+        # ===== MODULAR VIEWS CONTAINERS =====
+        # Only ONE view visible at a time (controlled by view_dispatcher callback)
+        # Each view has its own layout structure and chart IDs
+
+        # LEAGUE VIEW CONTAINER
+        html.Div(
+            id='league-view-container',
+            children=[],  # Populated dynamically by view_dispatcher
+            style={'display': 'none'}  # Initially hidden
+        ),
+
+        # TEAM VIEW CONTAINER
+        html.Div(
+            id='team-view-container',
+            children=[],  # Populated dynamically by view_dispatcher
+            style={'display': 'none'}  # Initially hidden
+        ),
+
+        # PLAYER VIEW CONTAINER
+        html.Div(
+            id='player-view-container',
+            children=[],  # Populated dynamically by view_dispatcher
+            style={'display': 'none'}  # Initially hidden
+        ),
         
         # Stores para datos
         dcc.Store(id="performance-data-store"),
