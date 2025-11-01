@@ -993,7 +993,54 @@ class HongKongStatsAggregator:
                     'teams': players_with_goals['Team'].tolist(),
                     'positions': players_with_goals[position_column].tolist() if position_column in players_with_goals.columns else []
                 }
-        
+
+        # NUEVO: Datos tácticos para heatmap (tempo vs pressing por equipo)
+        if 'Team' in self.data.columns:
+            try:
+                teams = self.data['Team'].unique()
+                tactical_data = {}
+
+                for team in teams:
+                    if pd.isna(team):
+                        continue
+
+                    # Get tactical profile for team
+                    team_profile = self.get_tactical_profile(team, level='team')
+
+                    if 'error' in team_profile:
+                        continue
+
+                    # Extract tempo and pressing metrics
+                    tempo_data = team_profile.get('tempo', {})
+                    pressing_data = team_profile.get('pressing', {})
+                    transitions_data = team_profile.get('transitions', {})
+                    formation_data = team_profile.get('formation', {})
+
+                    tactical_data[team] = {
+                        'tempo_passes_per_90': tempo_data.get(
+                            'passes_per_90', 0
+                        ),
+                        'pressing_ppda': pressing_data.get('ppda', 0),
+                        'pressing_defensive_actions_att_third': (
+                            pressing_data.get(
+                                'defensive_actions_attacking_third_per_90', 0
+                            )
+                        ),
+                        'transition_recovery_time': transitions_data.get(
+                            'avg_recovery_time_proxy', 0
+                        ),
+                        'formation_wide_play_ratio': formation_data.get(
+                            'wide_play_vs_central_ratio', 0
+                        )
+                    }
+
+                data['tactical_fingerprints'] = tactical_data
+
+            except Exception as e:
+                logger.warning(
+                    f"Error preparando datos tácticos: {e}"
+                )
+
         return data
     
     def _prepare_team_chart_data(self, team_name: str) -> Dict:
