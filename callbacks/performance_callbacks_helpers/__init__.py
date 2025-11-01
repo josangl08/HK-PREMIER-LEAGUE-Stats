@@ -5,6 +5,7 @@
 
 # Import callback modules (side effects: register callbacks)
 from . import shared_callbacks
+from . import view_dispatcher
 from . import league_callbacks
 from . import team_callbacks
 from . import player_callbacks
@@ -21,6 +22,7 @@ from .helpers import (
 
 __all__ = [
     "shared_callbacks",
+    "view_dispatcher",
     "league_callbacks",
     "team_callbacks",
     "player_callbacks",

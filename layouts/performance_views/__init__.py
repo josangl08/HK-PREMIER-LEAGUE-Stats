@@ -1,40 +1,24 @@
-# ABOUTME: Performance views package initialization
-# ABOUTME: Exports shared components for clean imports across the application
+# ABOUTME: Performance views module exports
+# ABOUTME: Clean imports for league, team, player view modules
 
-from .shared_components import (
-    # Filter components
-    create_season_selector,
-    create_team_selector,
-    create_player_selector,
-    create_position_filter,
-    create_age_range_filter,
-    create_export_button,
-    # KPI components
-    create_kpi_card,
-    create_kpi_row,
-    # Chart components
-    create_chart_container,
-    create_chart_row,
-    # Status components
-    create_status_alert,
-    create_empty_state
-)
+"""
+Performance Views Module.
+
+This module contains modular view layouts for the performance dashboard.
+Each view (league, team, player) has its own layout structure and chart IDs.
+
+Exports:
+    - league_view: League-level analysis layout
+    - team_view: Team-level analysis layout
+    - player_view: Player-level analysis layout
+"""
+
+from . import league_view
+from . import team_view
+from . import player_view
 
 __all__ = [
-    # Filter components
-    "create_season_selector",
-    "create_team_selector",
-    "create_player_selector",
-    "create_position_filter",
-    "create_age_range_filter",
-    "create_export_button",
-    # KPI components
-    "create_kpi_card",
-    "create_kpi_row",
-    # Chart components
-    "create_chart_container",
-    "create_chart_row",
-    # Status components
-    "create_status_alert",
-    "create_empty_state"
+    'league_view',
+    'team_view',
+    'player_view',
 ]

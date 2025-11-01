@@ -38,6 +38,7 @@ pip-delete-this-directory.txt
 
 # Unit test / coverage reports
 htmlcov/
+tests/
 .tox/
 .nox/
 .coverage
@@ -180,7 +181,7 @@ secrets.json
 # Datos temporales y de prueba
 temp/
 tmp/
-test_data/
+
 
 # Archivos IDE específicos
 .vscode/
@@ -208,10 +209,6 @@ debug/
 .QUICK_START.md
 .DESARROLLO.md
 .setup.py
-data/test_aggregator.py
-data/test_extractor.py
-data/test_player_processor.py
-data/test_transfermarkt.py
 
 # .claude
 .claude/
