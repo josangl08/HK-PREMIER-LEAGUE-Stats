@@ -1047,89 +1047,225 @@ class HongKongStatsAggregator:
         """Prepara datos del equipo para gráficos."""
         team_data = self.data[self.data['Team'] == team_name]
         data = {}
-        
-        # Datos para gráfico de radar del equipo vs liga
-        if all(col in team_data.columns for col in ['Goals', 'Assists', 'Accurate passes, %']):
-            team_metrics = {
-                'Goals': team_data['Goals'].mean(),
-                'Assists': team_data['Assists'].mean(),
-                'Pass Accuracy': team_data['Accurate passes, %'].mean()
+
+        # Chart 1: Team vs League Radar (6-8 key metrics)
+        radar_metrics = ['Goals', 'Assists', 'Accurate passes, %', 'xG', 'Duels won, %', 'Tackles per 90']
+        if all(col in team_data.columns for col in radar_metrics):
+            team_values = []
+            league_values = []
+            valid_metrics = []
+
+            for metric in radar_metrics:
+                team_val = team_data[metric].mean()
+                league_val = self.data[metric].mean()
+                if not (pd.isna(team_val) or pd.isna(league_val)):
+                    valid_metrics.append(metric)
+                    team_values.append(float(team_val))
+                    league_values.append(float(league_val))
+
+            if valid_metrics:
+                data['team_vs_league_radar'] = {
+                    'metrics': valid_metrics,
+                    'team_values': team_values,
+                    'league_values': league_values
+                }
+
+        # Chart 2: Squad Depth by Position
+        if 'Position_Group' in team_data.columns:
+            position_counts = team_data['Position_Group'].value_counts().to_dict()
+            position_ages = team_data.groupby('Position_Group')['Age'].mean().to_dict()
+            position_minutes = team_data.groupby('Position_Group')['Minutes played'].sum().to_dict()
+
+            data['squad_depth'] = {
+                'positions': list(position_counts.keys()),
+                'player_counts': list(position_counts.values()),
+                'avg_ages': [position_ages.get(pos, 0) for pos in position_counts.keys()],
+                'total_minutes': [position_minutes.get(pos, 0) for pos in position_counts.keys()]
             }
-            
-            league_metrics = {
-                'Goals': self.data['Goals'].mean(),
-                'Assists': self.data['Assists'].mean(),
-                'Pass Accuracy': self.data['Accurate passes, %'].mean()
-            }
-            
-            data['team_vs_league_radar'] = {
-                'metrics': list(team_metrics.keys()),
-                'team_values': list(team_metrics.values()),
-                'league_values': list(league_metrics.values())
-            }
-        
-        # Datos para distribución de minutos por jugador
-        if 'Minutes played' in team_data.columns:
+
+        # Chart 3: Player Minutes Treemap
+        if all(col in team_data.columns for col in ['Minutes played', 'Player', 'Position_Group']):
+            # Sort by minutes descending
+            sorted_team = team_data.sort_values('Minutes played', ascending=False)
+
             data['player_minutes'] = {
-                'players': team_data['Player'].tolist(),
-                'minutes': team_data['Minutes played'].tolist()
+                'players': sorted_team['Player'].tolist(),
+                'minutes': sorted_team['Minutes played'].tolist(),
+                'positions': sorted_team['Position_Group'].tolist(),
+                'matches': sorted_team['Matches played'].tolist() if 'Matches played' in sorted_team.columns else []
             }
-        
-        # Datos para gráfico de edad vs performance
-        if all(col in team_data.columns for col in ['Age', 'Goals', 'Player']):
-            data['age_vs_goals'] = {
-                'ages': team_data['Age'].tolist(),
-                'goals': team_data['Goals'].tolist(),
-                'players': team_data['Player'].tolist()
-            }
-        
+
+        # Chart 4: Tactical Fingerprint Heatmap
+        try:
+            # Get team-level tactical profile
+            team_tactical = self.tactical_analyzer.get_tactical_profile(
+                level='team',
+                entity_name=team_name
+            )
+
+            if team_tactical and 'tempo' in team_tactical:
+                # Extract key tactical metrics
+                tactical_metrics = []
+                tactical_values = []
+
+                # Tempo metrics
+                if 'passes_per_90' in team_tactical['tempo']:
+                    tactical_metrics.append('Passes per 90')
+                    tactical_values.append(team_tactical['tempo']['passes_per_90'])
+
+                # Pressing metrics
+                if 'ppda' in team_tactical['pressing']:
+                    tactical_metrics.append('PPDA')
+                    tactical_values.append(team_tactical['pressing']['ppda'])
+
+                if 'defensive_actions_att_third' in team_tactical['pressing']:
+                    tactical_metrics.append('High Press')
+                    tactical_values.append(team_tactical['pressing']['defensive_actions_att_third'])
+
+                # Formation metrics
+                if 'wide_play_ratio' in team_tactical['formation']:
+                    tactical_metrics.append('Wide Play')
+                    tactical_values.append(team_tactical['formation']['wide_play_ratio'])
+
+                # Transition metrics
+                if 'recovery_time' in team_tactical['transitions']:
+                    tactical_metrics.append('Recovery Speed')
+                    tactical_values.append(team_tactical['transitions']['recovery_time'])
+
+                if tactical_metrics:
+                    data['tactical_fingerprint'] = {
+                        'metrics': tactical_metrics,
+                        'values': tactical_values,
+                        'team_name': team_name
+                    }
+        except Exception as e:
+            logger.warning(f"Error preparing tactical fingerprint for {team_name}: {e}")
+
         return data
     
     def _prepare_player_chart_data(self, player_name: str) -> Dict:
         """Prepara datos del jugador para gráficos."""
         player_data = self.data[self.data['Player'] == player_name]
-        
+
         if player_data.empty:
             return {}
-        
+
         player_record = player_data.iloc[0]
         data = {}
-        
-        # Datos para gráfico de radar del jugador vs posición
+
+        # Get position info
         position_column = 'Position_Group'
         position_group = player_record.get(position_column, 'Unknown')
-        
+
         # Fallback si no existe Position_Group
         if position_group == 'Unknown' and 'Position_Primary_Group' in player_record.index:
             position_column = 'Position_Primary_Group'
             position_group = player_record.get(position_column, 'Unknown')
-        
+
+        # Chart 1: Player vs Position Radar with Percentiles
         if position_group != 'Unknown' and position_group in self.position_metrics:
             position_data = self.data[self.data[position_column] == position_group]
-            
+
             player_metrics = {}
             position_metrics_avg = {}
-            
+            percentile_values = {}
+
             for metric in self.position_metrics[position_group]:
                 if metric in player_record.index and metric in position_data.columns:
-                    player_metrics[metric] = player_record[metric]
+                    player_val = player_record[metric]
+                    player_metrics[metric] = player_val
                     position_metrics_avg[metric] = position_data[metric].mean()
-            
+
+                    # Calculate percentile for this metric
+                    try:
+                        percentile = self.percentile_system.get_player_percentile(
+                            player_name, metric, by_position=True
+                        )
+                        if percentile is not None:
+                            percentile_values[metric] = percentile
+                    except Exception:
+                        pass
+
             if player_metrics:
                 data['player_vs_position_radar'] = {
                     'metrics': list(player_metrics.keys()),
                     'player_values': list(player_metrics.values()),
-                    'position_avg': list(position_metrics_avg.values())
+                    'position_avg': list(position_metrics_avg.values()),
+                    'percentiles': [percentile_values.get(m, 50) for m in player_metrics.keys()]
                 }
-        
-        # Datos para comparación de percentiles
-        percentiles = self._get_player_percentiles(player_record)
-        if percentiles:
-            data['player_percentiles'] = {
-                'metrics': list(percentiles.keys()),
-                'percentiles': list(percentiles.values())
-            }
-        
+
+        # Chart 2: Percentile Rankings (Top 6-8 metrics)
+        try:
+            # Get all percentiles for player
+            key_metrics = ['Goals', 'Assists', 'xG', 'xA', 'Accurate passes, %', 'Duels won, %']
+            percentile_data = {}
+
+            for metric in key_metrics:
+                if metric in player_record.index:
+                    percentile = self.percentile_system.get_player_percentile(
+                        player_name, metric, by_position=True
+                    )
+                    if percentile is not None:
+                        percentile_data[metric] = {
+                            'percentile': percentile,
+                            'value': float(player_record[metric]),
+                            'position_avg': float(self.data[self.data[position_column] == position_group][metric].mean())
+                        }
+
+            if percentile_data:
+                data['player_percentiles'] = percentile_data
+        except Exception as e:
+            logger.warning(f"Error calculating percentiles for {player_name}: {e}")
+
+        # Chart 3: Efficiency Scatter (Goals/xG vs Assists/xA)
+        try:
+            efficiency_data = self.efficiency_calculator.calculate_efficiency_metrics(
+                player_name=player_name
+            )
+
+            if efficiency_data and 'goals_efficiency' in efficiency_data:
+                data['efficiency_scatter'] = {
+                    'goals_efficiency': efficiency_data['goals_efficiency']['ratio'],
+                    'assists_efficiency': efficiency_data.get('assists_efficiency', {}).get('ratio', 1.0),
+                    'player_name': player_name,
+                    'goals': float(player_record.get('Goals', 0)),
+                    'xG': float(player_record.get('xG', 0)),
+                    'assists': float(player_record.get('Assists', 0)),
+                    'xA': float(player_record.get('xA', 0))
+                }
+        except Exception as e:
+            logger.warning(f"Error calculating efficiency for {player_name}: {e}")
+
+        # Chart 4: Position-specific Performance Heatmap
+        if position_group != 'Unknown' and position_group in self.position_metrics:
+            try:
+                # Get all position-specific metrics
+                heatmap_data = {}
+
+                for metric in self.position_metrics[position_group]:
+                    if metric in player_record.index:
+                        player_val = float(player_record[metric])
+                        position_avg = float(position_data[metric].mean())
+                        league_avg = float(self.data[metric].mean())
+
+                        # Calculate normalized value (0-100 scale)
+                        if position_avg > 0:
+                            normalized = (player_val / position_avg) * 100
+                        else:
+                            normalized = 0
+
+                        heatmap_data[metric] = {
+                            'player_value': player_val,
+                            'position_avg': position_avg,
+                            'league_avg': league_avg,
+                            'normalized': min(normalized, 200)  # Cap at 200%
+                        }
+
+                if heatmap_data:
+                    data['position_performance_heatmap'] = heatmap_data
+            except Exception as e:
+                logger.warning(f"Error preparing heatmap for {player_name}: {e}")
+
         return data
     
     def clear_cache(self):
