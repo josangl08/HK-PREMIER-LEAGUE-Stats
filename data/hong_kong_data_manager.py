@@ -14,6 +14,10 @@ from pathlib import Path
 from data.extractors.hong_kong_extractor import HongKongDataExtractor
 from data.processors.hong_kong_processor import HongKongDataProcessor
 from data.aggregators.hong_kong_aggregator import HongKongStatsAggregator
+from utils.cache_manager import (
+    AdvancedCacheManager,
+    invalidate_cache_for_season
+)
 
 # Configurar logging
 logger = logging.getLogger(__name__)
@@ -27,24 +31,37 @@ class HongKongDataManager:
     def __init__(self, auto_load: bool = True):
         """
         Inicializa el gestor de datos.
-        
+
         Args:
             auto_load: Si debe cargar automáticamente los datos al inicializar
         """
         self.extractor = HongKongDataExtractor()
         self.processor = HongKongDataProcessor()
         self.aggregator: Optional[HongKongStatsAggregator] = None
-        
+
         # Estado interno
         self.current_season = "2024-25"
         self.raw_data: Optional[pd.DataFrame] = None
         self.processed_data: Optional[pd.DataFrame] = None
-        self.data_cache: Dict = {}  # Cache simple por temporada
+
+        # Advanced cache with TTL (replaces simple dict)
+        self.advanced_cache = AdvancedCacheManager()
+        self.data_cache: Dict = {}  # Legacy cache for file-based storage
         self.last_update: Dict = {}
-        
+
+        # Cache TTL configuration (in seconds)
+        self.cache_ttl = {
+            'season_data': 3600,      # 1 hour for season data
+            'league_stats': 1800,     # 30 min for league stats
+            'team_stats': 1800,       # 30 min for team stats
+            'player_stats': 1800,     # 30 min for player stats
+            'chart_data': 900,        # 15 min for chart data
+            'tactical_data': 1800,    # 30 min for tactical analysis
+        }
+
         # Cargar timestamps
         self._load_update_timestamps()
-        
+
         if auto_load:
             self._load_current_season()
     
@@ -214,74 +231,217 @@ class HongKongDataManager:
             if should_force_download:
                 current_time = datetime.now()
                 self.last_update[target_season] = current_time
-                if force_download: # Solicitud manual
+                if force_download:  # Solicitud manual
                     self.last_update[f"{target_season}_manual"] = current_time
                 self._save_update_timestamps()
                 logger.info(f"Timestamps actualizados para {target_season}.")
 
-            logger.info(f"Refresco de datos para {target_season} completado exitosamente.")
+            # 7. INVALIDATE CACHE for this season (new data loaded)
+            invalidated = invalidate_cache_for_season(target_season)
+            logger.info(
+                f"Cache invalidated for {target_season}: "
+                f"{invalidated} entries"
+            )
+
+            logger.info(
+                f"Refresco de datos para {target_season} "
+                f"completado exitosamente."
+            )
             return True
 
         except Exception as e:
             logger.error(f"Error crítico refrescando datos para {target_season}: {e}", exc_info=True)
             return False
     
-    def get_league_overview(self, position_filter: Optional[str] = None, age_range: Optional[List[int]] = None) -> Dict:
-        """Obtiene overview de la liga con filtros aplicados."""
+    def get_league_overview(
+        self,
+        position_filter: Optional[str] = None,
+        age_range: Optional[List[int]] = None
+    ) -> Dict:
+        """
+        Obtiene overview de la liga con filtros aplicados.
+
+        Uses advanced caching with TTL for performance optimization.
+        """
         if not self._check_data_availability():
             return {"error": "No hay datos disponibles"}
-        
+
         # Verificación explícita para Pylance
         if self.aggregator is None:
             return {"error": "Aggregator no inicializado"}
-        
+
+        # Generate cache key
+        cache_key = (
+            f"league_stats_{self.current_season}_"
+            f"{position_filter}_{age_range}"
+        )
+
+        # Try to get from cache
+        cached_result = self.advanced_cache.get(cache_key)
+        if cached_result is not None:
+            logger.debug(f"Cache hit for league overview")
+            return cached_result
+
         try:
-            return self.aggregator.get_league_statistics(position_filter, age_range)
+            # Compute result
+            result = self.aggregator.get_league_statistics(
+                position_filter,
+                age_range
+            )
+
+            # Store in cache with TTL
+            self.advanced_cache.set(
+                cache_key,
+                result,
+                self.cache_ttl['league_stats']
+            )
+
+            return result
         except Exception as e:
             logger.error(f"Error obteniendo overview de liga: {str(e)}")
             return {"error": str(e)}
     
-    def get_team_overview(self, team_name: str, position_filter: Optional[str] = None, age_range: Optional[List[int]] = None) -> Dict:
-        """Obtiene overview de un equipo con filtros aplicados."""
+    def get_team_overview(
+        self,
+        team_name: str,
+        position_filter: Optional[str] = None,
+        age_range: Optional[List[int]] = None
+    ) -> Dict:
+        """
+        Obtiene overview de un equipo con filtros aplicados.
+
+        Uses advanced caching with TTL for performance optimization.
+        """
         if not self._check_data_availability():
             return {"error": "No hay datos disponibles"}
-        
+
         # Verificación explícita para Pylance
         if self.aggregator is None:
             return {"error": "Aggregator no inicializado"}
-        
+
+        # Generate cache key
+        cache_key = (
+            f"team_stats_{self.current_season}_{team_name}_"
+            f"{position_filter}_{age_range}"
+        )
+
+        # Try to get from cache
+        cached_result = self.advanced_cache.get(cache_key)
+        if cached_result is not None:
+            logger.debug(f"Cache hit for team overview: {team_name}")
+            return cached_result
+
         try:
-            return self.aggregator.get_team_statistics(team_name, position_filter, age_range)
+            # Compute result
+            result = self.aggregator.get_team_statistics(
+                team_name,
+                position_filter,
+                age_range
+            )
+
+            # Store in cache with TTL
+            self.advanced_cache.set(
+                cache_key,
+                result,
+                self.cache_ttl['team_stats']
+            )
+
+            return result
         except Exception as e:
             logger.error(f"Error obteniendo overview de equipo: {str(e)}")
             return {"error": str(e)}
     
-    def get_player_overview(self, player_name: str, team_name: Optional[str] = None) -> Dict:
-        """Obtiene overview de un jugador."""
+    def get_player_overview(
+        self,
+        player_name: str,
+        team_name: Optional[str] = None
+    ) -> Dict:
+        """
+        Obtiene overview de un jugador.
+
+        Uses advanced caching with TTL for performance optimization.
+        """
         if not self._check_data_availability():
             return {"error": "No hay datos disponibles"}
-        
+
         # Verificación explícita para Pylance
         if self.aggregator is None:
             return {"error": "Aggregator no inicializado"}
-        
+
+        # Generate cache key
+        cache_key = (
+            f"player_stats_{self.current_season}_{player_name}_"
+            f"{team_name}"
+        )
+
+        # Try to get from cache
+        cached_result = self.advanced_cache.get(cache_key)
+        if cached_result is not None:
+            logger.debug(f"Cache hit for player overview: {player_name}")
+            return cached_result
+
         try:
-            return self.aggregator.get_player_statistics(player_name, team_name)
+            # Compute result
+            result = self.aggregator.get_player_statistics(
+                player_name,
+                team_name
+            )
+
+            # Store in cache with TTL
+            self.advanced_cache.set(
+                cache_key,
+                result,
+                self.cache_ttl['player_stats']
+            )
+
+            return result
         except Exception as e:
             logger.error(f"Error obteniendo overview de jugador: {str(e)}")
             return {"error": str(e)}
     
-    def get_chart_data(self, level: str, identifier: Optional[str] = None) -> Dict:
-        """Obtiene datos formateados para gráficos."""
+    def get_chart_data(
+        self,
+        level: str,
+        identifier: Optional[str] = None
+    ) -> Dict:
+        """
+        Obtiene datos formateados para gráficos.
+
+        Uses advanced caching with shorter TTL for chart data.
+        """
         if not self._check_data_availability():
             return {"error": "No hay datos disponibles"}
-        
+
         # Verificación explícita para Pylance
         if self.aggregator is None:
             return {"error": "Aggregator no inicializado"}
-        
+
+        # Generate cache key
+        cache_key = (
+            f"chart_data_{self.current_season}_{level}_{identifier}"
+        )
+
+        # Try to get from cache
+        cached_result = self.advanced_cache.get(cache_key)
+        if cached_result is not None:
+            logger.debug(f"Cache hit for chart data: {level}/{identifier}")
+            return cached_result
+
         try:
-            return self.aggregator.get_comparative_data_for_charts(level, identifier)
+            # Compute result
+            result = self.aggregator.get_comparative_data_for_charts(
+                level,
+                identifier
+            )
+
+            # Store in cache with shorter TTL (charts update more frequently)
+            self.advanced_cache.set(
+                cache_key,
+                result,
+                self.cache_ttl['chart_data']
+            )
+
+            return result
         except Exception as e:
             logger.error(f"Error obteniendo datos de gráficos: {str(e)}")
             return {"error": str(e)}
@@ -382,14 +542,62 @@ class HongKongDataManager:
     
     
     def clear_all_cache(self):
-        """Limpia todos los caches."""
+        """Limpia todos los caches (file-based y advanced)."""
         try:
+            # Clear file-based cache
             self.extractor.clear_cache()
             self.data_cache.clear()
             self.last_update.clear()
+
+            # Clear advanced cache
+            self.advanced_cache.clear()
+
+            # Clear data in memory
             self.raw_data = None
             self.processed_data = None
             self.aggregator = None
-            logger.info("Todos los caches eliminados")
+
+            logger.info("Todos los caches eliminados (file + advanced)")
         except Exception as e:
             logger.error(f"Error limpiando cache: {str(e)}")
+
+    def get_cache_stats(self) -> Dict:
+        """
+        Obtiene estadísticas del cache avanzado.
+
+        Returns:
+            Dictionary con estadísticas de cache
+        """
+        stats = self.advanced_cache.get_stats()
+
+        # Add cache size breakdown
+        stats['cache_breakdown'] = {
+            'total_keys': len(self.advanced_cache.get_all_keys()),
+            'league_stats': len([
+                k for k in self.advanced_cache.get_all_keys()
+                if 'league_stats' in k
+            ]),
+            'team_stats': len([
+                k for k in self.advanced_cache.get_all_keys()
+                if 'team_stats' in k
+            ]),
+            'player_stats': len([
+                k for k in self.advanced_cache.get_all_keys()
+                if 'player_stats' in k
+            ]),
+            'chart_data': len([
+                k for k in self.advanced_cache.get_all_keys()
+                if 'chart_data' in k
+            ])
+        }
+
+        return stats
+
+    def cleanup_expired_cache(self) -> int:
+        """
+        Limpia entradas de cache expiradas.
+
+        Returns:
+            Número de entradas eliminadas
+        """
+        return self.advanced_cache.cleanup_expired()
