@@ -107,28 +107,129 @@ def update_league_chart_2_position_radar(chart_data, filters):
     Radar chart showing average metrics by position with percentiles.
 
     Chart Type: Radar (polar) chart
-    Data Required: chart_data['position_metrics'] (FUTURE)
+    Data Required: chart_data['position_analysis']
     Layout Position: Row 2, left column
 
     Design Notes:
         - Multi-series radar (one per position)
-        - Percentile shading for context
-        - Toggle position visibility
+        - Normalized metrics 0-100 for visual balance
+        - Toggle position visibility via legend
         - HKFA theme with position colors
     """
     logger.info("→ Rendering league-chart-2 (position radar)")
 
-    # PLACEHOLDER: To be implemented with tactical analyzer data
-    return html.Div([
-        dbc.Alert([
-            html.H5("📊 Radar de Posiciones - Próximamente", className='mb-2'),
-            html.P(
-                "Este gráfico mostrará métricas promedio por posición con "
-                "percentiles league-wide. Implementación en Phase 5.",
-                className='mb-0'
+    if not validate_data(chart_data):
+        return create_empty_state("Datos no disponibles")
+
+    try:
+        from utils.chart_helpers import (
+            HKFATheme, create_radar_chart, normalize_metric
+        )
+
+        if 'position_analysis' in chart_data:
+            position_data = chart_data['position_analysis']
+
+            if not position_data:
+                return create_empty_state(
+                    "No hay datos de posiciones disponibles"
+                )
+
+            # Definir métricas para mostrar (consistente entre posiciones)
+            metrics = [
+                'Avg Goals/Player',
+                'Avg Assists/Player',
+                'Pass Accuracy %',
+                'Dribble Success %',
+                'Duels Won %'
+            ]
+
+            fig = go.Figure()
+
+            # Agregar trace por cada posición
+            position_colors = {
+                'Goalkeeper': HKFATheme.ACCENT_BLUE,
+                'Defender': HKFATheme.DATA_SERIES[4],  # Dark red
+                'Midfielder': HKFATheme.ACCENT_GOLD,
+                'Winger': HKFATheme.DATA_SERIES[6],   # Orange
+                'Forward': HKFATheme.ACCENT_RED
+            }
+
+            for position, pos_metrics in position_data.items():
+                # Extract values
+                values = [
+                    pos_metrics.get('avg_goals_per_player', 0),
+                    pos_metrics.get('avg_assists_per_player', 0),
+                    pos_metrics.get('avg_accurate_passes_pct', 0),
+                    pos_metrics.get('avg_successful_dribbles_pct', 0),
+                    pos_metrics.get('avg_duels_won_pct', 0)
+                ]
+
+                # Normalize metrics para balance visual (0-100)
+                # Goals y assists ya son por player, solo escalar
+                values_norm = [
+                    min(values[0] * 10, 100),  # Goals × 10 (max ~10 goals)
+                    min(values[1] * 20, 100),  # Assists × 20 (max ~5 assists)
+                    values[2],                  # Already % (0-100)
+                    values[3],                  # Already % (0-100)
+                    values[4]                   # Already % (0-100)
+                ]
+
+                color = position_colors.get(position, HKFATheme.NEUTRAL)
+
+                fig.add_trace(go.Scatterpolar(
+                    r=values_norm,
+                    theta=metrics,
+                    fill='toself',
+                    fillcolor=f'rgba({int(color[1:3], 16)}, '
+                              f'{int(color[3:5], 16)}, '
+                              f'{int(color[5:7], 16)}, 0.2)',
+                    line=dict(color=color, width=2),
+                    name=position,
+                    hovertemplate=(
+                        f'<b>{position}</b><br>'
+                        '%{theta}<br>'
+                        'Value: %{r:.1f}<br>'
+                        f'Players: {pos_metrics.get("player_count", 0)}'
+                        '<extra></extra>'
+                    )
+                ))
+
+            # HKFA theme layout
+            fig.update_layout(
+                title="📊 Perfil de Métricas por Posición",
+                height=500,
+                polar=dict(
+                    radialaxis=dict(
+                        visible=True,
+                        range=[0, 100],
+                        tickfont=dict(color=HKFATheme.TEXT_SECONDARY),
+                        gridcolor=HKFATheme.BG_TERTIARY
+                    ),
+                    bgcolor=HKFATheme.BG_SECONDARY
+                ),
+                showlegend=True,
+                legend=dict(
+                    orientation="v",
+                    yanchor="top",
+                    y=1,
+                    xanchor="left",
+                    x=1.02
+                ),
+                plot_bgcolor=HKFATheme.BG_PRIMARY,
+                paper_bgcolor=HKFATheme.BG_PRIMARY,
+                font=dict(color=HKFATheme.TEXT_PRIMARY)
             )
-        ], color='info', className='text-center')
-    ])
+
+            return dcc.Graph(
+                figure=fig,
+                config={'displayModeBar': False}
+            )
+
+        return create_empty_state("Datos de posiciones no disponibles")
+
+    except Exception as e:
+        logger.error(f"Error en league-chart-2: {e}")
+        return create_error_alert(str(e), "Error en Position Radar Chart")
 
 
 # ===== CHART 3: SCATTER PLOT - AGE VS GOALS =====
@@ -249,32 +350,129 @@ def update_league_chart_3_age_scatter(chart_data, filters):
 )
 def update_league_chart_4_tactical_heatmap(chart_data, filters):
     """
-    Heatmap showing team tactical fingerprints (tempo × pressing).
+    Heatmap showing team tactical fingerprints.
 
     Chart Type: Heatmap
-    Data Required: chart_data['tactical_fingerprints'] (FUTURE)
+    Data Required: chart_data['tactical_fingerprints']
     Layout Position: Row 3, left column
 
     Design Notes:
-        - X-axis: Tempo (passes per 90)
-        - Y-axis: Pressing intensity (PPDA)
-        - Color: Team classification
-        - Click cell → team view drill-down
+        - X-axis: Tactical metrics (tempo, pressing, transitions, formation)
+        - Y-axis: Teams
+        - Color: Normalized values (blue=low, red=high)
+        - Hover shows exact values and percentile
         - HKFA theme
     """
     logger.info("→ Rendering league-chart-4 (tactical heatmap)")
 
-    # PLACEHOLDER: Requires TacticalAnalyzer implementation
-    return html.Div([
-        dbc.Alert([
-            html.H5("🎯 Heatmap Táctico - Próximamente", className='mb-2'),
-            html.P(
-                "Este heatmap mostrará el estilo táctico de cada equipo "
-                "(tempo × pressing intensity). Implementación en Phase 5.",
-                className='mb-0'
+    if not validate_data(chart_data):
+        return create_empty_state("Datos no disponibles")
+
+    try:
+        from utils.chart_helpers import (
+            HKFATheme, create_heatmap, normalize_metric
+        )
+        import numpy as np
+
+        if 'tactical_fingerprints' in chart_data:
+            tactical_data = chart_data['tactical_fingerprints']
+
+            if not tactical_data:
+                return create_empty_state(
+                    "Datos tácticos no disponibles"
+                )
+
+            # Prepare data for heatmap
+            teams = list(tactical_data.keys())
+            metrics = [
+                'Tempo\n(Passes/90)',
+                'Pressing\n(PPDA)',
+                'Press Intensity\n(Def Actions)',
+                'Recovery\nTime',
+                'Wide Play\nRatio'
+            ]
+
+            # Extract values into matrix
+            matrix = []
+            for team in teams:
+                team_data = tactical_data[team]
+                row = [
+                    team_data.get('tempo_passes_per_90', 0),
+                    team_data.get('pressing_ppda', 0),
+                    team_data.get('pressing_defensive_actions_att_third', 0),
+                    team_data.get('transition_recovery_time', 0),
+                    team_data.get('formation_wide_play_ratio', 0)
+                ]
+                matrix.append(row)
+
+            # Convert to numpy array for normalization
+            matrix_np = np.array(matrix)
+
+            # Normalize each metric column to 0-100 scale
+            normalized_matrix = []
+            for i in range(matrix_np.shape[1]):
+                col = matrix_np[:, i]
+                if col.max() == col.min():
+                    normalized_col = np.full_like(col, 50.0)
+                else:
+                    normalized_col = (
+                        (col - col.min()) / (col.max() - col.min()) * 100
+                    )
+                normalized_matrix.append(normalized_col)
+
+            normalized_matrix = np.array(normalized_matrix).T
+
+            # Create figure
+            fig = go.Figure(data=go.Heatmap(
+                z=normalized_matrix,
+                x=metrics,
+                y=teams,
+                colorscale='RdYlBu_r',  # Red=high, Blue=low
+                text=[
+                    [f'{val:.0f}' for val in row]
+                    for row in normalized_matrix
+                ],
+                texttemplate='%{text}',
+                textfont=dict(color=HKFATheme.TEXT_PRIMARY, size=11),
+                colorbar=dict(
+                    title="Intensidad<br>(0-100)",
+                    tickfont=dict(color=HKFATheme.TEXT_PRIMARY),
+                    thickness=20
+                ),
+                hovertemplate=(
+                    '<b>%{y}</b><br>'
+                    '%{x}<br>'
+                    'Value: %{z:.0f}/100<br>'
+                    '<extra></extra>'
+                )
+            ))
+
+            # HKFA theme layout
+            fig.update_layout(
+                title="🎯 Fingerprint Táctico por Equipo",
+                xaxis_title="",
+                yaxis_title="",
+                height=500,
+                xaxis=dict(
+                    tickfont=dict(size=10, color=HKFATheme.TEXT_PRIMARY),
+                    side='top'
+                ),
+                yaxis=dict(tickfont=dict(size=11)),
+                plot_bgcolor=HKFATheme.BG_PRIMARY,
+                paper_bgcolor=HKFATheme.BG_PRIMARY,
+                font=dict(color=HKFATheme.TEXT_PRIMARY)
             )
-        ], color='warning', className='text-center')
-    ])
+
+            return dcc.Graph(
+                figure=fig,
+                config={'displayModeBar': False}
+            )
+
+        return create_empty_state("Datos tácticos no disponibles")
+
+    except Exception as e:
+        logger.error(f"Error en league-chart-4: {e}")
+        return create_error_alert(str(e), "Error en Tactical Heatmap")
 
 
 # ===== CHART 5: TIMELINE - FORM TRENDS =====
@@ -288,29 +486,58 @@ def update_league_chart_5_form_timeline(chart_data, filters):
     """
     Timeline showing league-wide form trends.
 
-    Chart Type: Line chart (multi-series)
-    Data Required: chart_data['form_trends'] (FUTURE)
+    Chart Type: Informational placeholder
+    Data Required: Temporal match-by-match data (NOT AVAILABLE)
     Layout Position: Row 3, right column
 
     Design Notes:
-        - Multiple lines (one per team or metric)
-        - Zoom/pan temporal exploration
-        - Metric toggle (goals, xG, shots, etc.)
-        - HKFA theme
+        - Current dataset: Static season aggregates
+        - Timeline requires: Match-by-match performance data
+        - Future enhancement: Integrate with match data source
+        - For now: Educational placeholder with data requirements
     """
-    logger.info("→ Rendering league-chart-5 (form timeline)")
+    logger.info("→ Rendering league-chart-5 (form timeline - placeholder)")
 
-    # PLACEHOLDER: Requires temporal data
+    # Informational placeholder for future enhancement
     return html.Div([
-        dbc.Alert([
-            html.H5("📅 Timeline de Forma - Próximamente", className='mb-2'),
-            html.P(
-                "Este timeline mostrará tendencias de rendimiento a lo largo "
-                "de la temporada. Implementación en Phase 5.",
-                className='mb-0'
-            )
-        ], color='secondary', className='text-center')
-    ])
+        dbc.Card([
+            dbc.CardBody([
+                html.H5([
+                    html.I(className="bi bi-graph-up-arrow me-2"),
+                    "Timeline de Forma - Próximamente"
+                ], className='mb-3 text-center'),
+                html.Hr(),
+                html.P([
+                    html.Strong("Visualización planificada:"),
+                    " Timeline interactivo mostrando tendencias de rendimiento "
+                    "de equipos a lo largo de la temporada."
+                ], className='mb-2'),
+                html.P([
+                    html.Strong("Requisitos de datos:"),
+                ], className='mb-1'),
+                html.Ul([
+                    html.Li("Datos match-by-match (por jornada)"),
+                    html.Li("Métricas temporales (goles, xG, forma reciente)"),
+                    html.Li("Rolling averages (últimas 5 jornadas)"),
+                    html.Li("Win/draw/loss sequences")
+                ], className='mb-2'),
+                html.P([
+                    html.Strong("Estado actual:"),
+                    " Dataset contiene datos agregados de temporada completa. "
+                    "La funcionalidad timeline se implementará cuando se "
+                    "integren datos temporales."
+                ], className='mb-0 text-muted'),
+                html.Hr(),
+                html.Div([
+                    html.Small([
+                        html.I(className="bi bi-info-circle me-1"),
+                        "Para activar esta visualización, considera integrar "
+                        "datos de jornadas individuales desde la fuente de datos."
+                    ], className='text-info')
+                ])
+            ])
+        ], color="dark", outline=True, className='shadow-sm')
+    ], className='p-3')
 
 
 # ===== EXPORT FOR CLEAN IMPORTS =====
