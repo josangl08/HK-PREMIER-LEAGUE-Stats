@@ -7,6 +7,7 @@ import time
 from datetime import datetime
 from typing import Dict, Optional, Tuple
 from pathlib import Path
+from urllib.parse import quote
 import logging
 from dotenv import load_dotenv
 load_dotenv()
@@ -22,23 +23,25 @@ class HongKongDataExtractor:
     def __init__(self, cache_dir: str = "data/cache"):
         """
         Inicializa el extractor.
-        
+
         Args:
             cache_dir: Directorio para cache de datos
         """
         # Configuración de URLs (centralizada)
         self.base_url = "https://raw.githubusercontent.com/josangl08/Hong-Kong-Data/main"
-        self.github_api_base = "https://api.github.com/repos/josangl08/Hong-Kong-Data/contents/"
-        
-        # Configuración de temporadas disponibles
+        self.github_api_base = "https://api.github.com/repos/josangl08/Hong-Kong-Data/contents"
+
+        # Configuración de temporadas disponibles (nombres CORRECTOS del repo)
+        # Formato: "hong_kong_YYYY_YY.csv"
         self.available_seasons = {
-            "2024-25": "Hong Kong Premier League 24-25.csv",
-            "2023-24": "Hong Kong Premier League 23-24.csv", 
-            "2022-23": "Hong Kong Premier League 22-23.csv",
-            "2021-22": "Hong Kong Premier League 21-22.csv",
-            "2020-21": "Hong Kong Premier League 20-21.csv",
-            "2019-20": "Hong Kong Premier League 19-20.csv",
-            "2018-19": "Hong Kong Premier League 18-19.csv"
+            "2025-26": "hong_kong_2025_26.csv",
+            "2024-25": "hong_kong_2024_25.csv",
+            "2023-24": "hong_kong_2023_24.csv",
+            "2022-23": "hong_kong_2022_23.csv",
+            "2021-22": "hong_kong_2021_22.csv",
+            "2020-21": "hong_kong_2020_21.csv",
+            "2019-20": "hong_kong_2019_20.csv",
+            "2018-19": "hong_kong_2018_19.csv"
         }
         
         # Configuración de cache
@@ -59,6 +62,9 @@ class HongKongDataExtractor:
             logger.info("Token de GitHub configurado correctamente")
         else:
             logger.warning("No se encontró un token de GitHub. Se usarán límites de API reducidos.")
+
+        # Auto-detectar temporadas nuevas del repositorio
+        self._auto_discover_seasons()
     
     def _load_metadata(self) -> Dict:
         """Carga metadatos del cache local."""
@@ -74,7 +80,236 @@ class HongKongDataExtractor:
         """Guarda metadatos en el cache local."""
         with open(self.metadata_file, 'w') as f:
             json.dump(self.metadata, f, indent=2, default=str)
-    
+
+    def _auto_discover_seasons(self):
+        """
+        Auto-descubre temporadas nuevas del repositorio de GitHub.
+        Actualiza self.available_seasons con archivos encontrados.
+
+        Formato esperado: hong_kong_YYYY_YY.csv
+        """
+        if not self.github_token:
+            logger.debug("Sin token de GitHub, saltando auto-descubrimiento")
+            return
+
+        try:
+            import re
+
+            response = requests.get(
+                self.github_api_base,
+                headers=self.headers,
+                timeout=5
+            )
+
+            if response.status_code != 200:
+                logger.debug(
+                    f"No se pudo acceder al repo para auto-descubrimiento "
+                    f"(status: {response.status_code})"
+                )
+                return
+
+            files = response.json()
+
+            # Patrón: hong_kong_2024_25.csv -> extraer "2024" y "25"
+            # Resultado esperado: "2024-25"
+            pattern = re.compile(r'hong_kong_(\d{4})_(\d{2})\.csv')
+
+            discovered_count = 0
+            for file_info in files:
+                if not isinstance(file_info, dict):
+                    continue
+
+                filename = file_info.get('name', '')
+                match = pattern.match(filename)
+
+                if match:
+                    year_full = match.group(1)  # "2024"
+                    year_short = match.group(2)  # "25"
+                    # Formato esperado: "2024-25"
+                    season_format = f"{year_full}-{year_short}"
+
+                    # Añadir si NO existe (evita duplicados)
+                    if season_format not in self.available_seasons:
+                        self.available_seasons[season_format] = filename
+                        logger.info(
+                            f"✓ Nueva temporada descubierta: {season_format} "
+                            f"({filename})"
+                        )
+                        discovered_count += 1
+
+            if discovered_count > 0:
+                logger.info(
+                    f"Auto-descubrimiento completado: "
+                    f"{discovered_count} temporada(s) nueva(s) encontrada(s)"
+                )
+            else:
+                logger.debug("Auto-descubrimiento: sin temporadas nuevas")
+
+        except Exception as e:
+            logger.debug(
+                f"Error en auto-descubrimiento (no crítico): {e}"
+            )
+
+    def _detect_current_season(self) -> str:
+        """
+        Auto-detecta la temporada actual basándose en la fecha del sistema.
+
+        Lógica:
+        - Las temporadas de fútbol empiezan en agosto (mes 8)
+        - Si mes >= 8: temporada actual = YYYY-(YY+1)
+        - Si mes < 8: temporada actual = (YYYY-1)-YY
+
+        Ejemplos:
+        - Agosto 2025 → "2025-26"
+        - Julio 2025 → "2024-25"
+        - Noviembre 2024 → "2024-25"
+        - Febrero 2025 → "2024-25"
+
+        Returns:
+            str: Temporada en formato "YYYY-YY" (ej: "2024-25")
+        """
+        now = datetime.now()
+        year = now.year
+        month = now.month
+
+        # Las temporadas comienzan en agosto (mes 8)
+        if month >= 8:
+            start_year = year
+            end_year = year + 1
+        else:
+            start_year = year - 1
+            end_year = year
+
+        season = f"{start_year}-{str(end_year)[-2:]}"
+        logger.debug(
+            f"Temporada actual detectada: {season} "
+            f"(fecha: {now.strftime('%Y-%m-%d')})"
+        )
+        return season
+
+    def _get_season_with_fallback(
+        self,
+        season: Optional[str] = None
+    ) -> Tuple[str, bool, str]:
+        """
+        Obtiene temporada con fallback inteligente para pre-temporada.
+
+        Si la temporada detectada automáticamente no tiene datos en GitHub
+        (ej: es agosto 2025 pero aún no hay datos de 2025-26), hace fallback
+        a la temporada anterior.
+
+        Args:
+            season: Temporada específica o None para auto-detectar
+
+        Returns:
+            Tuple[str, bool, str]:
+                - season: Temporada a usar
+                - is_fallback: True si se usó fallback
+                - message: Mensaje explicativo
+        """
+        # Si no se especifica, detectar automáticamente
+        if season is None:
+            season = self._detect_current_season()
+
+        # Validar que la temporada esté disponible
+        if season in self.available_seasons:
+            # Verificar si realmente tiene datos descargables
+            filename = self.available_seasons[season]
+            github_info = self._get_github_file_info(filename)
+
+            if github_info:
+                return (
+                    season,
+                    False,
+                    f"Temporada {season} disponible con datos"
+                )
+            else:
+                # GitHub info no disponible, verificar cache local
+                cached_file = self._get_cached_file_path(season)
+                if cached_file.exists():
+                    return (
+                        season,
+                        False,
+                        f"Temporada {season} disponible en cache local"
+                    )
+
+        # Fallback: usar temporada anterior
+        logger.warning(
+            f"Temporada {season} sin datos disponibles, "
+            f"usando fallback a temporada anterior"
+        )
+
+        # Calcular temporada anterior
+        try:
+            year_start = int(season.split('-')[0])
+            prev_season = f"{year_start-1}-{str(year_start)[-2:]}"
+
+            if prev_season in self.available_seasons:
+                return (
+                    prev_season,
+                    True,
+                    f"Pre-temporada: usando {prev_season} (temporada anterior)"
+                )
+        except (ValueError, IndexError):
+            pass
+
+        # Si todo falla, devolver la temporada original
+        return (
+            season,
+            False,
+            f"Usando temporada {season} sin verificación"
+        )
+
+    def _get_finished_seasons(
+        self,
+        current_season: Optional[str] = None
+    ) -> list:
+        """
+        Auto-genera lista de temporadas finalizadas.
+
+        Una temporada se considera "finalizada" si es anterior a la
+        temporada actual. Las temporadas finalizadas son INMUTABLES
+        y no necesitan verificación de actualizaciones en GitHub.
+
+        Args:
+            current_season: Temporada actual o None para auto-detectar
+
+        Returns:
+            List[str]: Lista de temporadas finalizadas en orden descendente
+                      (ej: ["2023-24", "2022-23", "2021-22", ...])
+        """
+        if current_season is None:
+            current_season = self._detect_current_season()
+
+        # Extraer año de inicio de la temporada actual
+        try:
+            current_year = int(current_season.split('-')[0])
+        except (ValueError, IndexError):
+            logger.error(
+                f"Formato inválido de temporada: {current_season}"
+            )
+            return []
+
+        # Filtrar temporadas anteriores a la actual
+        finished = []
+        for season in self.available_seasons.keys():
+            try:
+                season_year = int(season.split('-')[0])
+                if season_year < current_year:
+                    finished.append(season)
+            except (ValueError, IndexError):
+                continue
+
+        # Ordenar en orden descendente (más reciente primero)
+        finished.sort(reverse=True)
+
+        logger.debug(
+            f"Temporadas finalizadas detectadas: {len(finished)} "
+            f"(anterior a {current_season})"
+        )
+
+        return finished
+
     def _calculate_file_hash(self, content: str) -> str:
         """Calcula hash SHA256 del contenido del archivo."""
         return hashlib.sha256(content.encode('utf-8')).hexdigest()
@@ -82,101 +317,87 @@ class HongKongDataExtractor:
     def _get_github_file_info(self, filename: str) -> Optional[Dict]:
         """
         Obtiene información del archivo desde la API de GitHub.
-        Solo cachea info de la temporada actual para verificar actualizaciones.
-        
+
         Args:
             filename: Nombre del archivo CSV
-            
+
         Returns:
             Diccionario con información del archivo o None si hay error
         """
-        # Solo crear cache para la temporada actual (2024-25)
-        current_season_file = "Hong Kong Premier League 24-25.csv"
-        should_cache = filename == current_season_file
-        
-        cache_key = f"file_info_{filename}"
-        cached_info_file = Path(self.cache_dir) / f"{cache_key}.json"
-        
-        # Usar caché solo para temporada actual y si existe y no tiene más de 24 horas
-        if should_cache and cached_info_file.exists():
-            try:
-                file_age = datetime.now() - datetime.fromtimestamp(cached_info_file.stat().st_mtime)
-                if file_age.total_seconds() < 24 * 3600:  # Menos de 24 horas
-                    with open(cached_info_file, 'r') as f:
-                        return json.load(f)
-            except Exception:
-                pass  # Si hay error leyendo el caché, intentar API
-        
         try:
-            api_url = f"{self.github_api_base}/{filename}"
-            
+            # URL-encode el nombre del archivo para manejar caracteres especiales
+            encoded_filename = quote(filename)
+            api_url = f"{self.github_api_base}/{encoded_filename}"
+
             headers = self.headers.copy()
             headers['User-Agent'] = 'HongKongLeagueDataExtractor/1.0'
-            
+
             # Implementar retroceso exponencial
             max_retries = 3
             retry_delay = 2
-            
+
             for retry in range(max_retries):
                 try:
                     if retry > 0:
-                        print(f"Intento {retry+1} de {max_retries} para acceder a GitHub API...")
+                        logger.info(
+                            f"Intento {retry+1} de {max_retries} "
+                            f"para acceder a GitHub API..."
+                        )
                         time.sleep(retry_delay * (2**retry))
-                    
+
                     response = requests.get(api_url, headers=headers, timeout=10)
-                    
+
                     if response.status_code == 200:
                         file_info = response.json()
                         result = {
                             'sha': file_info.get('sha'),
                             'size': file_info.get('size'),
-                            'download_url': file_info.get('download_url'),
-                            'last_modified': file_info.get('git_url')
+                            'download_url': file_info.get('download_url')
                         }
-                        
-                        # Solo guardar en caché si es temporada actual
-                        if should_cache:
-                            with open(cached_info_file, 'w') as f:
-                                json.dump(result, f)
-                            print(f"✓ Info de GitHub cacheada para {filename}")
-                        else:
-                            print(f"✓ Info de GitHub obtenida (sin cache) para {filename}")
-                        
+
+                        logger.debug(f"✓ Info de GitHub obtenida para {filename}")
                         return result
+
                     elif response.status_code == 403:
-                        rate_limit_remaining = response.headers.get('X-RateLimit-Remaining')
+                        rate_limit_remaining = response.headers.get(
+                            'X-RateLimit-Remaining'
+                        )
                         if rate_limit_remaining and int(rate_limit_remaining) == 0:
-                            reset_time = int(response.headers.get('X-RateLimit-Reset', 0))
+                            reset_time = int(
+                                response.headers.get('X-RateLimit-Reset', 0)
+                            )
                             reset_datetime = datetime.fromtimestamp(reset_time)
-                            wait_time = (reset_datetime - datetime.now()).total_seconds()
-                            print(f"Rate limit excedido. Se reiniciará en {wait_time/60:.1f} minutos")
+                            wait_time = (
+                                reset_datetime - datetime.now()
+                            ).total_seconds()
+                            logger.warning(
+                                f"Rate limit excedido. "
+                                f"Se reiniciará en {wait_time/60:.1f} minutos"
+                            )
                             break
                         else:
-                            print(f"Error de acceso a GitHub API: 403 - Acceso denegado")
+                            logger.error(
+                                "Error de acceso a GitHub API: 403 - "
+                                "Acceso denegado"
+                            )
                     else:
-                        print(f"Error accediendo a GitHub API: {response.status_code}")
+                        logger.error(
+                            f"Error accediendo a GitHub API: "
+                            f"{response.status_code}"
+                        )
+
                 except requests.RequestException as e:
                     if retry == max_retries - 1:
-                        print(f"Error conectando a GitHub API: {e}")
-                
-            # Si llegamos aquí, todos los intentos fallaron. Para temporadas pasadas, esto es aceptable
-            if not should_cache:
-                print(f"⚠️ No se pudo obtener info de GitHub para {filename} (temporada pasada, continuando...)")
-                return None
-                
-            # Para temporada actual, usar caché antiguo si existe
-            if cached_info_file.exists():
-                try:
-                    with open(cached_info_file, 'r') as f:
-                        print("Usando información en caché aunque sea antigua")
-                        return json.load(f)
-                except Exception:
-                    pass
-                    
+                        logger.error(f"Error conectando a GitHub API: {e}")
+
+            # Si llegamos aquí, todos los intentos fallaron
+            logger.warning(
+                f"No se pudo obtener info de GitHub para {filename}"
+            )
             return None
-                    
+
         except Exception as e:
-            print(f"Error inesperado accediendo a GitHub API: {e}")
+            logger.error(f"Error inesperado accediendo a GitHub API: {e}")
             return None
         
     
@@ -208,15 +429,58 @@ class HongKongDataExtractor:
         """Retorna la ruta del archivo en cache para una temporada."""
         return self.cache_dir / f"hong_kong_{season.replace('-', '_')}.csv"
     
-    def check_for_updates(self, season: str = "2024-25") -> Tuple[bool, str]:
+    def check_for_updates(
+        self,
+        season: Optional[str] = None
+    ) -> Tuple[bool, str]:
         """
         Verifica si hay actualizaciones disponibles para una temporada.
         Prioriza la comparación de SHA de GitHub para mayor fiabilidad.
-        """
-        if season != "2024-25":
-            return False, f"La temporada {season} está archivada y no se actualiza."
 
+        OPTIMIZACIÓN: Las temporadas finalizadas son INMUTABLES - no
+        verificar GitHub.
+
+        Args:
+            season: Temporada a verificar o None para auto-detectar
+
+        Returns:
+            Tuple[bool, str]: (needs_update, message)
+        """
+        # Auto-detectar temporada actual si no se especifica
+        if season is None:
+            season = self._detect_current_season()
+            logger.info(f"Temporada auto-detectada: {season}")
+
+        # Auto-generar lista de temporadas finalizadas
+        current_season = self._detect_current_season()
+        finished_seasons = self._get_finished_seasons(current_season)
+
+        # Temporadas finalizadas: solo verificar si existe en cache
+        if season in finished_seasons:
+            cached_file = self._get_cached_file_path(season)
+            if cached_file.exists():
+                logger.debug(
+                    f"Temporada {season} finalizada - usando cache local"
+                )
+                return (
+                    False,
+                    f"Temporada {season} finalizada - usando cache local "
+                    f"(sin verificar GitHub)"
+                )
+            else:
+                logger.info(
+                    f"Temporada {season} finalizada pero no en cache - "
+                    f"descarga única"
+                )
+                return (
+                    True,
+                    f"Temporada {season} no en cache - descarga única "
+                    f"requerida"
+                )
+
+        # Temporada actual o futura: verificación normal con GitHub API
         if season not in self.available_seasons:
+            logger.warning(f"Temporada {season} no está disponible")
             return False, f"La temporada {season} no está disponible."
 
         filename = self.available_seasons[season]
@@ -225,7 +489,7 @@ class HongKongDataExtractor:
         if not cached_file.exists():
             return True, "Datos no encontrados en cache, se requiere descarga."
 
-        # Obtener metadatos de GitHub
+        # Obtener metadatos de GitHub SOLO para temporada actual
         github_info = self._get_github_file_info(filename)
         if not github_info or not github_info.get('sha'):
             return False, "No se pudo verificar el estado en GitHub; se asume actualizado."
@@ -243,17 +507,26 @@ class HongKongDataExtractor:
 
         return True, "El SHA de GitHub no coincide con el local; se necesita actualizar."
     
-    def download_season_data(self, season: str = "2024-25", force_update: bool = False) -> Optional[pd.DataFrame]:
+    def download_season_data(
+        self,
+        season: Optional[str] = None,
+        force_update: bool = False
+    ) -> Optional[pd.DataFrame]:
         """
         Descarga datos de una temporada específica.
-        
+
         Args:
-            season: Temporada a descargar
+            season: Temporada a descargar o None para auto-detectar
             force_update: Forzar descarga aunque no haya cambios
-            
+
         Returns:
             DataFrame con los datos o None si hay error
         """
+        # Auto-detectar temporada actual si no se especifica
+        if season is None:
+            season = self._detect_current_season()
+            logger.info(f"Temporada auto-detectada para descarga: {season}")
+
         if season not in self.available_seasons:
             logger.info(f"Temporada {season} no disponible")
             return None

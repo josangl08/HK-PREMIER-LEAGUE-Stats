@@ -79,34 +79,69 @@ def load_user_from_id(user_id):
 # ==============================================================================
 # INICIALIZACIÓN DEL GESTOR DE DATOS
 # ==============================================================================
-logger.info("Inicializando el gestor de datos y refrescando al inicio...")
-try:
-    data_manager = HongKongDataManager(auto_load=False)
-    if not data_manager.refresh_data():
-        logger.warning("No se pudieron refrescar los datos iniciales. La app podría usar datos desactualizados.")
-    else:
-        logger.info("✓ Datos iniciales refrescados y listos.")
-except Exception as e:
-    logger.critical(f"❌ Error fatal al inicializar DataManager: {e}", exc_info=True)
-    class DummyDataManager:
-        def __getattr__(self, name):
-            def method(*args, **kwargs):
-                logger.error(f"Llamada a '{name}' en DataManager dummy debido a un error de inicialización.")
-                return {} if "get" in name or "status" in name else []
-            return method
-    data_manager = DummyDataManager()
+# IMPORTANTE: En modo debug, Flask usa un reloader que crea 2 procesos:
+# - Proceso padre: monitorea cambios en archivos
+# - Proceso hijo: ejecuta la aplicación real
+# Solo debemos inicializar en el proceso hijo (cuando WERKZEUG_RUN_MAIN=true)
+# ==============================================================================
+
+def is_werkzeug_reloader_process():
+    """Verifica si estamos en el proceso padre del reloader de Werkzeug."""
+    return os.environ.get('WERKZEUG_RUN_MAIN') != 'true'
+
+# Solo inicializar si NO estamos en el proceso padre del reloader
+if not is_werkzeug_reloader_process():
+    logger.info("Inicializando el gestor de datos y refrescando al inicio...")
+    try:
+        data_manager = HongKongDataManager(auto_load=False)
+        if not data_manager.refresh_data():
+            logger.warning("No se pudieron refrescar los datos iniciales. La app podría usar datos desactualizados.")
+        else:
+            logger.info("✓ Datos iniciales refrescados y listos.")
+    except Exception as e:
+        logger.critical(f"❌ Error fatal al inicializar DataManager: {e}", exc_info=True)
+        class DummyDataManager:
+            def __getattr__(self, name):
+                def method(*args, **kwargs):
+                    logger.error(f"Llamada a '{name}' en DataManager dummy debido a un error de inicialización.")
+                    return {} if "get" in name or "status" in name else []
+                return method
+        data_manager = DummyDataManager()
+
+    # ==============================================================================
+    # REGISTRO EN APP CONTEXT (evita importaciones circulares)
+    # ==============================================================================
+    # IMPORTANTE: Esto DEBE hacerse ANTES de importar los callbacks
+    # Los callbacks usarán get_hong_kong_data_manager() para obtener esta instancia
+    # ==============================================================================
+    from utils.app_context import set_hong_kong_data_manager
+    set_hong_kong_data_manager(data_manager)
+    logger.info("✓ DataManager registrado en app context (singleton pattern)")
+else:
+    logger.info("⏳ Proceso padre del reloader - esperando al proceso hijo...")
 
 # ==============================================================================
 # IMPORTACIÓN DE CALLBACKS
 # ==============================================================================
-# Se importan después de que 'app' y 'data_manager' están definidos para
-# que puedan acceder a ellos sin problemas de importación circular.
+# Se importan después de que 'app' y 'data_manager' están definidos y registrados
+# Los callbacks ahora usan app_context para evitar crear instancias duplicadas
+#
+# NOTA: Solo importar callbacks activos. El módulo 'injuries' está deshabilitado
+# por configuración (ENABLE_INJURIES=False por defecto)
 # ==============================================================================
+ENABLE_INJURIES_MODULE = os.getenv("ENABLE_INJURIES", "False").lower() == "true"
+
 import callbacks.auth_callbacks
 import callbacks.navigation_callbacks
 import callbacks.home_callbacks
 import callbacks.performance_callbacks
-import callbacks.injuries_callbacks
+
+if ENABLE_INJURIES_MODULE:
+    import callbacks.injuries_callbacks
+    logger.info("✓ Módulo de lesiones habilitado")
+else:
+    logger.info("⚠️ Módulo de lesiones deshabilitado (ENABLE_INJURIES=False)")
+
 logger.info("✓ Callbacks importados correctamente.")
 
 # Definir layout principal de la aplicación
@@ -125,6 +160,7 @@ app.layout = dbc.Container([
     
     # Stores globales para la aplicación
     dcc.Store(id='login-status', storage_type='session'),
+    # Toggle de tema (claro/oscuro)
     dcc.Store(id='app-theme', storage_type='local', data='light'),
     
     # Componente para downloads
