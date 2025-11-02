@@ -39,8 +39,8 @@ class HongKongDataManager:
         self.processor = HongKongDataProcessor()
         self.aggregator: Optional[HongKongStatsAggregator] = None
 
-        # Estado interno
-        self.current_season = "2024-25"
+        # Estado interno - AUTO-DETECTAR temporada actual
+        self.current_season = self._get_current_season_with_fallback()
         self.raw_data: Optional[pd.DataFrame] = None
         self.processed_data: Optional[pd.DataFrame] = None
 
@@ -59,12 +59,112 @@ class HongKongDataManager:
             'tactical_data': 1800,    # 30 min for tactical analysis
         }
 
-        # Cargar timestamps
+        # Cargar timestamps PRIMERO
         self._load_update_timestamps()
+
+        # Descarga inicial: verificar y descargar todas las temporadas
+        # disponibles si cache está vacío
+        self._ensure_all_seasons_downloaded()
 
         if auto_load:
             self._load_current_season()
-    
+
+    def _get_current_season_with_fallback(self) -> str:
+        """
+        Obtiene la temporada actual usando auto-detección con fallback.
+
+        Si la temporada actual detectada no tiene datos disponibles
+        (pre-temporada), usa la temporada anterior.
+
+        Returns:
+            str: Temporada a usar (actual o fallback)
+        """
+        season, is_fallback, message = (
+            self.extractor._get_season_with_fallback()
+        )
+
+        if is_fallback:
+            logger.warning(
+                f"Pre-temporada detectada - usando fallback: {message}"
+            )
+        else:
+            logger.info(f"Temporada actual detectada: {season}")
+
+        return season
+
+    def _ensure_all_seasons_downloaded(self):
+        """
+        Descarga inicial de todas las temporadas disponibles si no existen
+        en cache.
+
+        Estrategia:
+        - Temporadas finalizadas: Descarga única (nunca se actualizarán)
+        - Temporada actual: Se descarga y verificará updates en cada refresh
+        """
+        available_seasons = self.extractor.get_available_seasons()
+        current_season = self.extractor._detect_current_season()
+        finished_seasons = self.extractor._get_finished_seasons(current_season)
+
+        logger.info(
+            f"Verificando disponibilidad de {len(available_seasons)} "
+            f"temporadas..."
+        )
+
+        seasons_to_download = []
+
+        # Identificar qué temporadas faltan en cache
+        for season in available_seasons:
+            cached_file = self.extractor._get_cached_file_path(season)
+
+            if not cached_file.exists():
+                seasons_to_download.append(season)
+
+        if not seasons_to_download:
+            logger.info(
+                f"Todas las temporadas ya están en cache "
+                f"({len(available_seasons)} temporadas)"
+            )
+            return
+
+        # Descargar temporadas faltantes
+        logger.info(
+            f"Descargando {len(seasons_to_download)} temporadas faltantes: "
+            f"{', '.join(seasons_to_download)}"
+        )
+
+        for season in seasons_to_download:
+            status = "ACTUAL" if season == current_season else "FINALIZADA"
+            logger.info(f"Descargando {season} ({status})...")
+
+            try:
+                # Descargar sin forzar update (respeta check_for_updates)
+                data = self.extractor.download_season_data(
+                    season, force_update=False
+                )
+
+                if data is not None:
+                    logger.info(
+                        f"✓ {season} descargada exitosamente "
+                        f"({len(data)} registros)"
+                    )
+                    # Actualizar timestamp de descarga
+                    self.last_update[season] = datetime.now()
+                else:
+                    logger.warning(f"⚠️ No se pudo descargar {season}")
+
+            except Exception as e:
+                logger.error(f"Error descargando {season}: {e}")
+
+        # Guardar todos los timestamps de una vez
+        if seasons_to_download:
+            self._save_update_timestamps()
+
+        logger.info(
+            f"Descarga inicial completada. "
+            f"Temporadas finalizadas: {len(finished_seasons)}, "
+            f"Temporada actual: {current_season}"
+        )
+
     def _load_update_timestamps(self):
         """Carga timestamps de últimas actualizaciones desde un archivo."""
         timestamp_file = Path(self.extractor.cache_dir) / "update_timestamps.json"

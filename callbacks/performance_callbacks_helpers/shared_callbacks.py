@@ -11,10 +11,14 @@ that all other view-specific callbacks depend on.
 from dash import Input, Output, callback, html
 import dash_bootstrap_components as dbc
 from utils.common import format_season_short
-from data import HongKongDataManager
+from utils.app_context import get_hong_kong_data_manager
 
-# Initialize data manager globally
-data_manager = HongKongDataManager(auto_load=True)
+# Get the singleton data manager instance from app context
+# This avoids creating a duplicate instance and prevents circular imports
+# LAZY INITIALIZATION: We call this inside callbacks, not at import time
+def _get_data_manager():
+    """Lazy getter for data_manager to avoid import-time issues."""
+    return get_hong_kong_data_manager()
 
 
 # Import additional utilities for KPIs
@@ -46,6 +50,9 @@ def update_selector_options(season, selected_team):
     - No data store writes
     - Prevent circular dependencies by keeping logic simple
     """
+    # Lazy initialization of data_manager (avoid import-time issues)
+    data_manager = _get_data_manager()
+
     # Actualizar temporada si es necesaria
     if season != data_manager.current_season:
         data_manager.refresh_data(season)
@@ -101,6 +108,9 @@ def load_performance_data(season, team, player, position_filter, age_range):
     - Returns early on validation failure
     - No chart rendering logic (that's downstream)
     """
+    # Lazy initialization of data_manager (avoid import-time issues)
+    data_manager = _get_data_manager()
+
     try:
         # Generar opciones de temporadas dinámicamente
         available_seasons = data_manager.get_available_seasons()

@@ -5,7 +5,12 @@ Versión simplificada y modularizada.
 from dash import Input, Output, callback
 import dash_bootstrap_components as dbc
 from dash import html
-from data import HongKongDataManager
+from utils.app_context import (
+    get_hong_kong_data_manager,
+    get_transfermarkt_data_manager,
+    is_transfermarkt_manager_registered,
+    set_transfermarkt_data_manager
+)
 from data.transfermarkt_data_manager import TransfermarktDataManager
 from utils.common import format_season_short, format_datetime, get_current_season
 from utils.home_helpers import (
@@ -22,30 +27,31 @@ import time
 # Configurar logging
 logger = logging.getLogger(__name__)
 
-# Initialize global data_managers
-data_manager = None
-transfermarkt_manager = None
 
 def initialize_managers():
     """
-    Inicializa los managers de datos si no existen.
-    
+    Inicializa los managers de datos usando app_context.
+
+    HongKongDataManager debe estar registrado por app.py.
+    TransfermarktDataManager se crea aquí si no existe.
+
     Returns:
         tuple: (data_manager, transfermarkt_manager)
     """
-    global data_manager, transfermarkt_manager
-    
     try:
-        if data_manager is None:
-            logger.info("Inicializando HongKongDataManager...")
-            data_manager = HongKongDataManager(auto_load=True)
-        
-        if transfermarkt_manager is None:
+        # HongKongDataManager debe estar registrado por app.py
+        data_manager = get_hong_kong_data_manager()
+
+        # TransfermarktDataManager se crea aquí si no existe
+        if not is_transfermarkt_manager_registered():
             logger.info("Inicializando TransfermarktDataManager...")
             transfermarkt_manager = TransfermarktDataManager(auto_load=True)
-            
+            set_transfermarkt_data_manager(transfermarkt_manager)
+        else:
+            transfermarkt_manager = get_transfermarkt_data_manager()
+
         return data_manager, transfermarkt_manager
-        
+
     except Exception as e:
         logger.error(f"Error inicializando managers: {e}")
         raise
