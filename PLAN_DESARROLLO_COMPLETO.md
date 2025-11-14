@@ -2,8 +2,16 @@
 ## Hong Kong Premier League Stats - Proyecto Académico y SaaS
 
 **Última actualización:** 14 de noviembre de 2025
-**Versión:** 1.0
+**Versión:** 1.1
 **Autor:** Claude AI + josangl08
+
+**⚠️ VERSIÓN 1.1 - DECISIONES FINALES DE MÉTRICAS APLICADAS:**
+- ✅ 99 columnas totales (83 comunes + 16 físicas GPS)
+- ✅ TODAS las 16 métricas físicas mantenidas (Opción B)
+- ✅ Info personal completa: Birth country, Passport, Foot, Height, Weight (sin Market value)
+- ✅ PAdj metrics incluidas (Pressure Adjusted)
+- ✅ Aerial duels as GK per 90 incluida (no era duplicado)
+- ✅ Ver detalles en: `docs/METRICAS_MANTENER_ELIMINAR.md`
 
 ---
 
@@ -43,9 +51,13 @@
 - **Actualización**: Manual semanal (lunes post-jornada)
 
 ### **Estructura de Datos:**
-- **60+ métricas** por jugador (ver sección MÉTRICAS más abajo)
-- **5 posiciones** definidas: Goalkeeper, Defender, Midfielder, Winger, Forward
+- **99 columnas totales** confirmadas (ver `docs/METRICAS_MANTENER_ELIMINAR.md`)
+  - 83 columnas comunes a todas las temporadas
+  - 16 columnas físicas GPS (solo 2023-26): distancias, velocidad, aceleraciones, sprints
+  - 28 columnas descartadas (metadata, duplicados, redundantes)
+- **5 posiciones** definidas: Goalkeeper (GK), Defender (DEF), Midfielder (MID), Winger (WING), Forward (FWD)
 - **xG/xA incluidos** en CSV (no calculados localmente)
+- **Métrica especial GK**: Aerial duels as GK per 90 (renombrada de "Aerial duels per 90.1")
 
 ### **Funcionalidades Actuales:**
 - Dashboard de rendimiento con 3 niveles (Liga, Equipo, Jugador)
@@ -65,130 +77,84 @@
 
 ---
 
-## 📐 MÉTRICAS DISPONIBLES Y PROPUESTAS
+## 📐 MÉTRICAS DISPONIBLES - DECISIÓN FINAL
 
-### **MÉTRICAS GENERALES** (Todas las posiciones)
+**⚠️ IMPORTANTE:** Para el listado completo y detallado de las 99 métricas finales, consultar:
+- **`docs/METRICAS_MANTENER_ELIMINAR.md`** - Documento maestro con todas las métricas
+- **`docs/ANALISIS_COLUMNAS_CSV.md`** - Análisis exhaustivo de columnas disponibles
 
-| Métrica | Tipo | Fuente | Descripción |
-|---------|------|--------|-------------|
-| **Minutos/Partido** | Calculada | Minutes played / Matches | Promedio tiempo jugado |
-| **Participación %** | Calculada | (Minutes / Team total) × 100 | % de minutos del equipo |
-| **Consistency Index** | Calculada | 1 - (σ / μ) | Regularidad de rendimiento |
-| **All-Round Score** | Calculada | Normalización multimétrica | Jugador completo |
-| **Duels Won %** | CSV | Directa | Éxito en duelos totales |
-| **Pass Accuracy %** | CSV | Directa | Precisión de pases |
+### **RESUMEN DE MÉTRICAS (99 COLUMNAS TOTALES)**
 
----
+#### **Distribución por Categoría:**
 
-### **MÉTRICAS ESPECÍFICAS POR POSICIÓN**
+| Categoría | # Columnas | Disponibilidad | Prioridad |
+|-----------|------------|----------------|-----------|
+| **Identificación** | 4 | Todas | Obligatorio |
+| **Info Personal** | 5 | Todas | Alta |
+| **Tiempo de Juego** | 2 | Todas | Obligatorio |
+| **Goles** | 8 | Todas | Alta (FWD/WING/MID) |
+| **Asistencias** | 4 | Todas | Alta (WING/MID) |
+| **Tiros** | 6 | Todas | Alta (FWD/WING) |
+| **Duelos** | 8 | Todas | Alta (todas posiciones) |
+| **Defensa (incl. PAdj)** | 7 | Todas | Alta (DEF/MID-DM) |
+| **Regates/Movilidad** | 5 | Todas | Alta (WING/MID-AM) |
+| **Pases Generales** | 8 | 6 todas, 2 solo 2023+ | Alta (MID/DEF) |
+| **Pases Cortos/Largos** | 6 | Todas | Media (MID/DEF/GK) |
+| **Pases Avanzados** | 10 | Todas | Alta (MID/WING) |
+| **Pases al Área** | 4 | Todas | Alta (MID-AM/WING) |
+| **Centros** | 7 | Todas | Alta (WING) |
+| **Recepción** | 3 | Todas | Media (todas) |
+| **Faltas/Disciplina** | 7 | Todas | Media (todas) |
+| **Portero** | 13 | Todas | Alta (GK solo) |
+| **Set Pieces** | 7 | Todas | Media (MID/FWD) |
+| **Acciones Atacantes** | 1 | Todas | Media (FWD/WING/MID) |
+| **🏃 Datos Físicos GPS** | **16** | **Solo 2023-26** ⚠️ | **Alta (todas)** |
+| **Otros** | 1 | Todas | Baja |
 
-#### **1. GOALKEEPER (Portero)**
-
-| Métrica | Prioridad | Fuente | Benchmark |
-|---------|-----------|--------|-----------|
-| Save Rate % | ⭐⭐⭐ | CSV | > 70% = Excelente |
-| Clean Sheets | ⭐⭐⭐ | CSV | > 30% partidos = Muy bueno |
-| Goals Conceded per 90 | ⭐⭐⭐ | Calculada | < 1.0 = Elite |
-| Distribution Accuracy % | ⭐⭐ | Accurate passes % | > 65% = Buen juego de pies |
-| Long Passes per 90 | ⭐ | CSV | > 10 = Juego largo activo |
-
-**Visualizaciones específicas GK:**
-- Gráfica de Save Rate vs Goals Conceded
-- Distribución de Clean Sheets por mes
-- Comparativa de distribución vs otros GK
-
----
-
-#### **2. DEFENDER (Defensa)**
-
-| Métrica | Prioridad | Fuente | Benchmark |
-|---------|-----------|--------|-----------|
-| Tackles per 90 | ⭐⭐⭐ | CSV | > 3 = Muy activo |
-| Interceptions per 90 | ⭐⭐⭐ | CSV | > 2.5 = Buena anticipación |
-| Defensive Duels Won % | ⭐⭐⭐ | CSV | > 60% = Sólido |
-| Defensive Actions per 90 | ⭐⭐ | Tackles + Interceptions | > 6 = Elite defensivo |
-| Passing Accuracy % | ⭐⭐ | CSV | > 85% = Ball-playing |
-| Forward Passes % | ⭐⭐ | Forward / Total | > 45% = Progresivo |
-| Goals + Assists | ⭐ | CSV | > 2 = Aporte ofensivo |
-
-**Subtipos DEF:**
-- **Central Defender (CB)**: Tackles + Interceptions > 6, Pass Accuracy > 85%
-- **Full-Back (RB/LB)**: Forward Passes > 50%, Crosses > 2
-- **Ball-Playing Defender**: Pass Accuracy > 90%, Long Passes > 5
-
-**Visualizaciones específicas DEF:**
-- Mapa de calor: Acciones defensivas por zona
-- Scatter: Defensivo vs Ofensivo (Tackles vs Forward Passes)
-- Radar: Balance defensa/construcción
+**Total: 83 comunes + 16 físicas = 99 columnas**
 
 ---
 
-#### **3. MIDFIELDER (Centrocampista)**
+### **MÉTRICAS DESTACADAS POR POSICIÓN**
 
-| Métrica | Prioridad | Fuente | Benchmark |
-|---------|-----------|--------|-----------|
-| Passes per 90 | ⭐⭐⭐ | CSV | > 50 = Alto volumen |
-| Accurate Passes % | ⭐⭐⭐ | CSV | > 85% = Excelente |
-| Forward Passes per 90 | ⭐⭐⭐ | CSV | > 20 = Progresivo |
-| Through Passes per 90 | ⭐⭐ | CSV | > 1.5 = Creativo |
-| Tackles per 90 | ⭐⭐ | CSV | > 2.5 = Defensivo |
-| Assists + xA | ⭐⭐ | CSV | > 3 = Generador |
-| Goals + xG | ⭐ | CSV | > 3 = Llegada |
-| Box-to-Box Score | ⭐⭐ | Calculada | Balance ataque/defensa |
+#### **GOALKEEPER (GK)** - 32 métricas relevantes
 
-**Subtipos MID (Arquetipos):**
-- **Defensive MID (DM)**: Tackles > 3, Passes > 40, Through passes < 1
-- **Central MID (CM)**: Passes > 50, Balance ataque/defensa
-- **Attacking MID (AM)**: Through passes > 1.5, xA > 2.5, Tackles < 2
+**13 Críticas (⭐⭐⭐):**
+- Save rate, %, Clean sheets, Conceded goals per 90
+- Shots against per 90, xG against per 90, Prevented goals per 90
+- Exits per 90, **Aerial duels as GK per 90** ⭐ (específica de porteros)
+- Passes per 90, Accurate passes, %, Long passes per 90, Accurate long passes, %
+- Back passes received as GK per 90
 
-**Visualizaciones específicas MID:**
-- Triángulo: Defensa vs Pases vs Ataque
-- Timeline: Evolución de arquetipo (DM → CM → AM)
-- Scatter: Creatividad (Through passes) vs Finalización (xG)
+**8 Importantes (⭐⭐):**
+- Height, Aerial duels won, %, Forward passes per 90, Average long pass length
+- Fouls per 90, Yellow cards, Total Distance per 90, Accelerations per 90
 
----
+**11 Secundarias (⭐):**
+- Age, Team, Birth country, Foot, Weight, Matches/Minutes played
+- Back passes per 90, Free kicks per 90, On loan, Max Speed
 
-#### **4. WINGER (Extremo)**
+#### **DEFENDER (DEF)** - 48 métricas relevantes
+- **18 Críticas:** Defensive actions, Tackles, Interceptions, PAdj metrics, Duelos, Pases progresivos
+- **15 Importantes:** Long passes, Goals (balón parado), Crosses (full-backs), Métricas físicas
+- **Subtipos:** CB (central), Full-Back (ofensivo), Ball-Playing Defender
 
-| Métrica | Prioridad | Fuente | Benchmark |
-|---------|-----------|--------|-----------|
-| Crosses per 90 | ⭐⭐⭐ | CSV | > 3 = Muy activo |
-| xA (Expected Assists) | ⭐⭐⭐ | CSV | > 2.5 = Creativo |
-| Assists | ⭐⭐⭐ | CSV | > 3 = Efectivo |
-| Shots per 90 | ⭐⭐ | Calculada | > 2 = Llegada |
-| xG | ⭐⭐ | CSV | > 3 = Peligroso |
-| Goals | ⭐⭐ | CSV | > 4 = Goleador |
-| Duels Won % | ⭐⭐ | CSV | > 50% = 1v1 exitoso |
+#### **MIDFIELDER (MID)** - 68 métricas relevantes
+- **30 Críticas:** Passes/90, Forward passes, Through passes, Tackles (DM), Assists, Goals (AM)
+- **23 Importantes:** Regates, Progressive runs, Métricas físicas
+- **Arquetipos:** Defensive MID (DM), Central MID (CM), Attacking MID (AM)
 
-**Visualizaciones específicas WINGER:**
-- Scatter: Centros (Crosses) vs Remates (Shots)
-- Radar: Balance Asistencia vs Gol
-- Heatmap: Zonas de actividad (banda vs centro)
+#### **WINGER (WING)** - 61 métricas relevantes
+- **28 Críticas:** Crosses, Assists, xA, Goals, Dribbles, Duels 1v1, Sprints, Max Speed
+- **20 Importantes:** Progressive runs, Touches in box, HSR Distance
+- **Especial:** Foot (crítico), Métricas físicas esenciales
 
----
+#### **FORWARD (FWD)** - 52 métricas relevantes
+- **23 Críticas:** Goals, xG, Shots on target, Touches in box, Penalties, Aerial duels (Target Man)
+- **18 Importantes:** Assists (Complete Forward), Dribbles, Métricas físicas
+- **Subtipos:** Target Man, Poacher, Complete Forward
 
-#### **5. FORWARD (Delantero)**
-
-| Métrica | Prioridad | Fuente | Benchmark |
-|---------|-----------|--------|-----------|
-| Goals | ⭐⭐⭐ | CSV | > 10 = Productivo |
-| xG (Expected Goals) | ⭐⭐⭐ | CSV | > 8 = Buenas posiciones |
-| Goals / xG Ratio | ⭐⭐⭐ | Calculada | > 1.0 = Clínico |
-| Shots per 90 | ⭐⭐ | Calculada | > 3 = Alto volumen |
-| Shots on Target % | ⭐⭐⭐ | CSV | > 40% = Preciso |
-| Goals per 90 | ⭐⭐⭐ | Calculada | > 0.5 = Elite |
-| Assists | ⭐⭐ | CSV | > 3 = Asociativo |
-| xG per Shot | ⭐⭐ | Calculada | > 0.12 = Buena posición |
-
-**Subtipos FORWARD:**
-- **Target Man**: Duels Won > 55%, Assists > Goals/2
-- **Poacher**: Goals/xG > 1.2, Shots on Target > 50%
-- **Complete Forward**: Goals > 10, Assists > 5, Duels Won > 50%
-
-**Visualizaciones específicas FORWARD:**
-- Scatter: xG vs Goals (con línea de overperformance)
-- Gráfica de barras: Goals por tipo (dentro área, fuera área)
-- Timeline: Racha goleadora por jornada
+**📖 Ver detalles completos:** `docs/METRICAS_MANTENER_ELIMINAR.md` (todas las métricas, benchmarks y prioridades)
 
 ---
 
@@ -216,7 +182,7 @@ df['Consistency_Index'] = 1 - (df['Goals'].std() / df['Goals'].mean())  # Por ju
 df['All_Round_Score'] = normalize(df['Goals'] + df['Assists'] + df['Tackles per 90'])
 ```
 
-**Documentación:** Crear `docs/METRICAS.md` explicando fórmulas y benchmarks
+**Documentación:** ✅ Ya creado `docs/METRICAS_MANTENER_ELIMINAR.md` con 99 columnas finales
 
 ---
 
