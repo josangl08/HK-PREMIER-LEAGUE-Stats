@@ -10,7 +10,7 @@
 
 ---
 
-## ✅ MÉTRICAS A MANTENER (98 columnas totales)
+## ✅ MÉTRICAS A MANTENER (99 columnas totales)
 
 ### **CATEGORÍA 1: IDENTIFICACIÓN DEL JUGADOR** (4 columnas)
 **Todas las posiciones**
@@ -321,7 +321,7 @@
 
 ---
 
-### **CATEGORÍA 17: PORTERO ESPECÍFICO** (12 columnas)
+### **CATEGORÍA 17: PORTERO ESPECÍFICO** (13 columnas)
 **Solo: GK**
 
 | Columna | Tipo | Descripción |
@@ -338,10 +338,12 @@
 | `Prevented goals per 90` | Numérico | Goles evitados por partido |
 | `Back passes received as GK per 90` | Numérico | Pases recibidos de defensores |
 | `Exits per 90` | Numérico | Salidas del área (sweeper keeper) |
+| `Aerial duels as GK per 90` | Numérico | Duelos aéreos en salidas/corners |
 
 **Justificación:**
 - Todas esenciales para análisis de porteros (⭐⭐⭐)
 - `Prevented goals` especialmente valioso (rendimiento vs esperado)
+- `Aerial duels as GK` mide dominio aéreo en saques de esquina y centros
 
 ---
 
@@ -437,7 +439,7 @@
 
 ---
 
-## ❌ MÉTRICAS A ELIMINAR (29 columnas)
+## ❌ MÉTRICAS A ELIMINAR (28 columnas)
 
 ### **GRUPO 1: METADATA DE WYSCOUT** (4 columnas)
 
@@ -506,14 +508,6 @@
 
 ---
 
-### **GRUPO 7: DUPLICADO TÉCNICO** (1 columna)
-
-| Columna | Razón para eliminar |
-|---------|-------------------|
-| `Aerial duels per 90.1` | Columna duplicada de `Aerial duels per 90` |
-
----
-
 ## 📊 RESUMEN NUMÉRICO
 
 ### **TOTAL DE COLUMNAS POR CONJUNTO:**
@@ -525,8 +519,8 @@
 
 | Categoría | Cantidad |
 |-----------|----------|
-| ✅ **Columnas a MANTENER** | **98 columnas** |
-| ❌ **Columnas a ELIMINAR** | **29 columnas** |
+| ✅ **Columnas a MANTENER** | **99 columnas** |
+| ❌ **Columnas a ELIMINAR** | **28 columnas** |
 | ⚠️ **Columnas solo 2023+** | **18 columnas** (16 físicas + 2 laterales) |
 
 ### **DISTRIBUCIÓN DE COLUMNAS MANTENIDAS:**
@@ -549,7 +543,7 @@
 | Centros | 7 | Todas |
 | Recepción | 3 | Todas |
 | Faltas/Disciplina | 7 | Todas |
-| Portero | 12 | Todas |
+| Portero | 13 | Todas |
 | Set Pieces | 7 | Todas |
 | Acciones Atacantes | 1 | Todas |
 | **Datos Físicos GPS** | **16** | **Solo 2023-26** ⚠️ |
@@ -559,9 +553,9 @@
 
 ## 🎯 MÉTRICAS POR POSICIÓN (MAPA DE RELEVANCIA)
 
-### **GOALKEEPER (GK)** - 31 métricas relevantes
+### **GOALKEEPER (GK)** - 32 métricas relevantes
 
-**⭐⭐⭐ Críticas (12):**
+**⭐⭐⭐ Críticas (13):**
 - Save rate, %
 - Clean sheets
 - Conceded goals per 90
@@ -569,6 +563,7 @@
 - xG against per 90
 - Prevented goals per 90
 - Exits per 90
+- Aerial duels as GK per 90
 - Passes per 90
 - Accurate passes, %
 - Long passes per 90
@@ -855,10 +850,10 @@
 ## 📋 SIGUIENTES PASOS
 
 ### **1. Actualizar `hong_kong_processor.py`:**
-- Validar que las 98 columnas mantenidas existan
-- Eliminar las 29 columnas descartadas
+- Validar que las 99 columnas mantenidas existan
+- Eliminar las 28 columnas descartadas
 - Manejar las 18 columnas solo disponibles en 2023+ (marcar como NULL en temporadas antiguas)
-- Eliminar duplicado `Aerial duels per 90.1`
+- Renombrar `Aerial duels per 90.1` a `Aerial duels as GK per 90` (métrica específica de porteros)
 
 ### **2. Crear mapeo de columnas:**
 ```python
@@ -867,13 +862,13 @@ COLUMNS_TO_KEEP = [
     'Player', 'Team', 'Position', 'Age',
     # CATEGORÍA 2: INFO PERSONAL
     'Birth country', 'Passport country', 'Foot', 'Height', 'Weight',
-    # ... (las 98 columnas)
+    # ... (las 99 columnas)
 ]
 
 COLUMNS_TO_DROP = [
     'Wyscout id', 'Full name', 'Team logo', 'Competition',
     'Market value', 'Contract expires',
-    # ... (las 29 columnas)
+    # ... (las 28 columnas)
 ]
 
 COLUMNS_2023_ONLY = [
@@ -897,6 +892,6 @@ COLUMNS_2023_ONLY = [
 
 ## ✅ CONFIRMACIÓN FINAL
 
-**Total columnas a procesar: 98 (82 comunes + 16 físicas solo 2023+)**
+**Total columnas a procesar: 99 (83 comunes + 16 físicas solo 2023+)**
 
 ¿Procedo con la implementación en el código?
