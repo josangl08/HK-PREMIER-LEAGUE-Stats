@@ -6,7 +6,7 @@
     /* Nueva paleta de colores HKFA */
     --background-primary: #18181A;
     --background-secondary: #232326;
-    --accent-primary: #ED1C24;
+    --accent-primary: #93312a;
     --text-primary: #FFFFFF;
     --text-secondary: #A7A7A7;
     --border-color: #3A3A3C;
@@ -26,6 +26,7 @@
     --warning-color: #f39c12;
     --info-color: #17a2b8;
     --light-color: #A7A7A7;
+    --pink-color: #dc1d75;
     --dark-color: #232326;
     --background-color: #18181A;
     --card-shadow: none; /* Las nuevas tarjetas no usan sombra */
@@ -34,11 +35,20 @@
 
 body {
     font-family: 'Roboto', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    background-color: var(--background-primary);
+    background-color: var(--background-primary); /* #18181A - fondo más oscuro */
     color: var(--text-primary);
     margin: 0;
     padding: 0;
     line-height: 1.6;
+    /* Ocultar completamente el scrollbar */
+    overflow-x: hidden;
+    scrollbar-width: none; /* Firefox */
+    -ms-overflow-style: none; /* IE y Edge */
+}
+
+/* Ocultar scrollbar completamente en Chrome, Safari y Edge */
+body::-webkit-scrollbar {
+    display: none;
 }
 
 /* Jerarquía de Tipografía (HKFA Style) */
@@ -130,14 +140,24 @@ a:hover, .link:hover {
 
 /* Personalización del Navbar (HKFA Style) */
 .navbar {
-    background-color: rgba(24, 24, 26, 0.8); /* Fondo primario con transparencia */
-    backdrop-filter: blur(10px);
+    /* Color sólido HKFA */
+    background-color: #93312a !important;
+    background: linear-gradient(180deg,rgba(147, 49, 42, 1) 0%, rgba(10, 0, 0, 0.74) 100%);
+
+    /* Posicionamiento */
     position: sticky;
     top: 0;
     z-index: 1020;
-    padding: 0.75rem 1rem;
-    box-shadow: none;
-    border-bottom: 1px solid var(--border-color);
+    padding: 0.75rem 0 !important;
+}
+
+/* Navbar container sin márgenes laterales */
+.navbar .container {
+    max-width: 100% !important;
+    padding-left: 1rem;
+    padding-right: 1rem;
+    margin-left: 0 !important;
+    margin-right: 0 !important;
 }
 
 .navbar-brand {
@@ -148,7 +168,8 @@ a:hover, .link:hover {
 
 .nav-link {
     color: var(--text-secondary) !important; /* Gris Claro */
-    font-weight: 500;
+    font-weight: 900;
+    font-size: 20px;
     transition: var(--transition);
     position: relative;
     padding-bottom: 4px;
@@ -168,7 +189,7 @@ a:hover, .link:hover {
     left: 0;
     width: 100%;
     height: 2px;
-    background-color: var(--accent-primary);
+    background-color: var(--text-primary);
 }
 
 /* Botones (HKFA Style) */
@@ -201,12 +222,12 @@ a:hover, .link:hover {
 }
 
 /* Botón Secundario */
-.btn-secondary {
+.btn-second {
     background-color: transparent;
     color: var(--accent-primary);
     border-color: var(--accent-primary);
 }
-.btn-secondary:hover {
+.btn-second:hover {
     background-color: var(--accent-primary);
     color: var(--text-primary);
 }
@@ -242,6 +263,9 @@ a:hover, .link:hover {
     transition: var(--transition) !important;
     color: var(--text-primary) !important;
     box-shadow: none !important;
+    display: flex;
+    align-items: center; /* Centrado vertical del texto */
+    line-height: 1.5;
 }
 
 .form-control::placeholder, .Select-placeholder {
@@ -262,25 +286,88 @@ a:hover, .link:hover {
 
 .VirtualizedSelectOption:hover, .VirtualizedSelectFocusedOption {
     color: var(--text-primary) !important;
-    background-color: var(--accent-primary) !important;
+    background-color: #93312a !important; /* Color corporativo en hover */
 }
 
 /* Layout y Espaciado (HKFA Style) */
 .main-container {
-    max-width: 1400px;
+    max-width: 100% !important; /* Container ocupa todo el ancho */
     margin-left: auto;
     margin-right: auto;
     padding-left: 16px; /* Padding para móviles */
     padding-right: 16px;
 }
 
+/* Bootstrap Container override - 100% width */
+.container-fluid {
+    max-width: 100% !important;
+    width: 100% !important;
+}
+
 .section-padding {
     padding: 32px;
 }
 
-/* Flecha del Dropdown */
+/* View containers y chart containers */
+.league-view-container,
+.team-view-container,
+.player-view-container {
+    background-color: var(--background-primary); /* #18181A - fondo oscuro para contrastar */
+    padding: 0;
+    margin: 0;
+}
+
+.chart-container {
+    background-color: var(--background-secondary); /* #232326 - gráficos destacados */
+    padding: 1rem;
+    border-radius: var(--border-radius-card);
+    margin-bottom: 1rem;
+}
+
+/* Flecha del Dropdown - Justificada a la derecha */
+.Select-arrow-zone {
+    position: absolute !important;
+    right: 10px !important;
+    top: 50% !important;
+    transform: translateY(-50%) !important;
+    display: flex !important;
+    align-items: center !important;
+    pointer-events: none;
+}
+
 .Select-arrow {
-    border-color: var(--text-secondary) transparent transparent;
+    border-color: var(--text-secondary) transparent transparent !important;
+    border-width: 5px 5px 0 !important;
+    border-style: solid !important;
+    display: inline-block !important;
+    
+}
+
+.Select-arrow:hover {
+    border-color: var(--text-primary) transparent transparent !important;
+}
+
+/* Clear button alineado a la derecha (antes de la flecha) */
+.Select-clear-zone {
+    position: absolute !important;
+    right: 55px !important;
+    top: 50% !important;
+    transform: translateY(-50%) !important;
+    display: flex !important;
+    align-items: center !important;
+    z-index: 2;
+}
+
+.Select-clear {
+    font-size: 18px !important;
+    color: var(--text-secondary) !important;
+    cursor: pointer !important;
+    margin: 0 10px !important;
+    pointer-events: auto !important;
+}
+
+.Select-clear:hover {
+    color: var(--text-primary) !important;
 }
 
 /* Dropdowns de filtros - Solución optimizada para z-index */
@@ -288,6 +375,16 @@ a:hover, .link:hover {
     position: relative;
     z-index: 100;
     overflow: visible;
+}
+
+/* Season selector tiene el mayor z-index para evitar superposición */
+#season-selector {
+    z-index: 1000 !important;
+}
+
+/* Contenedor del season selector */
+.filter-container:has(#season-selector) {
+    z-index: 1000 !important;
 }
 
 /* Permitir que dropdowns se expandan fuera de tarjetas */
@@ -301,6 +398,32 @@ a:hover, .link:hover {
 .row {
     overflow: visible;
 }
+
+/* Menu de dropdowns con z-index apropiado */
+.Select-menu-outer {
+    z-index: 1001 !important;
+}
+
+/* Alineación vertical de texto en dropdowns */
+.Select-value,
+.Select-placeholder,
+.Select-input {
+    display: flex !important;
+    align-items: center !important;
+    line-height: 1.5 !important;
+}
+
+.Select-value-label {
+    line-height: 1.5 !important;
+    color: var(--text-primary) !important; /* #FFFFFF */
+}
+
+/* Sobrescribir color de texto cuando hay valor seleccionado en dropdown */
+.has-value.Select--single > .Select-control .Select-value .Select-value-label,
+.has-value.is-pseudo-focused.Select--single > .Select-control .Select-value .Select-value-label {
+    color: var(--text-primary) !important; /* #FFFFFF en lugar de #333 de react-select */
+}
+
 /* Alertas (HKFA Style) */
 .alert {
     border-radius: var(--border-radius-button);
@@ -366,9 +489,9 @@ a:hover, .link:hover {
 
 /* KPIs y métricas - Versión HKFA */
 .metric-card {
-    background-color: var(--background-secondary);
+    background-color: #93312a !important; /* Color corporativo para KPIs */
+background: radial-gradient(circle,rgba(147, 49, 42, 1) 0%, rgba(10, 0, 0, 0.74) 100%);
     border-radius: var(--border-radius-card);
-    border-top: 3px solid var(--accent-primary);
     padding: 1.5rem;
     text-align: center;
     transition: var(--transition);
@@ -377,6 +500,7 @@ a:hover, .link:hover {
 .metric-card:hover {
     transform: translateY(-2px);
     border-top-color: var(--text-primary);
+    filter: brightness(1.1);
 }
 
 .metric-value {
@@ -557,3 +681,54 @@ i[class*=" bi-"]:hover {
 }
 
 .p-5 { padding: 3rem; }
+
+/* Estilos movidos desde inline styles */
+/* Navbar brand link sin decoración */
+.navbar-brand-link {
+    text-decoration: none !important;
+}
+
+/* Icono de empty state */
+.empty-state-icon {
+    font-size: 3rem;
+    color: #A7A7A7;
+}
+
+/* Dashboard header con logo y título alineados */
+.dashboard-header-container {
+    display: flex;
+    background-color: rgba(255 255 255 / 0.85);
+    align-items: center;
+    justify-content: center;
+    gap: 1.5rem;
+    margin-bottom: 1.5rem;
+    padding: 1rem;
+    border-radius: var(--border-radius-card);
+}
+
+.dashboard-logo {
+    display: inline-block;
+}
+
+.dashboard-title {
+    display: inline-block;
+    margin: 0;
+    color: var(--pink-color);
+    font-size: 2.5rem;
+    font-weight: 700;
+    text-transform: uppercase;
+}
+
+/* Navbar - User info centrado verticalmente */
+.navbar-text {
+    display: flex !important;
+    align-items: center !important;
+    font-size: 16px;
+    height: 100%;
+    margin: 0 !important;
+}
+
+.navbar .navbar-text i {
+    display: inline-flex;
+    align-items: center;
+}

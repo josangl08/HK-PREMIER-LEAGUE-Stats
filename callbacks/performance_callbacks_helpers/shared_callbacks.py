@@ -89,7 +89,8 @@ def update_selector_options(season, selected_team):
      Output('chart-data-store', 'data'),
      Output('current-filters-store', 'data'),
      Output('status-alerts', 'children'),
-     Output('season-selector', 'options')],
+     Output('season-selector', 'options'),
+     Output('season-selector', 'value')],
     [Input('season-selector', 'value'),
      Input('team-selector', 'value'),
      Input('player-selector', 'value'),
@@ -210,7 +211,8 @@ def load_performance_data(season, team, player, position_filter, age_range):
             chart_data,
             current_filters,
             status_alert,
-            season_options
+            season_options,
+            season  # Retorna la temporada actual seleccionada
         )
 
     except Exception as e:
@@ -228,7 +230,10 @@ def load_performance_data(season, team, player, position_filter, age_range):
             {"label": "22/23", "value": "2022-23"}
         ]
 
-        return {}, {}, {}, error_alert, default_seasons
+        # Si hay error y no hay season, usar la primera temporada por defecto
+        default_season = season if season else "2024-25"
+
+        return {}, {}, {}, error_alert, default_seasons, default_season
 
 
 # CALLBACK 3: Main KPIs (shared across all views)

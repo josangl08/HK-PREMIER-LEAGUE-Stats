@@ -207,7 +207,7 @@ def create_kpi_cards_row(kpi_data: List[Dict]) -> dbc.Row:
                     html.H3(kpi['value'], className=f"text-{kpi.get('color', 'primary')}"),
                     html.P(kpi['label'], className="card-text")
                 ])
-            ])
+            ], className="metric-card")
         ], md=kpi.get('md', 2))
         
         cards.append(card)

@@ -32,6 +32,7 @@ from .helpers import (
     create_empty_state,
     create_error_alert
 )
+from utils.chart_helpers import HKFATheme
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ logger = logging.getLogger(__name__)
     Output('league-chart-1', 'children'),
     [Input('chart-data-store', 'data'),
      Input('current-filters-store', 'data')],
-    prevent_initial_call=True
+    prevent_initial_call=False
 )
 def update_league_chart_1_team_goals(chart_data, filters):
     """
@@ -79,9 +80,9 @@ def update_league_chart_1_team_goals(chart_data, filters):
             fig.update_layout(
                 height=400,
                 showlegend=False,
-                plot_bgcolor='#18181A',
-                paper_bgcolor='#18181A',
-                font=dict(color='#FFFFFF')
+                plot_bgcolor=HKFATheme.BG_PRIMARY,
+                paper_bgcolor=HKFATheme.BG_PRIMARY,
+                font=dict(color=HKFATheme.TEXT_PRIMARY)
             )
 
             fig.update_xaxes(tickangle=45)
@@ -100,7 +101,7 @@ def update_league_chart_1_team_goals(chart_data, filters):
     Output('league-chart-2', 'children'),
     [Input('chart-data-store', 'data'),
      Input('current-filters-store', 'data')],
-    prevent_initial_call=True
+    prevent_initial_call=False
 )
 def update_league_chart_2_position_radar(chart_data, filters):
     """
@@ -237,7 +238,7 @@ def update_league_chart_2_position_radar(chart_data, filters):
     Output('league-chart-3', 'children'),
     [Input('chart-data-store', 'data'),
      Input('current-filters-store', 'data')],
-    prevent_initial_call=True
+    prevent_initial_call=False
 )
 def update_league_chart_3_age_scatter(chart_data, filters):
     """
@@ -319,9 +320,9 @@ def update_league_chart_3_age_scatter(chart_data, filters):
                     yaxis_title="Goles",
                     height=400,
                     hovermode='closest',
-                    plot_bgcolor='#18181A',
-                    paper_bgcolor='#18181A',
-                    font=dict(color='#FFFFFF'),
+                    plot_bgcolor=HKFATheme.BG_PRIMARY,
+                    paper_bgcolor=HKFATheme.BG_PRIMARY,
+                    font=dict(color=HKFATheme.TEXT_PRIMARY),
                     legend=dict(
                         orientation="h",
                         yanchor="bottom",
@@ -346,7 +347,7 @@ def update_league_chart_3_age_scatter(chart_data, filters):
     Output('league-chart-4', 'children'),
     [Input('chart-data-store', 'data'),
      Input('current-filters-store', 'data')],
-    prevent_initial_call=True
+    prevent_initial_call=False
 )
 def update_league_chart_4_tactical_heatmap(chart_data, filters):
     """
@@ -480,7 +481,7 @@ def update_league_chart_4_tactical_heatmap(chart_data, filters):
     Output('league-chart-5', 'children'),
     [Input('chart-data-store', 'data'),
      Input('current-filters-store', 'data')],
-    prevent_initial_call=True
+    prevent_initial_call=False
 )
 def update_league_chart_5_form_timeline(chart_data, filters):
     """
