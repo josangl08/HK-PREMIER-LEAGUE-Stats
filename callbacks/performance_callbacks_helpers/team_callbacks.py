@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 @callback(
     Output('team-chart-1', 'children'),
     [Input('chart-data-store', 'data'), Input('current-filters-store', 'data')],
-    prevent_initial_call=True
+    prevent_initial_call=False
 )
 def update_team_chart_1(chart_data, filters):
     """Chart 1: Team vs League Radar (6-8 key metrics)."""
@@ -58,7 +58,7 @@ def update_team_chart_1(chart_data, filters):
 @callback(
     Output('team-chart-2', 'children'),
     [Input('chart-data-store', 'data'), Input('current-filters-store', 'data')],
-    prevent_initial_call=True
+    prevent_initial_call=False
 )
 def update_team_chart_2(chart_data, filters):
     """Chart 2: Squad Depth Stacked Bar by Position."""
@@ -109,7 +109,7 @@ def update_team_chart_2(chart_data, filters):
 @callback(
     Output('team-chart-3', 'children'),
     [Input('chart-data-store', 'data'), Input('current-filters-store', 'data')],
-    prevent_initial_call=True
+    prevent_initial_call=False
 )
 def update_team_chart_3(chart_data, filters):
     """Chart 3: Player Minutes Treemap."""
@@ -159,7 +159,7 @@ def update_team_chart_3(chart_data, filters):
 @callback(
     Output('team-chart-4', 'children'),
     [Input('chart-data-store', 'data'), Input('current-filters-store', 'data')],
-    prevent_initial_call=True
+    prevent_initial_call=False
 )
 def update_team_chart_4(chart_data, filters):
     """Chart 4: Tactical Fingerprint Heatmap."""
@@ -211,7 +211,7 @@ def update_team_chart_4(chart_data, filters):
 @callback(
     Output('team-chart-5', 'children'),
     [Input('chart-data-store', 'data'), Input('current-filters-store', 'data')],
-    prevent_initial_call=True
+    prevent_initial_call=False
 )
 def update_team_chart_5(chart_data, filters):
     """Chart 5: Form Timeline Placeholder."""

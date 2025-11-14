@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 @callback(
     Output('player-chart-1', 'children'),
     [Input('chart-data-store', 'data'), Input('current-filters-store', 'data')],
-    prevent_initial_call=True
+    prevent_initial_call=False
 )
 def update_player_chart_1(chart_data, filters):
     """Chart 1: Player vs Position Radar with Percentiles."""
@@ -61,7 +61,7 @@ def update_player_chart_1(chart_data, filters):
 @callback(
     Output('player-chart-2', 'children'),
     [Input('chart-data-store', 'data'), Input('current-filters-store', 'data')],
-    prevent_initial_call=True
+    prevent_initial_call=False
 )
 def update_player_chart_2(chart_data, filters):
     """Chart 2: Percentile Rankings Bar."""
@@ -117,7 +117,7 @@ def update_player_chart_2(chart_data, filters):
 @callback(
     Output('player-chart-3', 'children'),
     [Input('chart-data-store', 'data'), Input('current-filters-store', 'data')],
-    prevent_initial_call=True
+    prevent_initial_call=False
 )
 def update_player_chart_3(chart_data, filters):
     """Chart 3: Efficiency Scatter (Goals/xG vs Assists/xA)."""
@@ -183,7 +183,7 @@ def update_player_chart_3(chart_data, filters):
 @callback(
     Output('player-chart-4', 'children'),
     [Input('chart-data-store', 'data'), Input('current-filters-store', 'data')],
-    prevent_initial_call=True
+    prevent_initial_call=False
 )
 def update_player_chart_4(chart_data, filters):
     """Chart 4: Position-specific Performance Heatmap."""
@@ -228,7 +228,7 @@ def update_player_chart_4(chart_data, filters):
 @callback(
     Output('player-chart-5', 'children'),
     [Input('chart-data-store', 'data'), Input('current-filters-store', 'data')],
-    prevent_initial_call=True
+    prevent_initial_call=False
 )
 def update_player_chart_5(chart_data, filters):
     """Chart 5: Performance Evolution Timeline Placeholder."""

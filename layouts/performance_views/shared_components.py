@@ -9,28 +9,32 @@ import dash_bootstrap_components as dbc
 # FILTER SUB-COMPONENTS
 # =============================================================================
 
-def create_season_selector(value="2024-25"):
+
+def create_season_selector(value=None):
     """
     Create season dropdown selector.
 
     Args:
-        value: Default season value (str)
+        value: Default season value (str, None uses current season from data_manager)
 
     Returns:
         dbc.Col: Season selector column
     """
-    return dbc.Col([
-        dbc.Label("Season:", html_for="season-selector"),
-        html.Div(
-            dcc.Dropdown(
-                id="season-selector",
-                options=[],  # Filled dynamically by callback
-                value=value,
-                className="mb-3"
+    return dbc.Col(
+        [
+            dbc.Label("Season:", html_for="season-selector"),
+            html.Div(
+                dcc.Dropdown(
+                    id="season-selector",
+                    options=[],  # Filled dynamically by callback
+                    value=value,  # None = use current season from data_manager
+                    className="mb-3",
+                ),
+                className="filter-container",
             ),
-            className="filter-container"
-        )
-    ], md=4)
+        ],
+        md=4,
+    )
 
 
 def create_team_selector(clearable=True):
@@ -43,18 +47,21 @@ def create_team_selector(clearable=True):
     Returns:
         dbc.Col: Team selector column
     """
-    return dbc.Col([
-        dbc.Label("Team:", html_for="team-selector"),
-        html.Div(
-            dcc.Dropdown(
-                id="team-selector",
-                placeholder="All teams...",
-                className="mb-3",
-                clearable=clearable
+    return dbc.Col(
+        [
+            dbc.Label("Team:", html_for="team-selector"),
+            html.Div(
+                dcc.Dropdown(
+                    id="team-selector",
+                    placeholder="All teams...",
+                    className="mb-3",
+                    clearable=clearable,
+                ),
+                className="filter-container",
             ),
-            className="filter-container"
-        )
-    ], md=4)
+        ],
+        md=4,
+    )
 
 
 def create_player_selector(clearable=True):
@@ -67,18 +74,21 @@ def create_player_selector(clearable=True):
     Returns:
         dbc.Col: Player selector column
     """
-    return dbc.Col([
-        dbc.Label("Player:", html_for="player-selector"),
-        html.Div(
-            dcc.Dropdown(
-                id="player-selector",
-                placeholder="All players...",
-                className="mb-3",
-                clearable=clearable
+    return dbc.Col(
+        [
+            dbc.Label("Player:", html_for="player-selector"),
+            html.Div(
+                dcc.Dropdown(
+                    id="player-selector",
+                    placeholder="All players...",
+                    className="mb-3",
+                    clearable=clearable,
+                ),
+                className="filter-container",
             ),
-            className="filter-container"
-        )
-    ], md=4)
+        ],
+        md=4,
+    )
 
 
 def create_position_filter():
@@ -88,25 +98,29 @@ def create_position_filter():
     Returns:
         dbc.Col: Position filter column
     """
-    return dbc.Col([
-        dbc.Label("Position:", html_for="position-filter"),
-        html.Div(
-            dcc.Dropdown(
-                id="position-filter",
-                options=[
-                    {"label": "All Positions", "value": "all"},
-                    {"label": "Goalkeeper", "value": "Goalkeeper"},
-                    {"label": "Defender", "value": "Defender"},
-                    {"label": "Midfielder", "value": "Midfielder"},
-                    {"label": "Winger", "value": "Winger"},
-                    {"label": "Forward", "value": "Forward"}
-                ],
-                value="all",
-                className="mb-3"
+    return dbc.Col(
+        [
+            dbc.Label("Position:", html_for="position-filter"),
+            html.Div(
+                dcc.Dropdown(
+                    id="position-filter",
+                    placeholder="All positicions...",
+                    options=[
+                        {"label": "All Positions", "value": "all"},
+                        {"label": "Goalkeeper", "value": "Goalkeeper"},
+                        {"label": "Defender", "value": "Defender"},
+                        {"label": "Midfielder", "value": "Midfielder"},
+                        {"label": "Winger", "value": "Winger"},
+                        {"label": "Forward", "value": "Forward"},
+                    ],
+                    value="all",
+                    className="mb-3",
+                ),
+                className="filter-container",
             ),
-            className="filter-container"
-        )
-    ], md=4)
+        ],
+        md=4,
+    )
 
 
 def create_age_range_filter():
@@ -116,21 +130,29 @@ def create_age_range_filter():
     Returns:
         dbc.Col: Age range filter column
     """
-    return dbc.Col([
-        dbc.Label("Age Range:", html_for="age-range"),
-        dcc.RangeSlider(
-            id="age-range",
-            min=15,
-            max=45,
-            value=[15, 45],
-            marks={
-                15: '15', 20: '20', 25: '25',
-                30: '30', 35: '35', 40: '40', 45: '45'
-            },
-            tooltip={"placement": "bottom", "always_visible": True},
-            className="mb-3"
-        )
-    ], md=4)
+    return dbc.Col(
+        [
+            dbc.Label("Age Range:", html_for="age-range"),
+            dcc.RangeSlider(
+                id="age-range",
+                min=15,
+                max=45,
+                value=[15, 45],
+                marks={
+                    15: "15",
+                    20: "20",
+                    25: "25",
+                    30: "30",
+                    35: "35",
+                    40: "40",
+                    45: "45",
+                },
+                tooltip={"placement": "bottom", "always_visible": True},
+                className="mb-3",
+            ),
+        ],
+        md=4,
+    )
 
 
 def create_export_button():
@@ -140,34 +162,34 @@ def create_export_button():
     Returns:
         dbc.Col: Export button column
     """
-    return dbc.Col([
-        dbc.Label("Options:", html_for="action-buttons"),
-        html.Div([
-            dbc.Button(
+    return dbc.Col(
+        [
+            dbc.Label("Options:", html_for="action-buttons"),
+            html.Div(
                 [
-                    html.I(className="bi bi-file-earmark-pdf me-2"),
-                    "Export PDF"
-                ],
-                id="export-pdf-button",
-                color="success",
-                size="sm"
-            )
-        ])
-    ], md=4)
+                    dbc.Button(
+                        [
+                            html.I(className="bi bi-file-earmark-pdf text-white me-2"),
+                            "Export PDF",
+                        ],
+                        id="export-pdf-button",
+                        color="info",
+                        size="sm",
+                    )
+                ]
+            ),
+        ],
+        md=4,
+    )
 
 
 # =============================================================================
 # KPI CARD COMPONENTS
 # =============================================================================
 
+
 def create_kpi_card(
-    value,
-    label,
-    unit="",
-    icon=None,
-    trend=None,
-    trend_color=None,
-    card_id=None
+    value, label, unit="", icon=None, trend=None, trend_color=None, card_id=None
 ):
     """
     Create a KPI card component with consistent styling.
@@ -189,56 +211,31 @@ def create_kpi_card(
     # Icon (if provided)
     if icon:
         content.append(
-            html.Div([
-                html.I(className=f"bi {icon}")
-            ], className="metric-icon mb-2")
+            html.Div([html.I(className=f"bi {icon}")], className="metric-icon mb-2")
         )
 
     # Value
-    content.append(
-        html.P(
-            str(value),
-            className="metric-value mb-1"
-        )
-    )
+    content.append(html.P(str(value), className="metric-value mb-1"))
 
     # Unit (if provided)
     if unit:
-        content.append(
-            html.Span(
-                f"{unit}",
-                className="metric-unit text-secondary"
-            )
-        )
+        content.append(html.Span(f"{unit}", className="metric-unit text-secondary"))
 
     # Label
-    content.append(
-        html.P(
-            label,
-            className="metric-label mb-0"
-        )
-    )
+    content.append(html.P(label, className="metric-label mb-0"))
 
     # Trend (if provided)
     if trend:
         content.append(
-            html.Span(
-                trend,
-                className=f"metric-trend badge badge-{trend_color} mt-2"
-            )
+            html.Span(trend, className=f"metric-trend badge badge-{trend_color} mt-2")
         )
 
     # Build card props conditionally
-    card_props = {
-        "children": dbc.CardBody(content),
-        "className": "metric-card"
-    }
+    card_props = {"children": dbc.CardBody(content), "className": "metric-card"}
     if card_id is not None:
         card_props["id"] = card_id
 
-    return dbc.Col([
-        dbc.Card(**card_props)
-    ], lg=3, md=6, sm=6, xs=12)
+    return dbc.Col([dbc.Card(**card_props)], lg=3, md=6, sm=6, xs=12)
 
 
 def create_kpi_row(*kpi_cards):
@@ -258,6 +255,7 @@ def create_kpi_row(*kpi_cards):
 # CHART CONTAINER COMPONENTS
 # =============================================================================
 
+
 def create_chart_container(
     chart_id,
     title,
@@ -265,7 +263,7 @@ def create_chart_container(
     loading_type="default",
     show_legend=True,
     full_width=False,
-    container_id=None
+    container_id=None,
 ):
     """
     Create a standardized chart container with loading state.
@@ -285,33 +283,34 @@ def create_chart_container(
     """
     chart_md = 12 if full_width else 6
 
-    header_content = [
-        html.H5(title, className="mb-0 d-inline-block")
-    ]
+    header_content = [html.H5(title, className="mb-0 d-inline-block")]
 
     if subtitle:
         header_content.append(
-            html.Small(
-                subtitle,
-                className="text-secondary d-block mt-1"
-            )
+            html.Small(subtitle, className="text-secondary d-block mt-1")
         )
 
-    return dbc.Col([
-        dbc.Card([
-            dbc.CardHeader(html.Div(header_content)),
-            dbc.CardBody([
-                dcc.Loading(
-                    id=f"loading-{chart_id}",
-                    type=loading_type,
-                    children=[
-                        html.Div(id=chart_id)
-                    ],
-                    color="#ED1C24"  # HKFA red
-                )
-            ])
-        ])
-    ], md=chart_md, className="mb-4")
+    return dbc.Col(
+        [
+            dbc.Card(
+                [
+                    dbc.CardHeader(html.Div(header_content)),
+                    dbc.CardBody(
+                        [
+                            dcc.Loading(
+                                id=f"loading-{chart_id}",
+                                type=loading_type,
+                                children=[html.Div(id=chart_id)],
+                                color="#ED1C24",  # HKFA red
+                            )
+                        ]
+                    ),
+                ]
+            )
+        ],
+        md=chart_md,
+        className="mb-4",
+    )
 
 
 def create_chart_row(*chart_containers):
@@ -331,12 +330,9 @@ def create_chart_row(*chart_containers):
 # STATUS AND ERROR COMPONENTS
 # =============================================================================
 
+
 def create_status_alert(
-    alert_id,
-    message="",
-    alert_type="info",
-    dismissible=True,
-    show=True
+    alert_id, message="", alert_type="info", dismissible=True, show=True
 ):
     """
     Create a status/error alert component.
@@ -358,14 +354,12 @@ def create_status_alert(
         color=alert_type,
         dismissable=dismissible,
         is_open=show,
-        className="mb-3"
+        className="mb-3",
     )
 
 
 def create_empty_state(
-    title="No Data Available",
-    message="Try adjusting your filters",
-    icon="bi-inbox"
+    title="No Data Available", message="Try adjusting your filters", icon="bi-inbox"
 ):
     """
     Create an empty state placeholder.
@@ -381,18 +375,19 @@ def create_empty_state(
     Returns:
         dbc.Card: Empty state card
     """
-    return dbc.Card([
-        dbc.CardBody([
-            html.Div(
+    return dbc.Card(
+        [
+            dbc.CardBody(
                 [
-                    html.I(
-                        className=f"bi {icon}",
-                        style={"fontSize": "3rem", "color": "#A7A7A7"}
-                    ),
-                    html.H5(title, className="mt-3"),
-                    html.P(message, className="text-secondary")
-                ],
-                className="text-center py-5"
+                    html.Div(
+                        [
+                            html.I(className=f"bi {icon} empty-state-icon"),
+                            html.H5(title, className="mt-3"),
+                            html.P(message, className="text-secondary"),
+                        ],
+                        className="text-center py-5",
+                    )
+                ]
             )
-        ])
-    ])
+        ]
+    )
