@@ -613,7 +613,18 @@ git revert <commit-hash>
 
 ---
 
+### **Eliminar ramas**
+
+```bash
+# Eliminar rama local
+git branch -d <branch>
+
+# Eliminar rama remota
+git push origin --delete <branch>
+
 ## 📊 Visualización del Flujo (Opción B - Dual Purpose)
+
+---
 
 ```
 main (producción completa)
