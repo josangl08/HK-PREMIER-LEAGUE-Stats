@@ -212,6 +212,7 @@ debug/
 # .claude
 .claude/
 CLAUDE.md
+GEMINI.md
 .mcp.json
 .github/
 
