@@ -230,3 +230,4 @@ openspec/
 .kilocode/
 .opencode/
 
+data/users.json
