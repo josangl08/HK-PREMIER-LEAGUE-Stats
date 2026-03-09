@@ -25,15 +25,17 @@ class User(UserMixin):
     """
     
     def __init__(self, username: str, role: str, player_name: Optional[str] = None,
-                 managed_players: Optional[List[str]] = None, player_id: Optional[str] = None):
+                 managed_players: Optional[List[str]] = None, player_id: Optional[str] = None,
+                 agent_profile: Optional[Dict[str, Any]] = None):
         """
         Inicializa un usuario.
-        
+
         Args:
             username: Nombre de usuario (ID único)
             role: Rol del usuario (admin, player, agent)
             player_name: Nombre del jugador asociado (si aplica)
             managed_players: Lista de jugadores gestionados (si aplica)
+            agent_profile: Datos del agente (si aplica)
         """
         self.id = username
         self.username = username
@@ -41,6 +43,7 @@ class User(UserMixin):
         self.player_name = player_name
         self.player_id = player_id   # Wyscout ID, recovered ID, or generated slug
         self.managed_players = managed_players or []
+        self.agent_profile = agent_profile or {}
         
     def get_id(self):
         """Retorna el ID del usuario para Flask-Login."""
@@ -111,6 +114,7 @@ class AuthRepository:
             player_name=user_data.get('player_name'),
             managed_players=user_data.get('managed_players', []),
             player_id=user_data.get('player_id'),
+            agent_profile=user_data.get('agent_profile', {}),
         )
 
     @classmethod
@@ -118,7 +122,8 @@ class AuthRepository:
                     player_name: Optional[str] = None,
                     managed_players: Optional[List[str]] = None,
                     player_profile: Optional[Dict[str, Any]] = None,
-                    player_id: Optional[str] = None) -> bool:
+                    player_id: Optional[str] = None,
+                    agent_profile: Optional[Dict[str, Any]] = None) -> bool:
         """Crea un nuevo usuario con contraseña hasheada."""
         users = cls._load_all_users()
 
@@ -132,6 +137,7 @@ class AuthRepository:
             'player_name': player_name,
             'player_id': player_id,
             'player_profile': player_profile or {},
+            'agent_profile': agent_profile or {},
             'managed_players': managed_players or [],
             'created_at': datetime.now(timezone.utc).isoformat()
         }
@@ -174,6 +180,9 @@ class AuthRepository:
             'role': 'admin',
             'password_hash': generate_password_hash(admin_password),
             'player_name': None,
+            'player_id': None,
+            'player_profile': {},
+            'agent_profile': {},
             'managed_players': [],
             'created_at': users.get(admin_user, {}).get('created_at', datetime.now(timezone.utc).isoformat()),
             'synced_at': datetime.now(timezone.utc).isoformat()

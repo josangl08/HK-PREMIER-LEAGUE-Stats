@@ -357,7 +357,6 @@ def create_status_alert(
         className="mb-3",
     )
 
-
 def create_empty_state(
     title="No Data Available", message="Try adjusting your filters", icon="bi-inbox"
 ):
@@ -381,7 +380,14 @@ def create_empty_state(
                 [
                     html.Div(
                         [
-                            html.I(className=f"bi {icon} empty-state-icon"),
+                            html.I(
+                                className=f"bi {icon} empty-state-icon",
+                                style={
+                                    "fontSize": "3rem",
+                                    "color": "#A7A7A7",
+                                    "opacity": "0.5",
+                                },
+                            ),
                             html.H5(title, className="mt-3"),
                             html.P(message, className="text-secondary"),
                         ],
@@ -389,5 +395,7 @@ def create_empty_state(
                     )
                 ]
             )
-        ]
+        ],
+        className="mb-4 shadow-sm",
     )
+

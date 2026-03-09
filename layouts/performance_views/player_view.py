@@ -55,6 +55,13 @@ def create_player_view_layout():
         - Symmetric 6-6 grid creates visual balance
     """
     return dbc.Container([
+        # ===== ROW 0: PRE-MATCH CARD (Conditional) =====
+        dbc.Row([
+            dbc.Col([
+                html.Div(id='prematch-card-container')
+            ], width=12)
+        ], className='mb-4'),
+
         # ===== ROW 1: RADAR + PERCENTILES =====
         dbc.Row([
             # Chart 1: Radar (Player vs Position Average)
