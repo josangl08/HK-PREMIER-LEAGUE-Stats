@@ -28,9 +28,9 @@ class HKFATheme:
     """HKFA color theme and styling constants."""
 
     # Primary colors
-    BG_PRIMARY = "#232326"
-    BG_SECONDARY = "#232326"
-    BG_TERTIARY = "#2A2A2D"
+    BG_PRIMARY = "#18181A"
+    BG_SECONDARY = "#18181A"
+    BG_TERTIARY = "#232326"
 
     # Accents
     ACCENT_RED = "#ED1C24"

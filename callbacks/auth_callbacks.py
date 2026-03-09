@@ -65,6 +65,44 @@ clientside_callback(
 )
 
 
+# ── Clientside callback: role toggle (Player / Agent) ────────────────────────
+clientside_callback(
+    """
+    function(playerClicks, agentClicks) {
+        var ctx = dash_clientside.callback_context;
+        if (!ctx || !ctx.triggered || ctx.triggered.length === 0) {
+            return ['player',
+                    {display: 'block'}, {display: 'none'},
+                    {backgroundColor:'#93312a',borderColor:'#93312a',color:'white',fontWeight:'bold',width:'50%',borderRadius:'6px 0 0 6px'},
+                    {backgroundColor:'transparent',borderColor:'#93312a',color:'#93312a',fontWeight:'bold',width:'50%',borderRadius:'0 6px 6px 0'}];
+        }
+        var triggeredId = ctx.triggered_id;
+        var isAgent = triggeredId === 'reg-role-btn-agent';
+        var activeStyle  = {backgroundColor:'#93312a',borderColor:'#93312a',color:'white',fontWeight:'bold',width:'50%'};
+        var inactiveStyle = {backgroundColor:'transparent',borderColor:'#93312a',color:'#93312a',fontWeight:'bold',width:'50%'};
+        var playerActiveStyle  = Object.assign({}, activeStyle,  {borderRadius:'6px 0 0 6px'});
+        var agentActiveStyle   = Object.assign({}, activeStyle,  {borderRadius:'0 6px 6px 0'});
+        var playerInactiveStyle = Object.assign({}, inactiveStyle, {borderRadius:'6px 0 0 6px'});
+        var agentInactiveStyle  = Object.assign({}, inactiveStyle, {borderRadius:'0 6px 6px 0'});
+        return [
+            isAgent ? 'agent' : 'player',
+            isAgent ? {display:'none'} : {display:'block'},
+            isAgent ? {display:'block'} : {display:'none'},
+            isAgent ? playerInactiveStyle : playerActiveStyle,
+            isAgent ? agentActiveStyle : agentInactiveStyle
+        ];
+    }
+    """,
+    Output('reg-role-store', 'data'),
+    Output('reg-player-fields', 'style'),
+    Output('reg-agent-fields', 'style'),
+    Output('reg-role-btn-player', 'style'),
+    Output('reg-role-btn-agent', 'style'),
+    Input('reg-role-btn-player', 'n_clicks'),
+    Input('reg-role-btn-agent', 'n_clicks'),
+)
+
+
 # ── Initialize dropdown options when register form mounts ───────────────────
 @callback(
     Output('reg-player-name-dropdown', 'options', allow_duplicate=True),
@@ -135,28 +173,44 @@ def logout_callback(n_clicks):
 # ── Registration ─────────────────────────────────────────────────────────────
 MIN_PASSWORD_LENGTH = 8
 
+_NO_AGENT_ERRORS = (no_update, no_update, no_update)
+
 
 @callback(
     [Output('username-feedback', 'children'),
      Output('password-feedback', 'children'),
      Output('confirm-password-feedback', 'children'),
      Output('register-feedback', 'children'),
-     Output('url', 'pathname', allow_duplicate=True)],
+     Output('url', 'pathname', allow_duplicate=True),
+     Output('agent-fullname-feedback', 'children'),
+     Output('agent-agency-feedback', 'children'),
+     Output('agent-email-feedback', 'children')],
     [Input('register-button', 'n_clicks')],
     [State('reg-username-input', 'value'),
      State('reg-password-input', 'value'),
      State('reg-confirm-password-input', 'value'),
-     State('reg-player-name-dropdown', 'value')],
+     State('reg-role-store', 'data'),
+     State('reg-player-name-dropdown', 'value'),
+     State('reg-agent-fullname-input', 'value'),
+     State('reg-agent-agency-input', 'value'),
+     State('reg-agent-email-input', 'value'),
+     State('reg-agent-license-input', 'value')],
     prevent_initial_call=True
 )
-def handle_registration(n_clicks, username, password, confirm_password, player_name):
+def handle_registration(n_clicks, username, password, confirm_password,
+                        role, player_name,
+                        agent_fullname, agent_agency, agent_email, agent_license):
     """
-    Valida y registra un nuevo usuario con mensajes de error por campo.
+    Valida y registra un nuevo usuario (player o agent) con mensajes de error por campo.
+    Devuelve 8 outputs: username_err, password_err, confirm_err, feedback,
+                        pathname, fullname_err, agency_err, email_err.
     """
     if n_clicks is None:
         raise PreventUpdate
 
-    # ── Validaciones de campo ───────────────────────────────────────────
+    role = role or 'player'
+
+    # ── Validaciones comunes ─────────────────────────────────────────────
     username_err = None
     password_err = None
     confirm_err = None
@@ -174,67 +228,112 @@ def handle_registration(n_clicks, username, password, confirm_password, player_n
     elif password and confirm_password != password:
         confirm_err = _field_warning("Las contraseñas no coinciden.")
 
-    if not player_name:
-        return (
-            username_err, password_err, confirm_err,
-            _error_alert("Debes seleccionar tu identidad de jugador."),
-            no_update
-        )
-
     if username_err or password_err or confirm_err:
-        return username_err, password_err, confirm_err, None, no_update
+        return (username_err, password_err, confirm_err, None, no_update) + _NO_AGENT_ERRORS
 
-    # ── Verificar jugador e historial ───────────────────────────────────
-    try:
-        player_id = get_player_index().get_player_id(player_name)
-        if not player_id:
+    # ── Rama: Player ─────────────────────────────────────────────────────
+    if role == 'player':
+        if not player_name:
+            return (
+                username_err, password_err, confirm_err,
+                _error_alert("Debes seleccionar tu identidad de jugador."),
+                no_update
+            ) + _NO_AGENT_ERRORS
+
+        try:
+            player_id = get_player_index().get_player_id(player_name)
+            if not player_id:
+                return (
+                    None, None, None,
+                    _error_alert(f"El jugador '{player_name}' no existe en los datos de la liga."),
+                    no_update
+                ) + _NO_AGENT_ERRORS
+
+            logger.info(f"Player ID resuelto para '{player_name}': {player_id}")
+            dm = get_hong_kong_data_manager()
+            player_profile = _extract_player_profile(dm, player_name, player_id=player_id)
+
+        except Exception as e:
+            logger.error(f"Error consultando DataManager durante registro: {e}")
             return (
                 None, None, None,
-                _error_alert(f"El jugador '{player_name}' no existe en los datos de la liga."),
+                _error_alert("Error al verificar los datos de jugadores. Inténtalo de nuevo."),
                 no_update
+            ) + _NO_AGENT_ERRORS
+
+        try:
+            created = AuthRepository.create_user(
+                username=username,
+                password=password,
+                role='player',
+                player_name=player_name,
+                player_profile=player_profile,
+                player_id=player_id,
             )
+            if created:
+                logger.info(
+                    f"Nuevo usuario registrado: {username} "
+                    f"(player={player_name}, team={player_profile.get('team', '?')}, "
+                    f"season={player_profile.get('season', '?')})"
+                )
+                return (None, None, None, None, '/login') + _NO_AGENT_ERRORS
+            else:
+                return (
+                    _field_warning(f"El nombre de usuario '{username}' ya está en uso."),
+                    None, None, None, no_update
+                ) + _NO_AGENT_ERRORS
+        except Exception as e:
+            logger.error(f"Error durante el registro de {username}: {e}")
+            return (
+                None, None, None,
+                _error_alert("Error interno al crear la cuenta. Inténtalo de nuevo."),
+                no_update
+            ) + _NO_AGENT_ERRORS
 
-        logger.info(f"Player ID resuelto para '{player_name}': {player_id}")
-        dm = get_hong_kong_data_manager()
-        player_profile = _extract_player_profile(dm, player_name, player_id=player_id)
+    # ── Rama: Agent ──────────────────────────────────────────────────────
+    fullname_err = None
+    agency_err = None
+    email_err = None
 
-    except Exception as e:
-        logger.error(f"Error consultando DataManager durante registro: {e}")
-        return (
-            None, None, None,
-            _error_alert("Error al verificar los datos de jugadores. Inténtalo de nuevo."),
-            no_update
-        )
+    if not agent_fullname or not agent_fullname.strip():
+        fullname_err = _field_warning("Campo requerido.")
+    if not agent_agency or not agent_agency.strip():
+        agency_err = _field_warning("Campo requerido.")
+    if not agent_email or not _validate_email(agent_email):
+        email_err = _field_warning("Introduce un correo válido.")
 
-    # ── Crear cuenta ────────────────────────────────────────────────────
+    if fullname_err or agency_err or email_err:
+        return (None, None, None, None, no_update, fullname_err, agency_err, email_err)
+
+    agent_profile = {
+        'full_name': agent_fullname.strip(),
+        'agency': agent_agency.strip(),
+        'email': agent_email.strip(),
+        'license_number': (agent_license or '').strip() or None,
+    }
+
     try:
         created = AuthRepository.create_user(
             username=username,
             password=password,
-            role='player',
-            player_name=player_name,
-            player_profile=player_profile,
-            player_id=player_id,
+            role='agent',
+            agent_profile=agent_profile,
         )
         if created:
-            logger.info(
-                f"Nuevo usuario registrado: {username} "
-                f"(player={player_name}, team={player_profile.get('team', '?')}, "
-                f"season={player_profile.get('season', '?')})"
-            )
-            return None, None, None, None, '/login'
+            logger.info(f"Nuevo agente registrado: {username} (agency={agent_profile['agency']})")
+            return (None, None, None, None, '/login') + _NO_AGENT_ERRORS
         else:
             return (
                 _field_warning(f"El nombre de usuario '{username}' ya está en uso."),
                 None, None, None, no_update
-            )
+            ) + _NO_AGENT_ERRORS
     except Exception as e:
-        logger.error(f"Error durante el registro de {username}: {e}")
+        logger.error(f"Error durante el registro de agente {username}: {e}")
         return (
             None, None, None,
             _error_alert("Error interno al crear la cuenta. Inténtalo de nuevo."),
             no_update
-        )
+        ) + _NO_AGENT_ERRORS
 
 
 # ── Blur validation: password ────────────────────────────────────────────────
@@ -361,6 +460,12 @@ def _infer_position_group(position: str) -> str | None:
     if any(p in pos for p in ['lw', 'rw', 'cf', 'ss', 'st', 'fw']):
         return 'Forward'
     return None
+
+
+def _validate_email(email: str) -> bool:
+    """Validación básica de formato de email — sin dependencias externas."""
+    email = (email or '').strip()
+    return bool(email) and '@' in email and '.' in email.split('@')[-1]
 
 
 def _field_warning(message: str):

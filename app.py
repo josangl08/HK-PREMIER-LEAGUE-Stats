@@ -152,6 +152,7 @@ import callbacks.auth_callbacks
 import callbacks.navigation_callbacks
 import callbacks.home_callbacks
 import callbacks.performance_callbacks
+import callbacks.fixture_callbacks
 
 if ENABLE_INJURIES_MODULE:
     import callbacks.injuries_callbacks

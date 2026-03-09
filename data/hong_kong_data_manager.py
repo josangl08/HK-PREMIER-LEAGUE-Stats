@@ -14,6 +14,7 @@ from pathlib import Path
 from data.extractors.hong_kong_extractor import HongKongDataExtractor
 from data.processors.hong_kong_processor import HongKongDataProcessor
 from data.aggregators.hong_kong_aggregator import HongKongStatsAggregator
+from data.managers.fixture_manager import get_fixture_manager
 from utils.cache_manager import (
     AdvancedCacheManager,
     invalidate_cache_for_season
@@ -708,3 +709,10 @@ class HongKongDataManager:
             Número de entradas eliminadas
         """
         return self.advanced_cache.cleanup_expired()
+
+    def get_next_fixture(self, team: str) -> Optional[dict]:
+        """
+        Returns the soonest upcoming HKFA fixture for the given team (English name).
+        Delegates to FixtureManager singleton. Returns None if no fixture found.
+        """
+        return get_fixture_manager().get_next_fixture(team)

@@ -190,7 +190,7 @@ def create_skeleton_table(
     return dbc.Table([
         html.Thead(header),
         html.Tbody(rows)
-    ], className="skeleton-card", bordered=True, dark=True, striped=True)
+    ], className="skeleton-card", bordered=True, striped=True)
 
 
 def create_skeleton_league_view():
