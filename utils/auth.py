@@ -24,7 +24,8 @@ class User(UserMixin):
     Clase User para Flask-Login con soporte para roles.
     """
     
-    def __init__(self, username: str, role: str, player_name: Optional[str] = None, managed_players: Optional[List[str]] = None):
+    def __init__(self, username: str, role: str, player_name: Optional[str] = None,
+                 managed_players: Optional[List[str]] = None, player_id: Optional[str] = None):
         """
         Inicializa un usuario.
         
@@ -38,6 +39,7 @@ class User(UserMixin):
         self.username = username
         self.role = role
         self.player_name = player_name
+        self.player_id = player_id   # Wyscout ID, recovered ID, or generated slug
         self.managed_players = managed_players or []
         
     def get_id(self):
@@ -107,28 +109,33 @@ class AuthRepository:
             username=username,
             role=user_data.get('role', 'player'),
             player_name=user_data.get('player_name'),
-            managed_players=user_data.get('managed_players', [])
+            managed_players=user_data.get('managed_players', []),
+            player_id=user_data.get('player_id'),
         )
 
     @classmethod
-    def create_user(cls, username: str, password: str, role: str, 
-                    player_name: Optional[str] = None, 
-                    managed_players: Optional[List[str]] = None) -> bool:
+    def create_user(cls, username: str, password: str, role: str,
+                    player_name: Optional[str] = None,
+                    managed_players: Optional[List[str]] = None,
+                    player_profile: Optional[Dict[str, Any]] = None,
+                    player_id: Optional[str] = None) -> bool:
         """Crea un nuevo usuario con contraseña hasheada."""
         users = cls._load_all_users()
-        
+
         if username in users:
             logger.warning(f"Intento de crear usuario existente: {username}")
             return False
-            
+
         users[username] = {
             'role': role,
             'password_hash': generate_password_hash(password),
             'player_name': player_name,
+            'player_id': player_id,
+            'player_profile': player_profile or {},
             'managed_players': managed_players or [],
             'created_at': datetime.now(timezone.utc).isoformat()
         }
-        
+
         return cls._save_all_users(users)
 
     @classmethod

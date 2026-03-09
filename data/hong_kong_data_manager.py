@@ -343,6 +343,13 @@ class HongKongDataManager:
                 f"{invalidated} entries"
             )
 
+            # 8. BUILD PLAYER INDEX (cross-season ID resolution)
+            try:
+                from utils.player_index import get_player_index
+                get_player_index().build()
+            except Exception as e:
+                logger.warning(f"Player index build failed (non-critical): {e}")
+
             logger.info(
                 f"Refresco de datos para {target_season} "
                 f"completado exitosamente."
