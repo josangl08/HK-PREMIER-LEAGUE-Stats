@@ -254,39 +254,105 @@ a:hover, .link:hover {
     color: var(--text-primary);
 }
 
-/* Formularios y Dropdowns (HKFA Style) */
-.form-control, .Select-control {
+/* Formularios (HKFA Style) */
+.form-control {
     background-color: transparent;
     border: 1px solid var(--border-color) !important;
-    border-radius: var(--border-radius-button) !important; /* 8px */
+    border-radius: var(--border-radius-button) !important;
     padding: 0.75rem 1rem;
     transition: var(--transition) !important;
     color: var(--text-primary) !important;
     box-shadow: none !important;
     display: flex;
-    align-items: center; /* Centrado vertical del texto */
+    align-items: center;
     line-height: 1.5;
 }
 
-.form-control::placeholder, .Select-placeholder {
+.form-control::placeholder {
     color: var(--text-secondary) !important;
 }
 
-.form-control:focus, .Select--is-focused .Select-control {
+.form-control:focus {
     border-color: var(--accent-primary) !important;
     box-shadow: 0 0 0 1px var(--accent-primary) !important;
     background-color: transparent !important;
 }
 
-/* Opciones de Dropdown */
-.VirtualizedSelectOption {
+/* ── Dash 4.0 Dropdown (tema oscuro HKFA) ──────────────────────────────────
+   Dash 4.0 reescribió el componente Dropdown eliminando React Select.
+   Las nuevas clases son .dash-dropdown-* con variables --Dash-* para theming.
+   Sobreescribimos el fondo (blanco por defecto) y los colores al tema oscuro.
+*/
+.dash-dropdown {
+    background: var(--background-secondary) !important;
     color: var(--text-primary) !important;
-    background-color: var(--background-secondary) !important;
+    border: 1px solid var(--border-color) !important;
+    border-radius: var(--border-radius-button) !important;
 }
 
-.VirtualizedSelectOption:hover, .VirtualizedSelectFocusedOption {
+.dash-dropdown:focus {
+    border-color: var(--accent-primary) !important;
+    outline-color: var(--accent-primary) !important;
+}
+
+.dash-dropdown-value {
     color: var(--text-primary) !important;
-    background-color: #93312a !important; /* Color corporativo en hover */
+}
+
+.dash-dropdown-placeholder {
+    color: var(--text-secondary) !important;
+}
+
+.dash-dropdown-content {
+    background: var(--background-secondary) !important;
+    border: 1px solid var(--border-color) !important;
+    z-index: 1001 !important;
+}
+
+.dash-dropdown-option {
+    color: var(--text-primary) !important;
+    background: var(--background-secondary) !important;
+    box-shadow: 0 -1px 0 0 var(--border-color) inset !important;
+}
+
+.dash-dropdown-option:hover,
+.dash-dropdown-option:focus-within {
+    background: var(--accent-primary) !important;
+    color: var(--text-primary) !important;
+    cursor: pointer;
+}
+
+.dash-dropdown-search-container {
+    background: var(--background-secondary) !important;
+    border-color: var(--border-color) !important;
+}
+
+.dash-dropdown-search-container:focus-within {
+    border-color: var(--accent-primary) !important;
+    outline-color: var(--accent-primary) !important;
+}
+
+.dash-dropdown-search {
+    color: var(--text-primary) !important;
+    background: transparent !important;
+}
+
+.dash-dropdown-clear,
+.dash-dropdown-trigger-icon {
+    color: var(--text-secondary) !important;
+    fill: var(--text-secondary) !important;
+}
+
+.dash-dropdown-clear:hover {
+    color: var(--accent-primary) !important;
+}
+
+.dash-dropdown-action-button {
+    color: var(--text-secondary) !important;
+}
+
+.dash-dropdown-action-button:hover {
+    color: var(--accent-primary) !important;
 }
 
 /* Layout y Espaciado (HKFA Style) */
@@ -324,52 +390,6 @@ a:hover, .link:hover {
     margin-bottom: 1rem;
 }
 
-/* Flecha del Dropdown - Justificada a la derecha */
-.Select-arrow-zone {
-    position: absolute !important;
-    right: 10px !important;
-    top: 50% !important;
-    transform: translateY(-50%) !important;
-    display: flex !important;
-    align-items: center !important;
-    pointer-events: none;
-}
-
-.Select-arrow {
-    border-color: var(--text-secondary) transparent transparent !important;
-    border-width: 5px 5px 0 !important;
-    border-style: solid !important;
-    display: inline-block !important;
-    
-}
-
-.Select-arrow:hover {
-    border-color: var(--text-primary) transparent transparent !important;
-}
-
-/* Clear button alineado a la derecha (antes de la flecha) */
-.Select-clear-zone {
-    position: absolute !important;
-    right: 55px !important;
-    top: 50% !important;
-    transform: translateY(-50%) !important;
-    display: flex !important;
-    align-items: center !important;
-    z-index: 2;
-}
-
-.Select-clear {
-    font-size: 18px !important;
-    color: var(--text-secondary) !important;
-    cursor: pointer !important;
-    margin: 0 10px !important;
-    pointer-events: auto !important;
-}
-
-.Select-clear:hover {
-    color: var(--text-primary) !important;
-}
-
 /* Dropdowns de filtros - Solución optimizada para z-index */
 .filter-container {
     position: relative;
@@ -399,31 +419,6 @@ a:hover, .link:hover {
     overflow: visible;
 }
 
-/* Menu de dropdowns con z-index apropiado */
-.Select-menu-outer {
-    z-index: 1001 !important;
-}
-
-/* Alineación vertical de texto en dropdowns */
-.Select-value,
-.Select-placeholder,
-.Select-input {
-    display: flex !important;
-    align-items: center !important;
-    line-height: 1.5 !important;
-}
-
-.Select-value-label {
-    line-height: 1.5 !important;
-    color: var(--text-primary) !important; /* #FFFFFF */
-}
-
-/* Sobrescribir color de texto cuando hay valor seleccionado en dropdown */
-.has-value.Select--single > .Select-control .Select-value .Select-value-label,
-.has-value.is-pseudo-focused.Select--single > .Select-control .Select-value .Select-value-label {
-    color: var(--text-primary) !important; /* #FFFFFF en lugar de #333 de react-select */
-}
-
 /* Alertas (HKFA Style) */
 .alert {
     border-radius: var(--border-radius-button);
@@ -433,6 +428,46 @@ a:hover, .link:hover {
     border-left-width: 4px;
     box-shadow: none;
     color: var(--text-primary);
+}
+
+/* Auth Specific Overrides (Login/Register) */
+.bg-light.min-vh-100 {
+    background-color: var(--background-primary) !important;
+}
+
+.auth-card {
+    border-radius: 1rem;
+    overflow: hidden;
+    border: 1px solid var(--border-color);
+}
+
+.bg-secondary-custom {
+    background-color: var(--background-secondary) !important;
+}
+
+.bg-white.rounded-4.shadow-lg {
+    background-color: #ffffff !important;
+    color: #18181A !important;
+}
+
+.bg-white.rounded-4.shadow-lg .text-muted {
+    color: #6c757d !important;
+}
+
+.bg-white.rounded-4.shadow-lg label {
+    color: #18181A !important;
+    font-weight: 600;
+}
+
+.bg-white.rounded-4.shadow-lg .form-control {
+    background-color: #f8f9fa !important;
+    color: #18181A !important;
+    border: 1px solid #dee2e6 !important;
+}
+
+.bg-white.rounded-4.shadow-lg .form-control:focus {
+    border-color: var(--accent-primary) !important;
+    box-shadow: 0 0 0 0.25rem rgba(147, 49, 42, 0.25) !important;
 }
 
 .alert-success {

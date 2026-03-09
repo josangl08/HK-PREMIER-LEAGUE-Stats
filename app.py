@@ -91,7 +91,16 @@ def is_werkzeug_reloader_process():
 
 # Solo inicializar si NO estamos en el proceso padre del reloader
 if not is_werkzeug_reloader_process():
-    logger.info("Inicializando el gestor de datos y refrescando al inicio...")
+    logger.info("Inicializando el gestor de datos y autenticación...")
+    
+    # Sincronizar administrador desde .env
+    try:
+        from utils.auth import AuthRepository
+        if AuthRepository.sync_admin_from_env():
+            logger.info("✓ Base de datos de usuarios sincronizada con admin del .env")
+    except Exception as e:
+        logger.error(f"❌ Error al sincronizar administrador: {e}")
+
     try:
         data_manager = HongKongDataManager(auto_load=False)
         if not data_manager.refresh_data():
@@ -152,28 +161,52 @@ else:
 
 logger.info("✓ Callbacks importados correctamente.")
 
+# Obtener nombres de jugadores para el Store global (una sola vez al arrancar)
+try:
+    from utils.player_index import get_player_index as _get_player_index
+    _player_options = [
+        {"label": name, "value": name}
+        for name in sorted(_get_player_index().get_all_player_names())
+    ]
+    logger.info(f"✓ player-names-store preparado ({len(_player_options)} jugadores)")
+except Exception as _e:
+    logger.warning(f"⚠️ No se pudieron cargar nombres de jugadores para el Store: {_e}")
+    _player_options = []
+
 # Definir layout principal de la aplicación
 app.layout = dbc.Container([
     # Location component para manejar la navegación
     dcc.Location(id='url', refresh=False),
-    
+
     # Container para el navbar (se llena dinámicamente)
     html.Div(id='navbar-container'),
-    
-    # Container para el contenido de la página, envuelto en el nuevo contenedor principal
+
+    # Auth shell persistente (login/register): solo cambia auth-form-content
+    html.Div(id='auth-wrapper', style={"display": "none"}, children=[
+        dbc.Container([
+            dbc.Row([
+                dbc.Col([
+                    html.Div(id='auth-form-content', className="auth-card")
+                ], width=12, sm=9, md=7, lg=5, className="mx-auto mt-4 mb-5")
+            ])
+        ], fluid=True, className="min-vh-100 py-5",
+           style={"backgroundColor": "#18181A"})
+    ]),
+
+    # Contenido principal para rutas no-auth
     html.Div(
         html.Div(id='page-content', className="fadeIn"),
         className="main-container"
     ),
-    
-    # Stores globales para la aplicación
+
+    # Stores globales
     dcc.Store(id='login-status', storage_type='session'),
-    # Toggle de tema (claro/oscuro)
+    dcc.Store(id='player-names-store', data=_player_options),
     dcc.Store(id='app-theme', storage_type='local', data='light'),
-    
+
     # Componente para downloads
     html.Div(id='download-components')
-    
+
 ], fluid=True, className="p-0")
 
 def run_app(debug=None, host=None, port=None):
