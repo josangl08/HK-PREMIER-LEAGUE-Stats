@@ -27,6 +27,7 @@ lxml==5.2.2  # Parser de alto rendimiento para BeautifulSoup
 # == Generación de Documentos ==
 # Creación de reportes en formato PDF.
 reportlab==4.4.1
+pillow>=10.0
 
 # == Utilidades de Desarrollo ==
 # Herramientas para caché, variables de entorno y logging.
@@ -34,6 +35,19 @@ python-dotenv==1.0.0
 Flask-Caching==2.1.0
 colorlog==6.7.0  # Para logs con colores en la consola
 icalendar==6.1.1  # Para parsear calendarios ICS de la HKFA
+joblib>=1.3
+
+# == Inteligencia Artificial & ML (Track 1, 2 & 3) ==
+# Stack para el TFM según .gemini/rules/ai-ml.md
+xgboost>=2.0
+tabpfn>=0.1.7,<0.2
+shap>=0.45
+scikit-learn>=1.4
+umap-learn>=0.5.3
+sentence-transformers>=2.7
+rembg>=2.0
+langgraph>=0.1
+langchain-google-genai>=1.0
 
 # == Servidor de Producción ==
 # Servidor WSGI para despliegue en entornos de producción.

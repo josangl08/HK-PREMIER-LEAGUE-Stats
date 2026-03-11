@@ -230,4 +230,9 @@ openspec/
 .kilocode/
 .opencode/
 
+# Modelos de IA
+models/*.pkl
+models/**/*.pkl
+!models/registry.json
+
 data/users.json
