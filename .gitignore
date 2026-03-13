@@ -190,6 +190,7 @@ tmp/
 
 # Archivos específicos del OS
 .DS_Store
+**/.DS_Store
 Thumbs.db
 
 # Archivos de backup
@@ -200,6 +201,7 @@ Thumbs.db
 # Archivos de debug
 debug/
 *.debug
+DS_Store
 
 # Archivos de profiling
 *.prof

@@ -11,6 +11,11 @@ from layouts.not_found import layout as not_found_layout
 from layouts.performance import create_performance_layout
 from layouts.injuries import create_injuries_layout
 from components.navbar import create_navbar
+try:
+    from layouts.ai_insights import create_ai_insights_layout
+    _AI_INSIGHTS_AVAILABLE = True
+except ImportError:
+    _AI_INSIGHTS_AVAILABLE = False
 
 # Rutas que no requieren autenticación
 PUBLIC_PATHS = ['/login', '/register']
@@ -18,8 +23,8 @@ PUBLIC_PATHS = ['/login', '/register']
 # Mapa de rutas permitidas por rol (None = acceso total)
 ROLE_ALLOWED_PATHS = {
     'admin': None,           # Acceso completo a todas las rutas
-    'player': ['/performance'],
-    'agent': ['/performance'],
+    'player': ['/performance', '/ai-insights'],
+    'agent': ['/performance', '/ai-insights'],
 }
 
 # Ruta de inicio por defecto para roles sin acceso a '/'
@@ -75,22 +80,22 @@ def display_page(pathname):
         if pathname == '/login':
             if is_authenticated:
                 default = _get_default_path_for_role(user_role)
-                return _render_path(default, navbar), navbar, _AUTH_HIDDEN, no_update
+                return _render_path(default, navbar, user_role), navbar, _AUTH_HIDDEN, no_update
             return html.Div(), html.Div(), _AUTH_VISIBLE, create_login_form()
 
         elif pathname == '/register':
             if is_authenticated:
                 default = _get_default_path_for_role(user_role)
-                return _render_path(default, navbar), navbar, _AUTH_HIDDEN, no_update
+                return _render_path(default, navbar, user_role), navbar, _AUTH_HIDDEN, no_update
             return html.Div(), html.Div(), _AUTH_VISIBLE, create_register_form()
 
         else:
             # Comprobar permisos de rol para rutas protegidas
             if is_authenticated and not _is_path_allowed(pathname, user_role):
                 default = _get_default_path_for_role(user_role)
-                return _render_path(default, navbar), navbar, _AUTH_HIDDEN, no_update
+                return _render_path(default, navbar, user_role), navbar, _AUTH_HIDDEN, no_update
 
-            return _render_path(pathname, navbar), navbar, _AUTH_HIDDEN, no_update
+            return _render_path(pathname, navbar, user_role), navbar, _AUTH_HIDDEN, no_update
 
     except Exception as e:
         error_layout = html.Div([
@@ -101,7 +106,7 @@ def display_page(pathname):
         return error_layout, navbar, _AUTH_HIDDEN, no_update
 
 
-def _render_path(pathname: str, navbar):
+def _render_path(pathname: str, navbar, user_role: str = None):
     """Renderiza el layout correspondiente a una ruta."""
     if pathname == '/':
         return home_layout
@@ -109,5 +114,12 @@ def _render_path(pathname: str, navbar):
         return create_performance_layout()
     elif pathname == '/injuries':
         return create_injuries_layout()
+    elif pathname == '/ai-insights':
+        if _AI_INSIGHTS_AVAILABLE:
+            return create_ai_insights_layout(user_role)
+        return html.Div([
+            html.H2("AI Insights — Coming Soon", className="text-center mt-5"),
+            html.P("This feature is currently being set up.", className="text-center text-muted"),
+        ])
     else:
         return not_found_layout
