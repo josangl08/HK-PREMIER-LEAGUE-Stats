@@ -345,8 +345,8 @@ def update_similarity_panel(n_clicks, player_name, seasons):
 # ──────────────────────────────────────────────────────────────────────────────
 
 @callback(
-    Output("url", "pathname"),
-    Output("url", "search"),
+    Output("url", "pathname", allow_duplicate=True),
+    Output("url", "search", allow_duplicate=True),
     Input({"type": "similarity-player-link", "index": "ALL"}, "n_clicks"),
     prevent_initial_call=True,
 )
