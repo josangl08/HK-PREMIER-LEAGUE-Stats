@@ -160,6 +160,12 @@ if ENABLE_INJURIES_MODULE:
 else:
     logger.info("⚠️ Módulo de lesiones deshabilitado (ENABLE_INJURIES=False)")
 
+try:
+    import callbacks.ai_insights_callbacks
+    logger.info("✓ Módulo AI Insights habilitado")
+except ImportError:
+    logger.info("⚠️ Módulo AI Insights no disponible aún (pendiente de Gemini)")
+
 logger.info("✓ Callbacks importados correctamente.")
 
 # Obtener nombres de jugadores para el Store global (una sola vez al arrancar)

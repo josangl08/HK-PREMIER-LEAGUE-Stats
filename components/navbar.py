@@ -7,6 +7,7 @@ from flask_login import current_user
 def create_navbar(pathname):
 
     # Definir la estructura de enlaces de navegación
+    user_role = getattr(current_user, 'role', None) if current_user.is_authenticated else None
     nav_items = [
         dbc.NavItem(
             dbc.NavLink(
@@ -32,6 +33,19 @@ def create_navbar(pathname):
         #     )
         # ),
     ]
+
+    # AI Insights link — visible for admin and agent roles only
+    if user_role in ('admin', 'agent'):
+        nav_items.append(
+            dbc.NavItem(
+                dbc.NavLink(
+                    [html.I(className="bi bi-cpu me-2"), "AI Insights"],
+                    href="/ai-insights",
+                    active=pathname == "/ai-insights",
+                    className="ms-3 text-decoration-none",
+                )
+            )
+        )
 
     # Agregar información de usuario y botón de logout
     nav_right = dbc.Nav(
