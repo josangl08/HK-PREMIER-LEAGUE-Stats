@@ -50,6 +50,9 @@ class AppConfig:
     CACHE_DIR = os.getenv("CACHE_DIR", "./cache")
     CACHE_DEFAULT_TIMEOUT = get_env_int("CACHE_DEFAULT_TIMEOUT", 300)
     
+    # Configuración de IA (desde .env)
+    GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+
     # Directorios (calculados dinámicamente)
     DATA_DIR = "data"
     CACHE_DATA_DIR = "data/cache"

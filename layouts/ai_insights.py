@@ -1,4 +1,4 @@
-# ABOUTME: Dashboard layout for AI insights (clustering, prediction, similarity).
+# ABOUTME: Dashboard layout for AI insights (clustering, prediction, similarity, agent).
 # ABOUTME: Implements role-based access control and responsive grid components.
 
 # Standard Library
@@ -10,6 +10,13 @@ from dash import dcc, html
 
 # Project
 from utils.chart_helpers import HKFATheme
+
+# Agent panel — imported lazily to avoid hard failure if agent deps are absent
+try:
+    from layouts.agent_panel import create_agent_panel as _create_agent_panel
+    _AGENT_PANEL_AVAILABLE = True
+except ImportError:
+    _AGENT_PANEL_AVAILABLE = False
 
 
 def _card(title: str, icon: str, children, card_id: Optional[str] = None) -> dbc.Card:
@@ -248,13 +255,26 @@ def _similarity_panel() -> dbc.Card:
     )
 
 
+def _agent_panel_content() -> html.Div:
+    """Returns the Agent tab content, or a placeholder if agent_panel is unavailable."""
+    if _AGENT_PANEL_AVAILABLE:
+        return _create_agent_panel()
+    return html.Div(
+        dbc.Alert(
+            "Agent panel unavailable. Install agent dependencies: pip install langgraph langchain-google-genai",
+            color="warning",
+        ),
+        className="p-3",
+    )
+
+
 def create_ai_insights_layout(role: Optional[str] = None) -> html.Div:
     """
     Creates the AI Insights dashboard layout with role-gated panels.
 
     Panels by role:
-      - admin : Clustering + Predictor + Similarity
-      - agent : Clustering + Similarity
+      - admin : Clustering + Predictor + Similarity + Agent
+      - agent : Clustering + Similarity + Agent
       - player: Predictor (own data) + Similarity
 
     Args:
@@ -267,10 +287,13 @@ def create_ai_insights_layout(role: Optional[str] = None) -> html.Div:
     show_clustering = role in ("admin", "agent")
     show_predictor = role in ("admin", "player")
     show_similarity = True  # all roles
+    show_agent = role in ("admin", "agent")
 
-    panels = []
+    # ── Tab definitions ──────────────────────────────────────────────────────
+    tabs = []
 
-    # ── Row 1: Clustering (left) + Predictor (right) for admin ──────────────
+    # ML tab — clustering + predictor + similarity panels
+    ml_panels = []
     top_row_cols = []
     if show_clustering:
         top_row_cols.append(
@@ -280,13 +303,32 @@ def create_ai_insights_layout(role: Optional[str] = None) -> html.Div:
         top_row_cols.append(
             dbc.Col(_predictor_panel(), width=12, lg=6 if show_clustering else 12)
         )
-
     if top_row_cols:
-        panels.append(dbc.Row(top_row_cols, className="mb-2"))
-
-    # ── Row 2: Similarity (full width) ──────────────────────────────────────
+        ml_panels.append(dbc.Row(top_row_cols, className="mb-2"))
     if show_similarity:
-        panels.append(dbc.Row(dbc.Col(_similarity_panel(), width=12)))
+        ml_panels.append(dbc.Row(dbc.Col(_similarity_panel(), width=12)))
+
+    tabs.append(
+        dcc.Tab(
+            label="ML Analytics",
+            value="ml-analytics",
+            children=html.Div(ml_panels, className="pt-3"),
+            className="custom-tab",
+            selected_className="custom-tab--selected",
+        )
+    )
+
+    # Agent tab — only for admin and agent roles
+    if show_agent:
+        tabs.append(
+            dcc.Tab(
+                label="AI Agent",
+                value="ai-agent",
+                children=html.Div(_agent_panel_content(), className="pt-3"),
+                className="custom-tab",
+                selected_className="custom-tab--selected",
+            )
+        )
 
     return html.Div(
         [
@@ -300,15 +342,20 @@ def create_ai_insights_layout(role: Optional[str] = None) -> html.Div:
                             style={"color": HKFATheme.TEXT_PRIMARY},
                         ),
                         html.P(
-                            "Machine learning-powered player analysis.",
+                            "Machine learning-powered player analysis and agentic AI.",
                             className="text-muted mb-4",
                         ),
                     ],
                     width=12,
                 )
             ),
-            # Panels
-            *panels,
+            # Tabbed panels
+            dcc.Tabs(
+                tabs,
+                id="ai-insights-tabs",
+                value="ml-analytics",
+                style={"marginBottom": "16px"},
+            ),
             # Populates player/season dropdowns on page load
             dcc.Store(id="ai-insights-role-store", data=role),
         ],

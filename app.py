@@ -162,7 +162,9 @@ else:
 
 try:
     import callbacks.ai_insights_callbacks
-    logger.info("✓ Módulo AI Insights habilitado")
+    from callbacks.agent_callbacks import register_agent_callbacks
+    register_agent_callbacks(app)
+    logger.info("✓ Módulo AI Insights y Agent habilitados")
 except ImportError:
     logger.info("⚠️ Módulo AI Insights no disponible aún (pendiente de Gemini)")
 
