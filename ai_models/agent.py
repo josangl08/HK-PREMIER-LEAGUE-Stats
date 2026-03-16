@@ -34,7 +34,7 @@ def create_agent(flow: str = "scouting") -> Any:
         EnvironmentError: If GOOGLE_API_KEY is not set.
         ValueError: If flow name is not recognised.
     """
-    api_key = os.environ.get("GOOGLE_API_KEY")
+    api_key = os.environ.get("GOOGLE_API_KEY", "").strip().strip('"').strip("'")
     if not api_key:
         raise EnvironmentError(
             "GOOGLE_API_KEY environment variable is not set. "
@@ -73,8 +73,9 @@ def create_agent(flow: str = "scouting") -> Any:
         query_players,
     )
 
+    model_name = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
     llm = ChatGoogleGenerativeAI(
-        model="gemini-2.0-flash",
+        model=model_name,
         google_api_key=api_key,
         temperature=0,
     )

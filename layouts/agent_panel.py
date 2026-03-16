@@ -53,7 +53,7 @@ def create_agent_panel():
                         ),
                         
                         dbc.Button(
-                            [dbc.Spinner(size="sm"), " Submit Query"],
+                            "Submit Query",
                             id="agent-submit-btn",
                             color="primary",
                             className="w-100",
@@ -62,8 +62,12 @@ def create_agent_panel():
                     ])
                 ], className="shadow-sm mb-4"),
                 
-                # Output area
-                html.Div(id="agent-output-display", className="mt-4")
+                # Output area with loading state
+                dcc.Loading(
+                    id="agent-loading",
+                    type="default",
+                    children=html.Div(id="agent-output-display", className="mt-4")
+                )
             ], width=12, lg=10, className="mx-auto")
         ])
     ], className="p-4")

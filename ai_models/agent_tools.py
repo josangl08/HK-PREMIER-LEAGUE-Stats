@@ -223,7 +223,7 @@ def generate_caption(player_name: str, context: str) -> str:
     Generate a natural language social media caption for a player based on their recent performance context.
     Uses Gemini Flash for creative synthesis. Requires GOOGLE_API_KEY environment variable.
     """
-    api_key = os.environ.get("GOOGLE_API_KEY")
+    api_key = os.environ.get("GOOGLE_API_KEY", "").strip().strip('"').strip("'")
     if not api_key:
         return "[Caption generation requires GOOGLE_API_KEY]"
 
@@ -231,7 +231,8 @@ def generate_caption(player_name: str, context: str) -> str:
         from langchain_google_genai import ChatGoogleGenerativeAI
         from langchain_core.messages import HumanMessage
 
-        llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", google_api_key=api_key)
+        model_name = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+        llm = ChatGoogleGenerativeAI(model=model_name, google_api_key=api_key)
         prompt = (
             f"Write a short, engaging social media caption (2-3 sentences) for "
             f"{player_name} in the context of: {context}. "

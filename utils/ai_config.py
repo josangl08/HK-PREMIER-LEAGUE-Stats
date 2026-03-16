@@ -20,13 +20,16 @@ MODEL_REGISTRY_PATH = MODELS_DIR / "registry.json"
 # API Keys
 # ---------------------------------------------------------------------------
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if GEMINI_API_KEY is None:
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+if GOOGLE_API_KEY is None:
     logger.warning(
-        "GEMINI_API_KEY environment variable is not set. "
+        "GOOGLE_API_KEY environment variable is not set. "
         "Features requiring Gemini (narrative generation, agent, background gen) "
         "will be unavailable."
     )
+
+# Alias for backward compatibility if needed, though GOOGLE_API_KEY is preferred
+GEMINI_API_KEY = GOOGLE_API_KEY
 
 # ---------------------------------------------------------------------------
 # Hyperparameter Defaults

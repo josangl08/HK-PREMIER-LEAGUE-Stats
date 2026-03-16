@@ -22,7 +22,6 @@ def register_agent_callbacks(app):
     
     @app.callback(
         Output("agent-output-display", "children"),
-        Output("agent-submit-btn", "n_clicks"),
         Input("agent-submit-btn", "n_clicks"),
         State("agent-query-input", "value"),
         State("agent-flow-selector", "value"),
@@ -30,7 +29,7 @@ def register_agent_callbacks(app):
     )
     def handle_agent_query(n_clicks, query, flow):
         if not n_clicks or not query:
-            return no_update, 0
+            return no_update
             
         try:
             # 1. Initialize the agent (cached in ai_models.agent)
@@ -44,7 +43,7 @@ def register_agent_callbacks(app):
                 return dbc.Alert([
                     html.H5("Execution Error"),
                     html.P(result["error"])
-                ], color="danger", className="mt-3"), 0
+                ], color="danger", className="mt-3")
             
             # 4. Format the reasoning steps (optional/expandable)
             steps_display = []
@@ -72,16 +71,16 @@ def register_agent_callbacks(app):
                 ], className="shadow-sm border-primary mt-3")
             ])
             
-            return final_output, 0
+            return final_output
             
         except EnvironmentError as exc:
             return dbc.Alert([
                 html.H5("Configuration Missing"),
                 html.P(str(exc))
-            ], color="warning", className="mt-3"), 0
+            ], color="warning", className="mt-3")
         except Exception as exc:
             logger.error(f"Callback error in handle_agent_query: {exc}")
             return dbc.Alert([
                 html.H5("System Error"),
                 html.P("An unexpected error occurred while processing your query.")
-            ], color="danger", className="mt-3"), 0
+            ], color="danger", className="mt-3")
