@@ -23,10 +23,12 @@ Design Pattern:
 """
 
 from dash import Input, Output, callback, html
+from flask_login import current_user
 import logging
 
 # Import view layouts
 from layouts.performance_views import league_view, team_view, player_view
+from layouts.performance_views import agent_view
 
 logger = logging.getLogger(__name__)
 
@@ -37,11 +39,13 @@ logger = logging.getLogger(__name__)
         Output('league-view-container', 'style'),
         Output('team-view-container', 'style'),
         Output('player-view-container', 'style'),
+        Output('agent-view-container', 'style'),
 
         # Content rendering
         Output('league-view-container', 'children'),
         Output('team-view-container', 'children'),
         Output('player-view-container', 'children'),
+        Output('agent-view-container', 'children'),
     ],
     [
         Input('current-filters-store', 'data'),
@@ -57,72 +61,55 @@ def dispatch_view_rendering(filters):
 
     Args:
         filters (dict): Current filter state from store
-            - analysis_level: 'league' | 'team' | 'player'
+            - analysis_level: 'league' | 'team' | 'player' | 'agent'
             - season, team, player, position_filter, age_range
 
     Returns:
         tuple: (
-            league_style, team_style, player_style,
-            league_content, team_content, player_content
+            league_style, team_style, player_style, agent_style,
+            league_content, team_content, player_content, agent_content
         )
-
-    Design Notes:
-        - Inactive views get [] (empty) to save rendering time
-        - Only one view has display: block, others display: none
-        - No duplicate outputs (each container controlled once)
-        - analysis_level determines which view to show
-
-    Performance:
-        - Only active view re-renders on filter changes
-        - Inactive views callbacks don't execute (prevent_initial_call)
-        - Minimal DOM manipulation (visibility toggle only)
     """
     # Extract analysis level from filters
     analysis_level = filters.get('analysis_level') if filters else None
 
+    # Auto-detect agent role: show agent portal when user is an agent
+    # and no specific analysis level has been chosen
+    if analysis_level is None and current_user and current_user.is_authenticated:
+        if getattr(current_user, 'role', None) == 'agent':
+            analysis_level = 'agent'
+
     logger.info(f"View dispatcher triggered - analysis_level: {analysis_level}")
 
-    # === VISIBILITY STYLES ===
-    # Only one view visible at a time
-    league_style = (
-        {'display': 'block'}
-        if analysis_level == 'league'
-        else {'display': 'none'}
-    )
-    team_style = (
-        {'display': 'block'}
-        if analysis_level == 'team'
-        else {'display': 'none'}
-    )
-    player_style = (
-        {'display': 'block'}
-        if analysis_level == 'player'
-        else {'display': 'none'}
-    )
+    _show = {'display': 'block'}
+    _hide = {'display': 'none'}
 
-    # === CONTENT RENDERING ===
-    # Only render active view, leave others empty
+    league_style = _show if analysis_level == 'league' else _hide
+    team_style = _show if analysis_level == 'team' else _hide
+    player_style = _show if analysis_level == 'player' else _hide
+    agent_style = _show if analysis_level == 'agent' else _hide
+
+    # === CONTENT RENDERING — only active view is populated ===
 
     if analysis_level == 'league':
-        # LEAGUE VIEW ACTIVE
         logger.info("-> Rendering league view layout")
         league_content = league_view.create_league_view_layout()
-        team_content = []  # Empty (not visible)
-        player_content = []  # Empty (not visible)
+        team_content = player_content = agent_content = []
 
     elif analysis_level == 'team':
-        # TEAM VIEW ACTIVE
         logger.info("-> Rendering team view layout")
-        league_content = []
         team_content = team_view.create_team_view_layout()
-        player_content = []
+        league_content = player_content = agent_content = []
 
     elif analysis_level == 'player':
-        # PLAYER VIEW ACTIVE
         logger.info("-> Rendering player view layout")
-        league_content = []
-        team_content = []
         player_content = player_view.create_player_view_layout()
+        league_content = team_content = agent_content = []
+
+    elif analysis_level == 'agent':
+        logger.info("-> Rendering agent portal layout")
+        agent_content = agent_view.create_agent_view_layout()
+        league_content = team_content = player_content = []
 
     else:
         # NO LEVEL SELECTED (Initial state)
@@ -133,16 +120,11 @@ def dispatch_view_rendering(filters):
                 className='text-center text-muted p-5'
             )
         ])
-        team_content = []
-        player_content = []
+        team_content = player_content = agent_content = []
 
     return (
-        league_style,
-        team_style,
-        player_style,
-        league_content,
-        team_content,
-        player_content
+        league_style, team_style, player_style, agent_style,
+        league_content, team_content, player_content, agent_content,
     )
 
 

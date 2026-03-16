@@ -16,6 +16,10 @@ logger = logging.getLogger(__name__)
 from dotenv import load_dotenv
 load_dotenv()
 
+# Asegurar directorios de caché para Feature A
+os.makedirs("data/cache/cutouts", exist_ok=True)
+os.makedirs("assets/templates", exist_ok=True)
+
 # Importar componentes propios
 try:
     from utils.auth import load_user
@@ -153,6 +157,7 @@ import callbacks.navigation_callbacks
 import callbacks.home_callbacks
 import callbacks.performance_callbacks
 import callbacks.fixture_callbacks
+import callbacks.content_generation_callbacks
 
 if ENABLE_INJURIES_MODULE:
     import callbacks.injuries_callbacks

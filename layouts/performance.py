@@ -139,6 +139,12 @@ def create_performance_layout():
                         children=[],  # Populated dynamically by view_dispatcher
                         style={"display": "none"},  # Initially hidden
                     ),
+                    # AGENT VIEW CONTAINER
+                    html.Div(
+                        id="agent-view-container",
+                        children=[],  # Populated dynamically by view_dispatcher
+                        style={"display": "none"},  # Initially hidden
+                    ),
                     # Stores para datos
                     dcc.Store(id="performance-data-store"),
                     dcc.Store(id="chart-data-store"),

@@ -22,15 +22,15 @@ PUBLIC_PATHS = ['/login', '/register']
 
 # Mapa de rutas permitidas por rol (None = acceso total)
 ROLE_ALLOWED_PATHS = {
-    'admin': None,           # Acceso completo a todas las rutas
+    'admin': None,                                      # Acceso completo a todas las rutas
     'player': ['/performance', '/ai-insights'],
-    'agent': ['/performance', '/ai-insights'],
+    'agent': ['/agent-portal', '/performance'],         # Sin /ai-insights (predictor callbacks)
 }
 
 # Ruta de inicio por defecto para roles sin acceso a '/'
 ROLE_DEFAULT_PATH = {
     'player': '/performance',
-    'agent': '/performance',
+    'agent': '/agent-portal',
 }
 
 _AUTH_VISIBLE = {"display": "block"}
@@ -121,5 +121,8 @@ def _render_path(pathname: str, navbar, user_role: str = None):
             html.H2("AI Insights — Coming Soon", className="text-center mt-5"),
             html.P("This feature is currently being set up.", className="text-center text-muted"),
         ])
+    elif pathname == '/agent-portal':
+        from layouts.performance_views.agent_view import create_agent_view_layout
+        return create_agent_view_layout()
     else:
         return not_found_layout

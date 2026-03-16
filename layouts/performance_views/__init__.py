@@ -16,9 +16,11 @@ Exports:
 from . import league_view
 from . import team_view
 from . import player_view
+from . import agent_view
 
 __all__ = [
     'league_view',
     'team_view',
     'player_view',
+    'agent_view',
 ]

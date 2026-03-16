@@ -17,25 +17,35 @@ def create_navbar(pathname):
                 className="me-3 text-decoration-none",
             )
         ),
-        dbc.NavItem(
-            dbc.NavLink(
-                [html.I(className="bi bi-bar-chart me-2"), "Performance"],
-                href="/performance",
-                active=pathname == "/performance",
-                className="text-decoration-none",
-            )
-        ),
-        # dbc.NavItem(
-        #     dbc.NavLink(
-        #         "Injuries",
-        #         href="/injuries",
-        #         active=pathname == "/injuries"
-        #     )
-        # ),
     ]
 
-    # AI Insights link — visible for admin and agent roles only
+    if user_role != 'agent':
+        nav_items.append(
+            dbc.NavItem(
+                dbc.NavLink(
+                    [html.I(className="bi bi-bar-chart me-2"), "Performance"],
+                    href="/performance",
+                    active=pathname == "/performance",
+                    className="text-decoration-none",
+                )
+            )
+        )
+
+    # Portal Agente — visible for admin and agent roles
     if user_role in ('admin', 'agent'):
+        nav_items.append(
+            dbc.NavItem(
+                dbc.NavLink(
+                    [html.I(className="bi bi-person-badge me-2"), "Portal Agente"],
+                    href="/agent-portal",
+                    active=pathname == "/agent-portal",
+                    className="ms-3 text-decoration-none",
+                )
+            )
+        )
+
+    # AI Insights — visible for admin and player roles only (not agent)
+    if user_role in ('admin', 'player'):
         nav_items.append(
             dbc.NavItem(
                 dbc.NavLink(

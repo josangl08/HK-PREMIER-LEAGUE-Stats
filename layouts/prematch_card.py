@@ -2,7 +2,7 @@
 # ABOUTME: Displays the next HKFA fixture: team logos, kickoff time (HKT), stadium, streaming link.
 
 from pathlib import Path
-from dash import html
+from dash import html, dcc
 import dash_bootstrap_components as dbc
 
 _ASSETS_LOGOS = Path(__file__).parent.parent / "assets" / "team_logos"
@@ -136,10 +136,18 @@ def create_prematch_card(fixture: dict | None) -> html.Div:
                     html.Span(stadium or "Estadio por confirmar", className="text-white-50 small"),
                 ], className="text-center mb-2") if stadium is not None else None,
 
-                # Streaming button (optional)
+                # Action buttons
                 streaming_btn,
+                dbc.Button(
+                    [html.I(className="bi bi-download me-2"), "Descargar Card"],
+                    id="prematch-dl-btn",
+                    color="outline-light",
+                    size="sm",
+                    className="mt-2 w-100",
+                    style={"fontSize": "0.75rem", "borderStyle": "dashed"}
+                ) if not not fixture else None,
             ]),
             style=_CARD_STYLE,
         ),
-        className="mb-3",
-    )
+        dcc.Download(id="prematch-card-download"),
+    ], className="mb-3")
