@@ -173,6 +173,13 @@ try:
 except ImportError:
     logger.info("⚠️ Módulo AI Insights no disponible aún (pendiente de Gemini)")
 
+try:
+    from callbacks.player_portal_callbacks import register_player_portal_callbacks
+    register_player_portal_callbacks(app)
+    logger.info("✓ Player Portal callbacks registrados")
+except ImportError as e:
+    logger.info(f"⚠️ Player Portal callbacks no disponibles: {e}")
+
 logger.info("✓ Callbacks importados correctamente.")
 
 # Obtener nombres de jugadores para el Store global (una sola vez al arrancar)

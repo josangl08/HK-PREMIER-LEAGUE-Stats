@@ -23,13 +23,13 @@ PUBLIC_PATHS = ['/login', '/register']
 # Mapa de rutas permitidas por rol (None = acceso total)
 ROLE_ALLOWED_PATHS = {
     'admin': None,                                      # Acceso completo a todas las rutas
-    'player': ['/performance', '/ai-insights'],
+    'player': ['/performance', '/ai-insights', '/player-portal'],
     'agent': ['/agent-portal', '/performance'],         # Sin /ai-insights (predictor callbacks)
 }
 
 # Ruta de inicio por defecto para roles sin acceso a '/'
 ROLE_DEFAULT_PATH = {
-    'player': '/performance',
+    'player': '/player-portal',
     'agent': '/agent-portal',
 }
 
@@ -124,5 +124,8 @@ def _render_path(pathname: str, navbar, user_role: str = None):
     elif pathname == '/agent-portal':
         from layouts.performance_views.agent_view import create_agent_view_layout
         return create_agent_view_layout()
+    elif pathname == '/player-portal':
+        from layouts.player_portal import create_player_portal_layout
+        return create_player_portal_layout(user_role=user_role or "player")
     else:
         return not_found_layout

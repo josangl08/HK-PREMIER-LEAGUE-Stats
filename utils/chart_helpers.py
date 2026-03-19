@@ -18,6 +18,8 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 import pandas as pd
 import numpy as np
+import dash_bootstrap_components as dbc
+from dash import html
 
 
 # ============================================================================
@@ -656,3 +658,70 @@ def get_chart_config(
             'scale': 2
         }
     }
+
+
+# ============================================================================
+# SECTION 7: DASH COMPONENT HELPERS
+# ============================================================================
+
+def create_percentile_bars(percentiles_dict: Dict[str, float]) -> html.Div:
+    """
+    Returns an html.Div with dbc.Progress bars for each stat.
+
+    Ideal for: Quick visualization of player strengths/weaknesses.
+
+    Args:
+        percentiles_dict: Dict mapping stat_name -> percentile (0-100)
+
+    Returns:
+        html.Div containing labeled progress bars
+    """
+    if not percentiles_dict:
+        return html.Div("No hay datos de percentiles disponibles",
+                        style={"color": HKFATheme.TEXT_SECONDARY})
+
+    # Sort by value descending
+    sorted_stats = sorted(
+        percentiles_dict.items(), key=lambda x: x[1], reverse=True
+    )
+
+    rows = []
+    for stat, val in sorted_stats:
+        # Determine color based on threshold
+        if val >= 90:
+            color = HKFATheme.ACCENT_BLUE   # Elite
+        elif val >= 75:
+            color = HKFATheme.POSITIVE     # Good
+        elif val >= 50:
+            color = HKFATheme.WARNING      # Average
+        else:
+            color = HKFATheme.NEGATIVE     # Below Average
+
+        rows.append(html.Div([
+            html.Div([
+                html.Span(
+                    stat,
+                    style={"color": HKFATheme.TEXT_SECONDARY, "fontSize": "0.9rem"}
+                ),
+                html.Span(
+                    f"{val:.0f}th",
+                    style={
+                        "color": HKFATheme.TEXT_PRIMARY,
+                        "fontSize": "0.9rem",
+                        "fontWeight": "bold"
+                    }
+                )
+            ], style={"display": "flex", "justifyContent": "space-between"}),
+            dbc.Progress(
+                value=val,
+                color=color,
+                style={
+                    "height": "8px",
+                    "marginTop": "4px",
+                    "marginBottom": "12px",
+                    "borderRadius": "4px"
+                }
+            )
+        ]))
+
+    return html.Div(rows)
