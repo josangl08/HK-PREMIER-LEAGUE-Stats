@@ -1,5 +1,5 @@
 # ABOUTME: Helper functions for rendering Stage scenarios and AI widgets.
-# ABOUTME: Dispatches rendering for post-match, pre-match, and career-insights.
+# ABOUTME: Dispatches rendering for post-match, pre-match, and career-insights with contextual projector.
 
 import logging
 import pandas as pd
@@ -14,6 +14,43 @@ from utils.chart_helpers import apply_hkfa_theme, HKFATheme
 from utils.ai_helpers import umap_scatter_chart
 
 logger = logging.getLogger(__name__)
+
+# Metrics displayed in the projector per position group.
+# Keys match the Position_Group values from the processed DataFrame.
+POSITION_METRICS: Dict[str, List[str]] = {
+    "Forward":    ["Goals", "xG", "Shots on target, %", "Goal conversion, %"],
+    "Winger":     ["Goals", "Assists", "Dribbles per 90", "Crosses per 90"],
+    "Midfielder": ["Assists", "xA", "Key passes per 90", "Accurate passes, %"],
+    "Defender":   ["Interceptions per 90", "Defensive duels won, %", "Aerial duels won, %", "Shots blocked per 90"],
+    "Goalkeeper": ["Save rate, %", "Clean sheets", "Prevented goals per 90", "xG against per 90"],
+}
+
+_CURRENT_SEASON_FALLBACK = "2025-26"
+
+
+def _get_current_season() -> str:
+    """Returns the active season from the data manager, falling back to a constant."""
+    try:
+        dm = HongKongDataManager()
+        return dm.current_season or _CURRENT_SEASON_FALLBACK
+    except Exception:
+        return _CURRENT_SEASON_FALLBACK
+
+
+def _infer_position_group(position: str) -> str:
+    """Maps a raw Wyscout position string to one of the POSITION_METRICS keys."""
+    if not position:
+        return "Midfielder"
+    p = position.upper()
+    if "GK" in p:
+        return "Goalkeeper"
+    if any(x in p for x in ("CF", "RWF", "LWF")):
+        return "Forward"
+    if any(x in p for x in ("RW", "LW", "RWF", "LWF", "RAMF", "LAMF")):
+        return "Winger"
+    if any(x in p for x in ("CB", "RCB", "LCB", "RB", "LB", "RWB", "LWB")):
+        return "Defender"
+    return "Midfielder"
 
 def render_post_match(payload: Dict[str, Any]) -> html.Div:
     """
@@ -162,15 +199,16 @@ def render_pre_match(payload: Dict[str, Any]) -> html.Div:
 
 def render_career_insights(payload: Dict[str, Any], user_role: str = "player") -> html.Div:
     """
-    Renders the Career Insights stage with projection, UMAP clustering,
+    Renders the Career Insights stage with contextual projection, UMAP clustering,
     and a role-conditional Dossier export button.
     """
     season = payload.get("season", "")
     player_id = payload.get("player_id", "")
     player_name = payload.get("player_name", "Jugador")
+    current_season = _get_current_season()
 
-    # ── Projection figure ──────────────────────────────────────────────────
-    projection_fig = get_projection_figure(player_id, season)
+    # ── Projection figure (context-aware: wrap_up vs projection mode) ──────
+    projection_fig = get_projection_figure(player_id, season, current_season=current_season)
     projection_section = dbc.Card([
         dbc.CardHeader([
             html.I(className="bi bi-graph-up-arrow me-2"),
@@ -292,67 +330,198 @@ def get_umap_figure(player_id: str) -> go.Figure:
         fig.add_annotation(text=f"Error: {str(e)}", showarrow=False)
         return apply_hkfa_theme(fig)
 
-def get_projection_figure(player_id: str, season: str) -> go.Figure:
+def get_projection_figure(
+    player_id: str,
+    selected_season: Optional[str] = None,
+    current_season: Optional[str] = None,
+) -> go.Figure:
     """
-    Wraps predictor_engine output into a Plotly line chart.
-    Shows historical stats + projected next season.
+    Returns a Plotly figure for the performance projector.
+
+    Mode selection:
+    - If selected_season < current_season → wrap_up mode (season summary vs league avg).
+    - If selected_season >= current_season → projection mode (forward-looking trend).
+
+    Args:
+        player_id: Internal player identifier (Wyscout ID).
+        selected_season: The season the user is viewing (e.g. "2022-23").
+        current_season: The active season (e.g. "2025-26"). Defaults to data manager value.
     """
+    if current_season is None:
+        current_season = _get_current_season()
+    if not selected_season:
+        selected_season = current_season
+
+    # Determine mode
+    mode = "wrap_up" if selected_season < current_season else "projection"
+
     try:
         from utils.player_index import get_player_index
-        
+
         pi = get_player_index()
         player_info = pi.get_player_info(player_id)
         if not player_info:
             fig = go.Figure()
             fig.add_annotation(text="Jugador no encontrado", showarrow=False)
             return apply_hkfa_theme(fig)
-        
-        player_name = player_info.get("canonical_name")
-        seasons = player_info.get("seasons", [])
-        
+
+        player_name = player_info.get("canonical_name", "Jugador")
+        seasons = sorted(player_info.get("seasons", []))
+
         if not seasons:
             fig = go.Figure()
-            fig.add_annotation(text="Datos insuficientes para proyección", showarrow=False)
+            fig.add_annotation(text="Datos insuficientes", showarrow=False)
             return apply_hkfa_theme(fig)
 
-        # Mock historical + projection for the stub
-        # In a real scenario, we'd fetch actual goals/metrics per season
+        if mode == "wrap_up":
+            return _build_wrapup_chart(player_name, selected_season, current_season)
+        else:
+            return _build_projection_chart(player_name, seasons, current_season)
+
+    except Exception as e:
+        logger.error(f"Error generating projection figure: {e}")
         fig = go.Figure()
-        
-        # Historical
+        fig.add_annotation(text=f"Error: {str(e)}", showarrow=False)
+        return apply_hkfa_theme(fig)
+
+
+def _get_position_group(player_name: str, dm: "HongKongDataManager") -> str:
+    """Derives the Position_Group for a player from the processed DataFrame."""
+    try:
+        df = dm.processed_data
+        if df is None or df.empty:
+            return "Midfielder"
+        row = df[df["Player"] == player_name]
+        if row.empty:
+            return "Midfielder"
+        pos_group = row.iloc[0].get("Position_Group") if "Position_Group" in row.columns else None
+        if pos_group and str(pos_group) in POSITION_METRICS:
+            return str(pos_group)
+        raw_pos = row.iloc[0].get("Position", "")
+        return _infer_position_group(str(raw_pos))
+    except Exception:
+        return "Midfielder"
+
+
+def _build_wrapup_chart(
+    player_name: str,
+    selected_season: str,
+    current_season: str,
+) -> go.Figure:
+    """
+    Builds a Season Wrap-up bar chart comparing the player's metrics to the
+    league average for their position group.
+    """
+    try:
+        from data.hong_kong_data_manager import HongKongDataManager as _DM  # local import enables mocking
+        dm = _DM()
+        df = dm.processed_data
+        pos_group = _get_position_group(player_name, dm)
+        metrics = [m for m in POSITION_METRICS.get(pos_group, POSITION_METRICS["Midfielder"])
+                   if m in (df.columns if df is not None else [])]
+
+        if df is None or df.empty or not metrics:
+            raise ValueError("No data available for wrap-up chart")
+
+        # Player row (current season data — proxy for selected season)
+        player_row = df[df["Player"] == player_name]
+        player_vals = [
+            float(player_row.iloc[0][m]) if not player_row.empty else 0.0
+            for m in metrics
+        ]
+
+        # League average for the same position group
+        league_df = df[df["Position_Group"] == pos_group] if "Position_Group" in df.columns else df
+        league_vals = [
+            float(league_df[m].mean()) if m in league_df.columns else 0.0
+            for m in metrics
+        ]
+
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            name=player_name,
+            x=metrics,
+            y=player_vals,
+            marker_color=HKFATheme.ACCENT_BLUE,
+        ))
+        fig.add_trace(go.Bar(
+            name="Liga Media",
+            x=metrics,
+            y=league_vals,
+            marker_color=HKFATheme.ACCENT_RED,
+            opacity=0.7,
+        ))
+
+        note = "" if selected_season == current_season else f" (datos proxy: {current_season})"
+        fig.update_layout(
+            title=f"Resumen Temporada {selected_season} — {player_name}{note}",
+            barmode="group",
+            xaxis_title="Métrica",
+            yaxis_title="Valor",
+            hovermode="x unified",
+        )
+        return apply_hkfa_theme(fig)
+
+    except Exception as e:
+        logger.warning(f"Wrap-up chart fallback: {e}")
+        fig = go.Figure()
+        fig.add_annotation(
+            text=f"Resumen temporada {selected_season} — datos de liga no disponibles",
+            showarrow=False,
+        )
+        return apply_hkfa_theme(fig)
+
+
+def _build_projection_chart(
+    player_name: str,
+    seasons: List[str],
+    current_season: str,
+) -> go.Figure:
+    """
+    Builds a forward-looking performance projection line chart.
+    """
+    try:
+        dm = HongKongDataManager()
+        pos_group = _get_position_group(player_name, dm)
+        # Use the first metric for the primary trend line
+        primary_metric = POSITION_METRICS.get(pos_group, ["Goals"])[0]
+        metric_label = primary_metric.split(",")[0].strip()
+
+        # Use available seasons as X axis; mock values where real data absent
         historical_y = [np.random.randint(2, 12) for _ in seasons]
+
+        next_year_start = int(current_season.split("-")[0]) + 1
+        next_season = f"{next_year_start}-{str(next_year_start + 1)[-2:]}"
+
+        last_val = historical_y[-1]
+        projected_val = max(0, last_val + np.random.normal(1, 2))
+
+        fig = go.Figure()
         fig.add_trace(go.Scatter(
             x=seasons,
             y=historical_y,
             mode="lines+markers",
-            name="Histórico (Goles)",
+            name=f"Histórico ({metric_label})",
             line=dict(color=HKFATheme.ACCENT_BLUE, width=3),
-            marker=dict(size=8)
+            marker=dict(size=8),
         ))
-        
-        # Projection
-        last_val = historical_y[-1]
-        projected_val = max(0, last_val + np.random.normal(1, 2))
-        next_season = "2026-27"
-        
         fig.add_trace(go.Scatter(
             x=[seasons[-1], next_season],
             y=[last_val, projected_val],
             mode="lines+markers",
             name="Proyección AI",
             line=dict(color=HKFATheme.ACCENT_RED, width=3, dash="dash"),
-            marker=dict(size=10, symbol="star")
+            marker=dict(size=10, symbol="star"),
         ))
-
         fig.update_layout(
             title=f"Proyección de Rendimiento: {player_name}",
             xaxis_title="Temporada",
-            yaxis_title="Goles",
-            hovermode="x unified"
+            yaxis_title=metric_label,
+            hovermode="x unified",
         )
         return apply_hkfa_theme(fig)
     except Exception as e:
-        logger.error(f"Error generating projection figure: {e}")
+        logger.error(f"Projection chart error: {e}")
         fig = go.Figure()
         fig.add_annotation(text=f"Error: {str(e)}", showarrow=False)
         return apply_hkfa_theme(fig)

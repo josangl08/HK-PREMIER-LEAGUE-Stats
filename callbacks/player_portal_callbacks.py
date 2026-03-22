@@ -25,33 +25,72 @@ _COLOR_MAP = {
 
 
 def _render_milestone_item(milestone: dict, index: int) -> dbc.ListGroupItem:
-    """Renders a single timeline milestone as a clickable list item."""
+    """Renders a single timeline milestone as a clickable list item with optional sub-list."""
     m_type = milestone.get("type", "career")
     icon_cls = _ICON_MAP.get(m_type, "bi-circle")
     color = _COLOR_MAP.get(m_type, "secondary")
+    payload = milestone.get("payload", {})
+    matches = payload.get("matches", [])
+    
     date_str = ""
     if milestone.get("date"):
         try:
-            date_str = milestone["date"].strftime("%d/%m/%Y")
+            from datetime import datetime
+            if isinstance(milestone["date"], str):
+                dt = datetime.fromisoformat(milestone["date"].replace('Z', '+00:00'))
+            else:
+                dt = milestone["date"]
+            date_str = dt.strftime("%d/%m/%Y")
         except Exception:
             date_str = str(milestone["date"])[:10]
 
-    return dbc.ListGroupItem(
+    # Sub-list of matches (only for career type if matches exist)
+    has_matches = m_type == "career" and len(matches) > 0
+    
+    toggle_icon = html.I(
+        className="bi bi-chevron-down ms-auto small text-muted",
+        id={"type": "match-history-toggle", "index": index},
+        style={"cursor": "pointer", "padding": "4px"}
+    ) if has_matches else None
+
+    match_rows = []
+    if has_matches:
+        for m in matches:
+            match_rows.append(html.Div([
+                html.Small(m.get("date", ""), className="text-muted", style={"width": "75px"}),
+                html.Small(m.get("opponent", "Rival"), className="fw-normal flex-grow-1 text-truncate px-2"),
+                html.Small(f"{m.get('minutes_played', 0)}'", className="text-muted text-end", style={"width": "40px"}),
+            ], className="d-flex border-bottom py-1 align-items-center"))
+
+    sub_list = dbc.Collapse(
+        html.Div(match_rows, className="ps-4 pe-2 pb-2 bg-light rounded-bottom"),
+        id={"type": "match-history-collapse", "index": index},
+        is_open=False,
+    ) if has_matches else None
+
+    return dbc.ListGroupItem([
         html.Div([
             html.Div([
                 html.Span(
                     html.I(className=f"bi {icon_cls}"),
                     className=f"badge rounded-pill bg-{color} me-2",
+                    id={"type": "timeline-milestone", "index": index},
+                    n_clicks=0,
                 ),
-                html.Span(milestone.get("label", ""), className="small fw-semibold"),
-            ], className="d-flex align-items-center"),
-            html.Small(date_str, className="text-muted ms-4"),
-        ]),
-        id={"type": "timeline-milestone", "index": index},
-        action=True,
-        className="border-0 py-2 px-2",
-        style={"cursor": "pointer", "borderRadius": "8px"},
-        n_clicks=0,
+                html.Div([
+                    html.Span(milestone.get("label", ""), className="small fw-semibold", 
+                              id={"type": "timeline-milestone-label", "index": index}),
+                    html.Br(),
+                    html.Small(date_str, className="text-muted"),
+                ], id={"type": "timeline-milestone-text", "index": index}),
+            ], className="d-flex align-items-center flex-grow-1", style={"cursor": "pointer"}),
+            toggle_icon
+        ], className="d-flex align-items-center py-2 px-2"),
+        sub_list
+    ],
+        action=False, # Changed to False to handle internal clicks better
+        className="border-0 p-0",
+        style={"borderRadius": "8px"},
     )
 
 
@@ -167,6 +206,31 @@ def register_player_portal_callbacks(app):
         except Exception as e:
             logger.error(f"update_stage error: {e}")
             return dbc.Alert("Error al renderizar el escenario.", color="danger")
+
+
+    # ------------------------------------------------------------------ #
+    # 5.3  Match-history expand/collapse toggle                           #
+    # Gemini tasks 5.1+5.2 create the toggle buttons and Collapse        #
+    # components with IDs {"type": "match-history-toggle", "index": N}   #
+    # and {"type": "match-history-collapse", "index": N} respectively.   #
+    # ------------------------------------------------------------------ #
+    @app.callback(
+        Output({"type": "match-history-collapse", "index": ALL}, "is_open"),
+        Input({"type": "match-history-toggle", "index": ALL}, "n_clicks"),
+        State({"type": "match-history-collapse", "index": ALL}, "is_open"),
+        prevent_initial_call=True,
+    )
+    def toggle_match_history(n_clicks_list, is_open_list):
+        """Toggles the visibility of the match-history sub-list for the triggered milestone."""
+        if not ctx.triggered_id:
+            return no_update
+
+        triggered_index = ctx.triggered_id.get("index")
+        result = list(is_open_list)
+        for i, (nc, current_open) in enumerate(zip(n_clicks_list, is_open_list)):
+            if i == triggered_index and nc:
+                result[i] = not current_open
+        return result
 
 
 def _serialize_milestones(milestones: list) -> list:

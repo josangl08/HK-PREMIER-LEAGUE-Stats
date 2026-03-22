@@ -4,6 +4,7 @@
 import csv as _csv
 from pathlib import Path
 
+import numpy as np
 from dash import Input, Output, State, callback, clientside_callback, html, no_update
 import dash_bootstrap_components as dbc
 from flask_login import login_user, logout_user
@@ -139,7 +140,7 @@ def login_callback(n_clicks, username, password):
         if user:
             login_user(user)
             logger.info(f"Login exitoso para {username} (role={user.role})")
-            redirect_path = '/' if user.role == 'admin' else '/performance'
+            redirect_path = '/player-portal' if user.role == 'player' else '/agent-portal' if user.role == 'agent' else '/'
             return None, 'success', redirect_path
         else:
             logger.warning(f"Login fallido para {username}")
@@ -261,6 +262,12 @@ def handle_registration(n_clicks, username, password, confirm_password,
                 no_update
             ) + _NO_AGENT_ERRORS
 
+        if AuthRepository.get_user(username) is not None:
+            return (
+                _field_warning(f"El nombre de usuario '{username}' ya está en uso."),
+                None, None, None, no_update
+            ) + _NO_AGENT_ERRORS
+
         try:
             created = AuthRepository.create_user(
                 username=username,
@@ -279,8 +286,9 @@ def handle_registration(n_clicks, username, password, confirm_password,
                 return (None, None, None, None, '/login') + _NO_AGENT_ERRORS
             else:
                 return (
-                    _field_warning(f"El nombre de usuario '{username}' ya está en uso."),
-                    None, None, None, no_update
+                    None, None, None,
+                    _error_alert("Error interno al guardar la cuenta. Inténtalo de nuevo."),
+                    no_update
                 ) + _NO_AGENT_ERRORS
         except Exception as e:
             logger.error(f"Error durante el registro de {username}: {e}")
@@ -312,6 +320,12 @@ def handle_registration(n_clicks, username, password, confirm_password,
         'license_number': (agent_license or '').strip() or None,
     }
 
+    if AuthRepository.get_user(username) is not None:
+        return (
+            _field_warning(f"El nombre de usuario '{username}' ya está en uso."),
+            None, None, None, no_update
+        ) + _NO_AGENT_ERRORS
+
     try:
         created = AuthRepository.create_user(
             username=username,
@@ -324,8 +338,9 @@ def handle_registration(n_clicks, username, password, confirm_password,
             return (None, None, None, None, '/login') + _NO_AGENT_ERRORS
         else:
             return (
-                _field_warning(f"El nombre de usuario '{username}' ya está en uso."),
-                None, None, None, no_update
+                None, None, None,
+                _error_alert("Error interno al guardar la cuenta. Inténtalo de nuevo."),
+                no_update
             ) + _NO_AGENT_ERRORS
     except Exception as e:
         logger.error(f"Error durante el registro de agente {username}: {e}")
@@ -380,7 +395,7 @@ def _extract_player_profile(dm, player_name: str, player_id: str = None) -> dict
         overview = dm.get_player_overview(player_name)
         basic = overview.get('basic_info', {})
         if any(v is not None for v in basic.values()):
-            return {
+            return _sanitize_profile({
                 'team': basic.get('team'),
                 'position': basic.get('position'),
                 'position_group': basic.get('position_group'),
@@ -390,7 +405,7 @@ def _extract_player_profile(dm, player_name: str, player_id: str = None) -> dict
                 'weight': basic.get('weight'),
                 'market_value': basic.get('market_value'),
                 'season': dm.current_season,
-            }
+            })
     except Exception as e:
         logger.warning(f"Lookup en temporada actual fallido para '{player_name}': {e}")
 
@@ -402,7 +417,7 @@ def _extract_player_profile(dm, player_name: str, player_id: str = None) -> dict
             logger.info(f"Leyendo perfil de '{player_name}' desde CSV de {last_season}")
             profile = _read_profile_from_csv(player_name, last_season)
             if profile:
-                return profile
+                return _sanitize_profile(profile)
 
     logger.warning(f"No se encontró perfil para '{player_name}' en ninguna temporada.")
     return {}
@@ -446,6 +461,21 @@ def _read_profile_from_csv(player_name: str, season: str) -> dict:
         logger.warning(f"Error leyendo CSV para '{player_name}' ({season}): {e}")
 
     return {}
+
+
+def _sanitize_profile(profile: dict) -> dict:
+    """Convierte tipos NumPy a tipos Python nativos para serialización JSON."""
+    result = {}
+    for k, v in profile.items():
+        if isinstance(v, np.integer):
+            result[k] = int(v)
+        elif isinstance(v, np.floating):
+            result[k] = None if np.isnan(v) else float(v)
+        elif isinstance(v, np.bool_):
+            result[k] = bool(v)
+        else:
+            result[k] = v
+    return result
 
 
 def _infer_position_group(position: str) -> str | None:

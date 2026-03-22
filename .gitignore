@@ -225,6 +225,7 @@ venv_HKS/
 tests/
 docs/
 openspec/
+screenshots/
 
 # Herramientas de IA y automatización (MCP/Codex/etc)
 .gemini/

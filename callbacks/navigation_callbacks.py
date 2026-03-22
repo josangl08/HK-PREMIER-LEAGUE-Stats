@@ -23,7 +23,7 @@ PUBLIC_PATHS = ['/login', '/register']
 # Mapa de rutas permitidas por rol (None = acceso total)
 ROLE_ALLOWED_PATHS = {
     'admin': None,                                      # Acceso completo a todas las rutas
-    'player': ['/performance', '/ai-insights', '/player-portal'],
+    'player': ['/', '/performance', '/ai-insights', '/player-portal'],
     'agent': ['/agent-portal', '/performance'],         # Sin /ai-insights (predictor callbacks)
 }
 

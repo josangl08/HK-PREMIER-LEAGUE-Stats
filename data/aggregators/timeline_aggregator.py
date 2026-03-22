@@ -1,5 +1,5 @@
 # ABOUTME: Aggregator for player timeline milestones.
-# ABOUTME: Combines historical season data with upcoming fixtures and past match events.
+# ABOUTME: Combines historical season data, fixtures, and Transfermarkt match history per season.
 
 import logging
 from datetime import datetime, timezone, timedelta
@@ -103,15 +103,25 @@ class TimelineAggregator:
                     }
                 })
 
-        # 5. Add Career Milestones (career)
+        # 5. Add Career Milestones (career) with historical match sub-milestones
         seasons = player_info.get("seasons", [])
         for season in seasons:
             try:
-                # 2024-25 -> May 2025
+                # "2024-25" → May 2025
                 year_end = int(season.split('-')[0]) + 1
                 season_date = datetime(year_end, 5, 30, tzinfo=timezone.utc)
-            except:
+            except Exception:
                 season_date = now_utc - timedelta(days=365)
+
+            # Derive Transfermarkt saison_id (start year) and fetch match history
+            matches: List[Dict[str, Any]] = []
+            try:
+                season_start_year = season.split('-')[0]
+                from data.extractors.transfermarkt_extractor import TransfermarktExtractor
+                extractor = TransfermarktExtractor()
+                matches = extractor.get_match_history(player_id, season_start_year)
+            except Exception as match_exc:
+                logger.debug(f"Match history unavailable for {player_id}/{season}: {match_exc}")
 
             timeline.append({
                 "type": "career",
@@ -121,7 +131,8 @@ class TimelineAggregator:
                 "payload": {
                     "season": season,
                     "player_id": player_id,
-                    "player_name": player_name
+                    "player_name": player_name,
+                    "matches": matches,
                 }
             })
 

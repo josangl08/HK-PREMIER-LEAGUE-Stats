@@ -66,6 +66,8 @@ def _info_card(msg: str) -> dbc.Alert:
     Output("ai-predictor-player-dropdown", "options"),
     Output("ai-similarity-player-dropdown", "options"),
     Output("ai-similarity-season-dropdown", "options"),
+    Output("ai-predictor-player-dropdown", "value"),
+    Output("ai-similarity-player-dropdown", "value"),
     Input("ai-insights-role-store", "data"),
     prevent_initial_call=False,
 )
@@ -74,17 +76,17 @@ def populate_dropdowns(role):
     players = _player_options()
     seasons = _season_options()
 
-    # For player role, restrict predictor to own player profile
+    # For player role, restrict both predictor and similarity to own player
     if role == "player":
         try:
             own_player = getattr(current_user, "player_name", None)
             if own_player:
-                players_predictor = [{"label": own_player, "value": own_player}]
-                return players_predictor, players, seasons
+                own_opts = [{"label": own_player, "value": own_player}]
+                return own_opts, own_opts, seasons, own_player, own_player
         except Exception:
             pass
 
-    return players, players, seasons
+    return players, players, seasons, None, None
 
 
 # ──────────────────────────────────────────────────────────────────────────────

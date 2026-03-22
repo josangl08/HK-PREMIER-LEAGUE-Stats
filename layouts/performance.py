@@ -1,5 +1,6 @@
 from dash import html, dcc
 import dash_bootstrap_components as dbc
+from flask_login import current_user
 from layouts.performance_views.shared_components import (
     create_season_selector,
     create_team_selector,
@@ -14,10 +15,19 @@ def create_performance_layout():
     """
     Crea el layout del dashboard de performance.
     Versión corregida con mejor espaciado.
+    Para rol player: oculta los filtros y pre-carga al jugador autenticado.
 
     Returns:
         Layout del dashboard de performance
     """
+    try:
+        is_player = current_user.is_authenticated and current_user.role == 'player'
+        own_player = getattr(current_user, 'player_name', None) if is_player else None
+    except Exception:
+        is_player = False
+        own_player = None
+
+    filters_style = {'display': 'none'} if is_player else {}
 
     layout = html.Div(
         [
@@ -69,7 +79,7 @@ def create_performance_layout():
                                                         [
                                                             create_season_selector(),
                                                             create_team_selector(),
-                                                            create_player_selector(),
+                                                            create_player_selector(default_value=own_player),
                                                         ],
                                                         className="mb-3",
                                                     ),
@@ -88,7 +98,8 @@ def create_performance_layout():
                                     )
                                 ]
                             )
-                        ]
+                        ],
+                        style=filters_style,
                     ),
                     # Indicadores de estado
                     dbc.Row(

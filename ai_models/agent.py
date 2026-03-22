@@ -17,6 +17,9 @@ logger = logging.getLogger(__name__)
 # Module-level cached compiled graphs (lazy-initialized)
 _compiled_flows: Dict[str, Any] = {}
 
+# Flow name aliases for backward compatibility and feature naming consistency
+FLOW_ALIASES = {"player_analysis": "scouting"}
+
 
 def create_agent(flow: str = "scouting") -> Any:
     """
@@ -34,6 +37,9 @@ def create_agent(flow: str = "scouting") -> Any:
         EnvironmentError: If GOOGLE_API_KEY is not set.
         ValueError: If flow name is not recognised.
     """
+    # Normalize flow name via aliases
+    flow = FLOW_ALIASES.get(flow, flow)
+
     api_key = os.environ.get("GOOGLE_API_KEY", "").strip().strip('"').strip("'")
     if not api_key:
         raise EnvironmentError(

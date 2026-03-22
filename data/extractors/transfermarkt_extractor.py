@@ -1,3 +1,6 @@
+# ABOUTME: Extractor for Transfermarkt data (team injuries and player match history).
+# ABOUTME: Provides get_match_history() for historical match stats per player/season.
+
 import requests
 from bs4 import BeautifulSoup, Tag
 import pandas as pd
@@ -672,16 +675,143 @@ class TransfermarktExtractor:
     def clear_cache(self):
         """Limpia el cache de equipos y lesiones."""
         cleared = []
-        
+
         if self.teams_cache_file.exists():
             self.teams_cache_file.unlink()
             cleared.append("equipos")
-        
+
         if self.injuries_cache_file.exists():
             self.injuries_cache_file.unlink()
             cleared.append("lesiones")
-        
+
         if cleared:
             self.logger.info(f"Cache eliminado: {', '.join(cleared)}")
         else:
             self.logger.info("No había cache para eliminar")
+
+    # ------------------------------------------------------------------ #
+    # Match History                                                        #
+    # ------------------------------------------------------------------ #
+
+    def get_match_history(self, player_id: str, season_id: str) -> List[Dict]:
+        """
+        Returns the list of matches played by a player in a given season.
+
+        Each dict contains: date, opponent, competition, result,
+        minutes_played, goals.
+
+        Args:
+            player_id: Transfermarkt numeric player ID (string).
+            season_id: Season start year as string, e.g. "2023" for 2023-24.
+
+        Returns:
+            List of match dicts, or [] if data is unavailable.
+
+        Note:
+            player_id must be a valid Transfermarkt numeric ID.
+            Our internal Wyscout IDs are different; callers should map them
+            to TM IDs via a player-level configuration before calling this.
+        """
+        cache_file = self.cache_dir / f"match_history_{player_id}_{season_id}.json"
+
+        # ── File-based cache (24 h TTL) ───────────────────────────────────
+        if cache_file.exists():
+            try:
+                with open(cache_file, "r", encoding="utf-8") as f:
+                    cached = json.load(f)
+                cache_ts = datetime.fromisoformat(cached.get("timestamp", "2000-01-01"))
+                if datetime.now() - cache_ts < timedelta(hours=24):
+                    self.logger.info(
+                        f"Match history cache hit: player={player_id} season={season_id}"
+                    )
+                    return cached.get("matches", [])
+            except Exception as e:
+                self.logger.warning(f"Error reading match history cache: {e}")
+
+        # ── Scrape ────────────────────────────────────────────────────────
+        url = (
+            f"{self.base_url}/x/leistungsdaten/spieler/{player_id}"
+            f"/plus/1?saison_id={season_id}"
+        )
+        soup = self._make_request(url)
+        if not soup:
+            self.logger.warning(
+                f"Match history: no response for player={player_id} season={season_id}"
+            )
+            return []
+
+        matches = self._parse_match_history_table(soup)
+
+        # ── Persist to cache ──────────────────────────────────────────────
+        try:
+            with open(cache_file, "w", encoding="utf-8") as f:
+                json.dump(
+                    {"timestamp": datetime.now().isoformat(), "matches": matches},
+                    f,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+        except Exception as e:
+            self.logger.warning(f"Error writing match history cache: {e}")
+
+        return matches
+
+    def _parse_match_history_table(self, soup: BeautifulSoup) -> List[Dict]:
+        """
+        Parses the Transfermarkt match performance table.
+
+        Returns a list of dicts with keys:
+        date, opponent, competition, result, minutes_played, goals.
+        """
+        matches: List[Dict] = []
+        try:
+            table = soup.find("table", {"class": "items"})
+            if not table or not isinstance(table, Tag):
+                return []
+
+            rows = table.find_all("tr")
+            for row in rows:
+                if not isinstance(row, Tag):
+                    continue
+                cells = row.find_all("td")
+                if len(cells) < 6:
+                    continue
+                try:
+                    date_text = cells[1].get_text(strip=True) if len(cells) > 1 else ""
+                    competition = cells[2].get_text(strip=True) if len(cells) > 2 else ""
+
+                    # Opponent from a link inside the cell
+                    opp_cell = cells[3] if len(cells) > 3 else None
+                    opponent = ""
+                    if isinstance(opp_cell, Tag):
+                        opp_link = opp_cell.find("a")
+                        opponent = (
+                            opp_link.get_text(strip=True)
+                            if isinstance(opp_link, Tag)
+                            else opp_cell.get_text(strip=True)
+                        )
+
+                    result = cells[4].get_text(strip=True) if len(cells) > 4 else ""
+                    minutes_text = cells[5].get_text(strip=True) if len(cells) > 5 else "0"
+                    minutes_played = self._parse_number(re.sub(r"[^\d]", "", minutes_text))
+                    goals = self._parse_number(cells[6].get_text(strip=True)) if len(cells) > 6 else 0
+
+                    if not date_text or not opponent:
+                        continue
+
+                    matches.append({
+                        "date": date_text,
+                        "opponent": opponent,
+                        "competition": competition,
+                        "result": result,
+                        "minutes_played": minutes_played,
+                        "goals": goals,
+                    })
+                except Exception as row_exc:
+                    self.logger.debug(f"Skipping match row: {row_exc}")
+                    continue
+
+        except Exception as e:
+            self.logger.error(f"Error parsing match history table: {e}")
+
+        return matches

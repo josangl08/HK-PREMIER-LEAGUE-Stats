@@ -64,12 +64,13 @@ def create_team_selector(clearable=True):
     )
 
 
-def create_player_selector(clearable=True):
+def create_player_selector(clearable=True, default_value=None):
     """
     Create player dropdown selector.
 
     Args:
         clearable: Allow clearing selection (bool)
+        default_value: Pre-selected player value (str, optional)
 
     Returns:
         dbc.Col: Player selector column
@@ -83,6 +84,7 @@ def create_player_selector(clearable=True):
                     placeholder="All players...",
                     className="mb-3",
                     clearable=clearable,
+                    value=default_value,
                 ),
                 className="filter-container",
             ),
