@@ -1,4 +1,4 @@
-# ABOUTME: Aggregator for player timeline milestones.
+# ABOUTME: Aggregator for player timeline milestones (Feature G).
 # ABOUTME: Combines historical season data, fixtures, and Transfermarkt match history per season.
 
 import logging
@@ -12,6 +12,12 @@ from data.managers.fixture_manager import get_fixture_manager
 from utils.player_index import get_player_index
 
 logger = logging.getLogger(__name__)
+
+# Manual mapping for Transfermarkt IDs (internal Wyscout/Slug -> TM Numeric ID)
+# Used for players where automatic name-based mapping is non-trivial or not yet implemented.
+TM_ID_MAP = {
+    "65492": "201111",  # Yapp Hung Fai
+}
 
 class TimelineAggregator:
     def __init__(self, data_manager: Optional['HongKongDataManager'] = None):
@@ -105,6 +111,15 @@ class TimelineAggregator:
 
         # 5. Add Career Milestones (career) with historical match sub-milestones
         seasons = player_info.get("seasons", [])
+        
+        # ── Transfermarkt ID resolution ───────────────────────────────────
+        tm_id = TM_ID_MAP.get(player_id)
+        if not tm_id:
+            # Simple fallback: if name contains special characters, use name-based lookup
+            # In a production system, this would call a TM search API.
+            # For now, we rely on TM_ID_MAP for Feature G demonstration.
+            pass
+
         for season in seasons:
             try:
                 # "2024-25" → May 2025
@@ -115,13 +130,14 @@ class TimelineAggregator:
 
             # Derive Transfermarkt saison_id (start year) and fetch match history
             matches: List[Dict[str, Any]] = []
-            try:
-                season_start_year = season.split('-')[0]
-                from data.extractors.transfermarkt_extractor import TransfermarktExtractor
-                extractor = TransfermarktExtractor()
-                matches = extractor.get_match_history(player_id, season_start_year)
-            except Exception as match_exc:
-                logger.debug(f"Match history unavailable for {player_id}/{season}: {match_exc}")
+            if tm_id:
+                try:
+                    season_start_year = season.split('-')[0]
+                    from data.extractors.transfermarkt_extractor import TransfermarktExtractor
+                    extractor = TransfermarktExtractor()
+                    matches = extractor.get_match_history(tm_id, season_start_year)
+                except Exception as match_exc:
+                    logger.debug(f"Match history unavailable for {player_id}/{season}: {match_exc}")
 
             timeline.append({
                 "type": "career",

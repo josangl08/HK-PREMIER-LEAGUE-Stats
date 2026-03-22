@@ -1,4 +1,4 @@
-# ABOUTME: Helper functions for rendering Stage scenarios and AI widgets.
+# ABOUTME: Helper functions for rendering Stage scenarios and AI widgets (Feature G).
 # ABOUTME: Dispatches rendering for post-match, pre-match, and career-insights with contextual projector.
 
 import logging
@@ -339,8 +339,8 @@ def get_projection_figure(
     Returns a Plotly figure for the performance projector.
 
     Mode selection:
-    - If selected_season < current_season → wrap_up mode (season summary vs league avg).
-    - If selected_season >= current_season → projection mode (forward-looking trend).
+    - If selected_season != current_season → wrap_up mode (season summary vs league avg).
+    - If selected_season == current_season → projection mode (forward-looking trend).
 
     Args:
         player_id: Internal player identifier (Wyscout ID).
@@ -352,8 +352,8 @@ def get_projection_figure(
     if not selected_season:
         selected_season = current_season
 
-    # Determine mode
-    mode = "wrap_up" if selected_season < current_season else "projection"
+    # Determine mode: Only current season gets projection; others get wrap-up summary
+    mode = "wrap_up" if selected_season != current_season else "projection"
 
     try:
         from utils.player_index import get_player_index
