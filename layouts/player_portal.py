@@ -6,6 +6,23 @@ import dash_bootstrap_components as dbc
 from utils.skeleton_components import create_skeleton_timeline, create_skeleton_stage
 
 
+def _build_year_navigator() -> html.Div:
+    """Sticky horizontal year-chip bar above the timeline milestone list."""
+    return html.Div(
+        id="year-navigator",
+        children=[],  # populated by update_year_navigator callback
+        style={
+            "overflowX": "auto",
+            "whiteSpace": "nowrap",
+            "position": "sticky",
+            "top": 0,
+            "zIndex": 10,
+            "paddingBottom": "6px",
+            "marginBottom": "8px",
+        },
+    )
+
+
 def _build_timeline_component() -> html.Div:
     """Sticky sidebar timeline — desktop (d-none d-md-flex)."""
     return html.Div(
@@ -15,6 +32,7 @@ def _build_timeline_component() -> html.Div:
                 html.I(className="bi bi-clock-history me-2"),
                 html.Span("Timeline", className="fw-bold"),
             ], className="mb-3", style={"color": "var(--bs-body-color)"}),
+            _build_year_navigator(),
             dcc.Loading(
                 id="timeline-loading",
                 type="dot",
@@ -79,6 +97,11 @@ def create_player_portal_layout(user_role: str = "player") -> html.Div:
     user_role is passed for server-side conditional rendering (e.g. Dossier button).
     """
     return html.Div([
+        # Stores (static — populated by callbacks)
+        dcc.Store(id="milestones-data-store"),
+        dcc.Store(id="selected-year-store", data=None),
+        dcc.Store(id="year-nav-scroll-dummy"),  # sink for year-navigator clientside scroll
+
         dbc.Container([
             # Page header
             dbc.Row([

@@ -72,11 +72,33 @@ TEAM_MAPPING: dict[str, str] = {
     "理工大學體育會": "Hong Kong Polytechnic University",
 }
 
-# Prefixes to strip from team names in ICS
+# Prefixes to strip from team names in ICS (ordered: longest first to avoid partial matches)
 TEAM_PREFIXES_TO_STRIP = [
-    "(改期)", "改期", "【賽事延期】", "[賽事取消]", "(補賽)", "【補賽】", "(賽事延期)",
-    "Reschedule", "(Reschedule)", " "
+    "【賽事延期】", "[賽事取消]", "【補賽】", "【賽事延期】",
+    "(賽事延期至\\d+月\\d+日)",  # regex pattern, handled separately
+    "(Reschedule)", "Reschedule",
+    "(改期) ", "(改期)", "改期 ", "改期",
+    "(補賽) ", "(補賽)",
+    "(賽事延期) ", "(賽事延期)",
+    "(賽事取消)",
 ]
+
+# English name → English (TheSportsDB canonical)
+TEAM_ENGLISH_ALIASES: dict[str, str] = {
+    "Eastern Long Lions": "Eastern",
+    "Best Union Yuen Long": "Yuen Long",
+    "Wofoo Tai Po": "Tai Po",
+    "R&F": "R&F",
+    "Kwoon Chung Southern": "Southern District",
+    "HKFC": "Hong Kong Football Club",
+}
+
+# Additional Chinese team names not covered by TEAM_MAPPING
+TEAM_MAPPING.update({
+    "標準灝天": "Wong Tai Sin",     # Historical sponsor-combined name for 灝天黃大仙
+    "理文流浪": "Lee Man",           # Historical merged/joint team (理文 as primary)
+    "標準灝天黃大仙": "Wong Tai Sin",
+})
 
 # Mapping: Traditional Chinese competition names → English
 COMPETITION_MAPPING: dict[str, str] = {
@@ -161,15 +183,78 @@ def _parse_summary(summary: str) -> tuple[str, str, str] | None:
     return home_zh, away_zh, competition
 
 
+def _strip_team_name(raw: str) -> str:
+    """
+    Strip status prefixes, trailing round numbers, and misc symbols from a raw ICS team name.
+
+    Examples:
+        '(改期)傑志'        → '傑志'
+        '改期 標準流浪'     → '標準流浪'
+        '【賽事延期】香港飛馬' → '香港飛馬'
+        '[賽事取消] 東方龍獅' → '東方龍獅'
+        '南華 (3)'          → '南華'
+        '灝天黃大仙(8)'     → '灝天黃大仙'
+        '香港飛馬*'         → '香港飛馬'
+        '(賽事延期至11月15日)香港飛馬' → '香港飛馬'
+    """
+    name = raw.strip()
+
+    # Strip long date-based postponement prefix: (賽事延期至…)
+    name = re.sub(r"^\([^)]*賽事延期[^)]*\)", "", name).strip()
+
+    # Strip known text prefixes (longest first avoids partial stripping)
+    prefixes = [
+        "【賽事延期】", "[賽事取消]", "【補賽】",
+        "(Reschedule)", "Reschedule",
+        "(改期) ", "(改期)", "改期 ", "改期",
+        "(補賽) ", "(補賽)",
+        "(賽事延期) ", "(賽事延期)",
+        "(賽事取消)",
+    ]
+    for prefix in prefixes:
+        if name.startswith(prefix):
+            name = name[len(prefix):].strip()
+            break  # only one prefix expected
+
+    # Strip trailing round number: " (3)", "(8)", " (10)"
+    name = re.sub(r"\s*\(\d+\)\s*$", "", name).strip()
+
+    # Strip trailing asterisk used for rescheduled fixtures
+    name = name.rstrip("*").strip()
+
+    return name
+
+
 def _normalize_team(chinese_name: str) -> str:
-    """Look up English name from TEAM_MAPPING; log a warning and return raw name on miss."""
-    english = TEAM_MAPPING.get(chinese_name)
-    if not english:
+    """
+    Normalize a raw ICS team name to its English canonical form.
+
+    Applies prefix/suffix stripping before TEAM_MAPPING lookup.
+    Returns raw name with a warning if no match found.
+    """
+    # Skip known placeholder/TBD entries silently
+    _SKIP_NAMES = {"(待定)", "SS01勝方", "SS02勝方", "LC01勝方", "SS01勝方", "SS02勝方"}
+    if chinese_name in _SKIP_NAMES or re.match(r"^(SS|LC)\d+勝方$", chinese_name):
+        return chinese_name
+
+    cleaned = _strip_team_name(chinese_name)
+
+    # Check TEAM_MAPPING with cleaned name
+    english = TEAM_MAPPING.get(cleaned)
+    if english:
+        return english
+
+    # Check English alias mapping (for English-named entries in ICS)
+    english = TEAM_ENGLISH_ALIASES.get(cleaned)
+    if english:
+        return english
+
+    # If still not found, warn once (only if name is non-trivial)
+    if cleaned and not re.match(r"^\(?(待定|TBD|TBC)\)?$", cleaned):
         logger.warning(
             f"Team '{chinese_name}' not found in TEAM_MAPPING — using raw name as fallback."
         )
-        return chinese_name
-    return english
+    return cleaned or chinese_name
 
 
 def _normalize_competition(raw: str) -> str:

@@ -1,4 +1,11 @@
 import os
+
+# Configure Numba threading before any import that triggers numba/umap.
+# The default 'workqueue' layer crashes under concurrent Flask threads.
+# 'omp' or 'tbb' are thread-safe alternatives; fall back to single-threaded workqueue.
+os.environ.setdefault("NUMBA_THREADING_LAYER", "omp")
+os.environ.setdefault("NUMBA_NUM_THREADS", "1")
+
 import dash
 from dash import html, dcc
 import dash_bootstrap_components as dbc
@@ -38,6 +45,9 @@ app = dash.Dash(
         dbc.themes.BOOTSTRAP,
         "https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap",
         "https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"
+    ],
+    external_scripts=[
+        "https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"
     ],
     meta_tags=[
         {"name": "viewport", "content": "width=device-width, initial-scale=1"},

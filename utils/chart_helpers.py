@@ -158,6 +158,27 @@ def apply_hkfa_theme(fig: go.Figure) -> go.Figure:
     return fig
 
 
+def glass_figure_layout(fig: go.Figure) -> go.Figure:
+    """
+    Apply transparent backgrounds to a Plotly figure for glass-card visual coherence.
+
+    Applies HKFA theme first, then overrides paper_bgcolor and plot_bgcolor
+    to transparent so the figure blends with the glass-card surface.
+
+    Args:
+        fig: Plotly Figure object
+
+    Returns:
+        Figure with transparent backgrounds applied
+    """
+    fig = apply_hkfa_theme(fig)
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+    )
+    return fig
+
+
 # ============================================================================
 # SECTION 2: COMMON CHART CREATION PATTERNS
 # ============================================================================

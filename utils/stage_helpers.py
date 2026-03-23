@@ -2,6 +2,7 @@
 # ABOUTME: Dispatches rendering for post-match, pre-match, and career-insights with contextual projector.
 
 import logging
+import threading
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
@@ -9,9 +10,13 @@ from dash import html, dcc
 import dash_bootstrap_components as dbc
 from typing import Dict, List, Any, Optional
 
-from data.hong_kong_data_manager import HongKongDataManager
-from utils.chart_helpers import apply_hkfa_theme, HKFATheme
+from utils.app_context import get_hong_kong_data_manager
+from utils.chart_helpers import apply_hkfa_theme, glass_figure_layout, HKFATheme
 from utils.ai_helpers import umap_scatter_chart
+
+# Numba/UMAP is not thread-safe with the default workqueue layer.
+# This lock serializes concurrent calls to fit_umap across Flask threads.
+_umap_lock = threading.Lock()
 
 logger = logging.getLogger(__name__)
 
@@ -31,8 +36,7 @@ _CURRENT_SEASON_FALLBACK = "2025-26"
 def _get_current_season() -> str:
     """Returns the active season from the data manager, falling back to a constant."""
     try:
-        dm = HongKongDataManager()
-        return dm.current_season or _CURRENT_SEASON_FALLBACK
+        return get_hong_kong_data_manager().current_season or _CURRENT_SEASON_FALLBACK
     except Exception:
         return _CURRENT_SEASON_FALLBACK
 
@@ -89,12 +93,12 @@ def render_post_match(payload: Dict[str, Any]) -> html.Div:
     radar_labels = ["Goals", "Assists", "Pass Accuracy", "Minutes"]
 
     from utils.chart_helpers import create_radar_chart
-    radar_fig = create_radar_chart(
+    radar_fig = glass_figure_layout(create_radar_chart(
         values=radar_values,
         metrics=radar_labels,
         title=f"{player_name} — Season Percentiles",
         name=player_name,
-    )
+    ))
 
     from utils.chart_helpers import create_percentile_bars
     percentile_display = {
@@ -104,25 +108,39 @@ def render_post_match(payload: Dict[str, Any]) -> html.Div:
         "Minutes": percentiles.get("Minutes played", 0),
     }
 
+    # ── Rating-based glass modifier ─────────────────────────────────────────
+    rating = payload.get("rating") or player_stats.get("performance_stats", {}).get("rating")
+    try:
+        rating = float(rating) if rating is not None else None
+    except (ValueError, TypeError):
+        rating = None
+    glass_modifier = "glass-danger" if (rating is not None and rating < 6.0) else "glass-success"
+
+    # ── KPI icons with animate-glass-pulse (task 6.4) ─────────────────────
+    kpi_icon = html.I(className="bi bi-person-fill me-1 animate-glass-pulse")
+
     # ── Layout ─────────────────────────────────────────────────────────────
-    return html.Div([
-        header,
-        html.P([
-            html.I(className="bi bi-person-fill me-1"),
-            html.Span(f"{player_name}", className="fw-semibold me-2"),
-            html.Small(position, className="text-muted badge bg-secondary"),
-        ], className="mb-3"),
-        dbc.Row([
-            dbc.Col([
-                html.H6("Performance Radar", className="text-muted mb-2"),
-                dcc.Graph(figure=radar_fig, config={"displayModeBar": False}, className="w-100"),
-            ], width=12, md=7),
-            dbc.Col([
-                html.H6("Percentiles", className="text-muted mb-3"),
-                create_percentile_bars(percentile_display),
-            ], width=12, md=5),
+    return html.Div(
+        html.Div([
+            header,
+            html.P([
+                kpi_icon,
+                html.Span(f"{player_name}", className="fw-semibold me-2"),
+                html.Small(position, className="text-muted badge bg-secondary"),
+            ], className="mb-3"),
+            dbc.Row([
+                dbc.Col([
+                    html.H6("Performance Radar", className="text-muted mb-2"),
+                    dcc.Graph(figure=radar_fig, config={"displayModeBar": False}, className="w-100"),
+                ], width=12, md=7),
+                dbc.Col([
+                    html.H6("Percentiles", className="text-muted mb-3"),
+                    create_percentile_bars(percentile_display),
+                ], width=12, md=5),
+            ]),
         ]),
-    ])
+        className=f"glass-card {glass_modifier}",
+    )
 
 
 def render_pre_match(payload: Dict[str, Any]) -> html.Div:
@@ -167,7 +185,7 @@ def render_pre_match(payload: Dict[str, Any]) -> html.Div:
 
     # ── Game-Plan insight (rule-based) ─────────────────────────────────────
     try:
-        dm = HongKongDataManager()
+        dm = get_hong_kong_data_manager()
         opp_stats = dm.get_player_overview(opponent)
         has_opp_data = opp_stats and "error" not in opp_stats
     except Exception:
@@ -194,7 +212,20 @@ def render_pre_match(payload: Dict[str, Any]) -> html.Div:
         ])
     ], className="border-0 shadow-sm mb-3", color="dark", outline=True)
 
-    return html.Div([fixture_card, game_plan_card])
+    # ── Clock icon with animate-glass-spin (task 6.4) ─────────────────────
+    spin_icon = html.I(className="bi bi-calendar3 me-1 animate-glass-spin")
+
+    return html.Div(
+        html.Div([
+            fixture_card,
+            html.Div([
+                spin_icon,
+                html.Small(date_str, className="text-muted"),
+            ], className="mb-2 small") if date_str else None,
+            game_plan_card,
+        ]),
+        className="glass-card glass-prematch",
+    )
 
 
 def render_career_insights(payload: Dict[str, Any], user_role: str = "player") -> html.Div:
@@ -219,17 +250,19 @@ def render_career_insights(payload: Dict[str, Any], user_role: str = "player") -
         ])
     ], className="border-0 shadow-sm mb-3")
 
-    # ── UMAP clustering figure ─────────────────────────────────────────────
+    # ── UMAP clustering figure (nested glass-card, task 6.3) ──────────────
     umap_fig = get_umap_figure(player_id)
-    umap_section = dbc.Card([
-        dbc.CardHeader([
-            html.I(className="bi bi-diagram-3 me-2"),
-            html.Span("Playstyle Map (UMAP)", className="fw-semibold"),
-        ], className="border-0"),
-        dbc.CardBody([
-            dcc.Graph(figure=umap_fig, config={"displayModeBar": False}),
-        ])
-    ], className="border-0 shadow-sm mb-3")
+    umap_section = html.Div([
+        dbc.Card([
+            dbc.CardHeader([
+                html.I(className="bi bi-diagram-3 me-2"),
+                html.Span("Playstyle Map (UMAP)", className="fw-semibold"),
+            ], className="border-0"),
+            dbc.CardBody([
+                dcc.Graph(figure=umap_fig, config={"displayModeBar": False}),
+            ])
+        ], className="border-0 shadow-sm mb-3"),
+    ], className="glass-card")
 
     # ── Agent role: Dossier export button ──────────────────────────────────
     dossier_button = html.Div()
@@ -246,17 +279,23 @@ def render_career_insights(payload: Dict[str, Any], user_role: str = "player") -
             dcc.Download(id="dossier-download"),
         ])
 
-    return html.Div([
-        html.H6([
-            html.I(className="bi bi-calendar3 me-2"),
-            f"Career Perspective — Season {season}",
-        ], className="mb-3 text-muted"),
-        dbc.Row([
-            dbc.Col(projection_section, width=12, lg=6),
-            dbc.Col(umap_section, width=12, lg=6),
+    return html.Div(
+        html.Div([
+            html.H6([
+                html.I(className="bi bi-calendar3 me-2"),
+                html.Span(
+                    f"Career Perspective — Season {season}",
+                    className="animate-glass-draw",
+                ),
+            ], className="mb-3 text-muted"),
+            dbc.Row([
+                dbc.Col(projection_section, width=12, lg=6),
+                dbc.Col(umap_section, width=12, lg=6),
+            ]),
+            dossier_button,
         ]),
-        dossier_button,
-    ])
+        className="glass-card glass-career",
+    )
 
 def get_umap_figure(player_id: str) -> go.Figure:
     """
@@ -265,10 +304,9 @@ def get_umap_figure(player_id: str) -> go.Figure:
     """
     try:
         from ai_models.clustering import fit_umap
-        from data.hong_kong_data_manager import HongKongDataManager
         from utils.player_index import get_player_index
-        
-        dm = HongKongDataManager()
+
+        dm = get_hong_kong_data_manager()
         df = dm.processed_data
         if df is None or df.empty:
             fig = go.Figure()
@@ -283,7 +321,7 @@ def get_umap_figure(player_id: str) -> go.Figure:
         # 2. Prepare features
         meta_cols = {"Player", "Season", "Team", "Position"}
         feature_cols = [c for c in df.columns if c not in meta_cols and pd.api.types.is_numeric_dtype(df[c])]
-        
+
         # Sample for performance if needed, but ensure player is included
         if len(df) > 1000:
             df_plot = df.sample(1000)
@@ -293,13 +331,15 @@ def get_umap_figure(player_id: str) -> go.Figure:
                     df_plot = pd.concat([df_plot, player_row.head(1)])
         else:
             df_plot = df
-            
+
         X = df_plot[feature_cols].fillna(0).values
         # Standardize
         X_scaled = (X - X.mean(axis=0)) / (X.std(axis=0) + 1e-6)
-        
+
         names = df_plot["Player"].tolist()
-        umap_df, _ = fit_umap(X_scaled, player_names=names)
+        # Serialize Numba/UMAP calls — workqueue layer is not thread-safe
+        with _umap_lock:
+            umap_df, _ = fit_umap(X_scaled, player_names=names)
         
         # Add metadata for hover
         if "Team" in df_plot.columns: umap_df["team"] = df_plot["Team"].values
@@ -323,12 +363,12 @@ def get_umap_figure(player_id: str) -> go.Figure:
                 ))
 
         fig.update_layout(title="Playstyle Map (UMAP)")
-        return apply_hkfa_theme(fig)
+        return glass_figure_layout(fig)
     except Exception as e:
         logger.error(f"Error generating UMAP figure: {e}")
         fig = go.Figure()
         fig.add_annotation(text=f"Error: {str(e)}", showarrow=False)
-        return apply_hkfa_theme(fig)
+        return glass_figure_layout(fig)
 
 def get_projection_figure(
     player_id: str,
@@ -413,8 +453,7 @@ def _build_wrapup_chart(
     league average for their position group.
     """
     try:
-        from data.hong_kong_data_manager import HongKongDataManager as _DM  # local import enables mocking
-        dm = _DM()
+        dm = get_hong_kong_data_manager()
         df = dm.processed_data
         pos_group = _get_position_group(player_name, dm)
         metrics = [m for m in POSITION_METRICS.get(pos_group, POSITION_METRICS["Midfielder"])
@@ -460,7 +499,7 @@ def _build_wrapup_chart(
             yaxis_title="Value",
             hovermode="x unified",
         )
-        return apply_hkfa_theme(fig)
+        return glass_figure_layout(fig)
 
     except Exception as e:
         logger.warning(f"Wrap-up chart fallback: {e}")
@@ -469,7 +508,7 @@ def _build_wrapup_chart(
             text=f"Season summary {selected_season} — league data not available",
             showarrow=False,
         )
-        return apply_hkfa_theme(fig)
+        return glass_figure_layout(fig)
 
 
 def _build_projection_chart(
@@ -481,7 +520,7 @@ def _build_projection_chart(
     Builds a forward-looking performance projection line chart.
     """
     try:
-        dm = HongKongDataManager()
+        dm = get_hong_kong_data_manager()
         pos_group = _get_position_group(player_name, dm)
         # Use the first metric for the primary trend line
         primary_metric = POSITION_METRICS.get(pos_group, ["Goals"])[0]
@@ -519,9 +558,9 @@ def _build_projection_chart(
             yaxis_title=metric_label,
             hovermode="x unified",
         )
-        return apply_hkfa_theme(fig)
+        return glass_figure_layout(fig)
     except Exception as e:
         logger.error(f"Projection chart error: {e}")
         fig = go.Figure()
         fig.add_annotation(text=f"Error: {str(e)}", showarrow=False)
-        return apply_hkfa_theme(fig)
+        return glass_figure_layout(fig)
