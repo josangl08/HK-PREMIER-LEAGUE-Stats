@@ -39,6 +39,7 @@ TEAM_MAPPING: dict[str, str] = {
     "和富大埔": "Tai Po",
     "九龍城": "Kowloon City",
     "均業北區": "North District",
+    "高力北區": "North District",
     "北區": "North District",
     "港會": "Hong Kong Football Club",
     "香港足球會": "Hong Kong Football Club",
@@ -46,15 +47,60 @@ TEAM_MAPPING: dict[str, str] = {
     "香港U23": "HK U23",
     "晉峰": "Resources Capital",
     "天水圍飛馬": "Pegasus",
+    "香港飛馬": "Pegasus",
     "飛馬": "Pegasus",
     "晨曦": "Morning Star",
     "南華": "South China",
+    "愉園": "Happy Valley",
+    "富力R&F": "R&F",
+    "富力 R&F": "R&F",
+    "R&F 富力": "R&F",
+    "R & F 富力": "R&F",
+    "R&F富力": "R&F",
+    "夢想FC": "Dreams FC",
+    "夢想駿其": "Dreams Metro Gallery",
+    "灝天黃大仙": "Wong Tai Sin",
+    "黃大仙": "Wong Tai Sin",
+    "凱景": "Hoi King",
+    "元朗": "Yuen Long",
+    "佳聯元朗": "Yuen Long",
+    "陽光元朗": "Yuen Long",
+    "九巴元朗": "Yuen Long",
+    "東區": "Eastern District",
+    "灣仔": "Wan Chai",
     "公和屠場": "Kwong Wah",
-    "公和": "Kwong Wah",
     "理工大學體育會": "Hong Kong Polytechnic University",
-    "理工大學": "Hong Kong Polytechnic University",
-    "嘉里": "Kerry",
-    "西貢太陽神": "Sun God",
+}
+
+# Prefixes to strip from team names in ICS
+TEAM_PREFIXES_TO_STRIP = [
+    "(改期)", "改期", "【賽事延期】", "[賽事取消]", "(補賽)", "【補賽】", "(賽事延期)",
+    "Reschedule", "(Reschedule)", " "
+]
+
+# Mapping: Traditional Chinese competition names → English
+COMPETITION_MAPPING: dict[str, str] = {
+    "中銀人壽香港超級聯賽": "HK Premier League",
+    "香港超級聯賽": "HK Premier League",
+    "足總盃": "HKFA Cup",
+    "賽馬會菁英盃": "Sapling Cup",
+    "菁英盃": "Sapling Cup",
+    "聯賽盃": "League Cup",
+    "高級組銀牌": "Senior Shield",
+    "銀牌": "Senior Shield",
+}
+
+# Mapping: Traditional Chinese stadium names → English
+STADIUM_MAPPING: dict[str, str] = {
+    "旺角大球場": "Mong Kok Stadium",
+    "香港大球場": "Hong Kong Stadium",
+    "沙田運動場": "Sha Tin Sports Ground",
+    "將軍澳運動場": "Tseung Kwan O Sports Ground",
+    "元朗大球場": "Yuen Long Stadium",
+    "天水圍運動場": "Tin Shui Wai Sports Ground",
+    "深水埗運動場": "Sham Shui Po Sports Ground",
+    "小西灣運動場": "Siun Sai Wan Sports Ground",
+    "青衣運動場": "Tsing Yi Sports Ground",
 }
 
 # Keywords identifying adult-male HKFA competitions (Chinese and English variants)
@@ -124,6 +170,16 @@ def _normalize_team(chinese_name: str) -> str:
         )
         return chinese_name
     return english
+
+
+def _normalize_competition(raw: str) -> str:
+    """Look up English name from COMPETITION_MAPPING; return raw string if not found."""
+    return COMPETITION_MAPPING.get(raw, raw)
+
+
+def _normalize_stadium(raw: str) -> str:
+    """Look up English name from STADIUM_MAPPING; return raw string if not found."""
+    return STADIUM_MAPPING.get(raw, raw)
 
 
 # ── TheSportsDB asset helpers ─────────────────────────────────────────────────
@@ -297,6 +353,7 @@ class FixtureManager:
         home_zh, away_zh, competition = parsed
         home_en = _normalize_team(home_zh)
         away_en = _normalize_team(away_zh)
+        competition = _normalize_competition(competition)
 
         # Convert dtstart to timezone-aware UTC datetime
         dtstart = event.get("dtstart")
@@ -308,8 +365,9 @@ class FixtureManager:
         kickoff_hkt = kickoff_utc.astimezone(HKT)
 
         stadium_raw = event.get("location")
-        # TheSportsDB has stadium in English; use raw ICS location as fallback
-        stadium_en = _resolve_stadium(home_en) or (stadium_raw or "").strip() or None
+        # TheSportsDB has stadium in English; normalize ICS location (may be Chinese) as fallback
+        stadium_raw_en = _normalize_stadium((stadium_raw or "").strip()) if stadium_raw else None
+        stadium_en = _resolve_stadium(home_en) or stadium_raw_en or None
 
         return {
             "uid": event.get("uid"),

@@ -23,7 +23,7 @@ PUBLIC_PATHS = ['/login', '/register']
 # Mapa de rutas permitidas por rol (None = acceso total)
 ROLE_ALLOWED_PATHS = {
     'admin': None,                                      # Acceso completo a todas las rutas
-    'player': ['/', '/performance', '/ai-insights', '/player-portal'],
+    'player': ['/performance', '/ai-insights', '/player-portal'], # '/' eliminado para forzar redirección
     'agent': ['/agent-portal', '/performance'],         # Sin /ai-insights (predictor callbacks)
 }
 
@@ -47,6 +47,11 @@ def _is_path_allowed(pathname: str, role: str) -> bool:
     allowed = ROLE_ALLOWED_PATHS.get(role)
     if allowed is None:
         return True  # admin: acceso total
+    
+    # Redirección automática si intentan acceder a la raíz sin permiso
+    if pathname == '/' and role in ROLE_DEFAULT_PATH:
+        return False
+        
     return pathname in allowed
 
 
@@ -93,15 +98,17 @@ def display_page(pathname):
             # Comprobar permisos de rol para rutas protegidas
             if is_authenticated and not _is_path_allowed(pathname, user_role):
                 default = _get_default_path_for_role(user_role)
+                # Si el usuario es player/agent y entra en '/', redirigir a su portal
                 return _render_path(default, navbar, user_role), navbar, _AUTH_HIDDEN, no_update
 
             return _render_path(pathname, navbar, user_role), navbar, _AUTH_HIDDEN, no_update
 
     except Exception as e:
+        default_href = _get_default_path_for_role(user_role) if is_authenticated else "/"
         error_layout = html.Div([
             html.H1("Error", className="text-center"),
             html.P(f"Ha ocurrido un error: {str(e)}", className="text-center"),
-            html.A("Volver al inicio", href="/", className="btn btn-primary")
+            html.A("Volver al inicio", href=default_href, className="btn btn-primary")
         ], className="container mt-5")
         return error_layout, navbar, _AUTH_HIDDEN, no_update
 

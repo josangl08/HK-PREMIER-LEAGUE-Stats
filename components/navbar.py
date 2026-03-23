@@ -7,13 +7,22 @@ from flask_login import current_user
 def create_navbar(pathname):
 
     # Definir la estructura de enlaces de navegación
-    user_role = getattr(current_user, 'role', None) if current_user.is_authenticated else None
+    is_auth = current_user.is_authenticated if current_user else False
+    user_role = getattr(current_user, 'role', 'player') if is_auth else None
+    
+    # Determinar ruta de inicio según rol
+    home_href = "/"
+    if user_role == 'player':
+        home_href = "/player-portal"
+    elif user_role == 'agent':
+        home_href = "/agent-portal"
+
     nav_items = [
         dbc.NavItem(
             dbc.NavLink(
                 [html.I(className="bi bi-house me-2"), "Home"],
-                href="/",
-                active=pathname == "/",
+                href=home_href,
+                active=pathname == home_href,
                 className="me-3 text-decoration-none",
             )
         ),
@@ -57,6 +66,19 @@ def create_navbar(pathname):
             )
         )
 
+    # Player Portal — visible for admin only (players already have it as home)
+    if user_role == 'admin':
+         nav_items.append(
+            dbc.NavItem(
+                dbc.NavLink(
+                    [html.I(className="bi bi-person-circle me-2"), "Player Portal"],
+                    href="/player-portal",
+                    active=pathname == "/player-portal",
+                    className="ms-3 text-decoration-none",
+                )
+            )
+        )
+
     # Agregar información de usuario y botón de logout
     nav_right = dbc.Nav(
         [
@@ -67,7 +89,7 @@ def create_navbar(pathname):
                             html.I(className="bi bi-person-circle text-white me-2"),
                             (
                                 f"User: {current_user.id}"
-                                if current_user.is_authenticated
+                                if is_auth
                                 else ""
                             ),
                         ],
@@ -102,26 +124,26 @@ def create_navbar(pathname):
                     html.A(
                         dbc.Row(
                             [
-                                #    dbc.Col(
-                                #        html.Img(
-                                #            src="/assets/logo.png",
-                                #            height="50px",
-                                #            className="ms-3 me-3",
-                                #        ),
-                                #        width="auto",
-                                #    ),
-                                #    dbc.Col(
-                                #        dbc.NavbarBrand(
-                                #            "HK Premier League Stats", className="ms-2"
-                                #        ),
-                                #        width="auto",
-                                #    ),
+                                dbc.Col(
+                                    html.Img(
+                                        src="/assets/logo.png",
+                                        height="30px",
+                                        className="me-2",
+                                    ),
+                                    width="auto",
+                                ),
+                                dbc.Col(
+                                    dbc.NavbarBrand(
+                                        "HKPL Stats", className="ms-1 fw-bold"
+                                    ),
+                                    width="auto",
+                                ),
                             ],
                             align="center",
                             className="g-0",
                         ),
-                        href="/",
-                        className="navbar-brand-link",
+                        href=home_href,
+                        className="navbar-brand-link text-decoration-none",
                     ),
                     dbc.NavbarToggler(id="navbar-toggler", n_clicks=0),
                     dbc.Collapse(
@@ -138,7 +160,7 @@ def create_navbar(pathname):
         ],
         dark=True,
         color="dark",
-        className="mb-4",
+        className="mb-4 shadow-sm",
     )
 
     return navbar

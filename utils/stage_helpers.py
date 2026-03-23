@@ -57,7 +57,7 @@ def render_post_match(payload: Dict[str, Any]) -> html.Div:
     Renders the Post-Match analysis stage.
     Shows a match header, Radar Chart, and Percentile bars for the player's season stats.
     """
-    opponent = payload.get("opponent", "Rival")
+    opponent = payload.get("opponent", "Opponent")
     date_str = payload.get("kickoff_display") or str(payload.get("date", ""))[:10]
     home = payload.get("home_team", "")
     away = payload.get("away_team", "")
@@ -80,28 +80,28 @@ def render_post_match(payload: Dict[str, Any]) -> html.Div:
     perf = player_stats.get("performance_stats", {})
     percentiles = player_stats.get("percentiles", {})
     basic = player_stats.get("basic_info", {})
-    player_name = basic.get("name", "Jugador")
+    player_name = basic.get("name", "Player")
     position = basic.get("position_primary", basic.get("position", ""))
 
     # Radar: use available numeric stats normalized 0-100 via percentiles
     radar_metrics = ["Goals", "Assists", "Accurate passes, %", "Minutes played"]
     radar_values = [percentiles.get(m, 50) for m in radar_metrics]
-    radar_labels = ["Goles", "Asistencias", "Precisión pases", "Minutos"]
+    radar_labels = ["Goals", "Assists", "Pass Accuracy", "Minutes"]
 
     from utils.chart_helpers import create_radar_chart
     radar_fig = create_radar_chart(
         values=radar_values,
         metrics=radar_labels,
-        title=f"{player_name} — Percentiles de temporada",
+        title=f"{player_name} — Season Percentiles",
         name=player_name,
     )
 
     from utils.chart_helpers import create_percentile_bars
     percentile_display = {
-        "Goles": percentiles.get("Goals", 0),
-        "Asistencias": percentiles.get("Assists", 0),
-        "Pases %": percentiles.get("Accurate passes, %", 0),
-        "Minutos": percentiles.get("Minutes played", 0),
+        "Goals": percentiles.get("Goals", 0),
+        "Assists": percentiles.get("Assists", 0),
+        "Pass %": percentiles.get("Accurate passes, %", 0),
+        "Minutes": percentiles.get("Minutes played", 0),
     }
 
     # ── Layout ─────────────────────────────────────────────────────────────
@@ -114,7 +114,7 @@ def render_post_match(payload: Dict[str, Any]) -> html.Div:
         ], className="mb-3"),
         dbc.Row([
             dbc.Col([
-                html.H6("Radar de Rendimiento", className="text-muted mb-2"),
+                html.H6("Performance Radar", className="text-muted mb-2"),
                 dcc.Graph(figure=radar_fig, config={"displayModeBar": False}, className="w-100"),
             ], width=12, md=7),
             dbc.Col([
@@ -130,7 +130,7 @@ def render_pre_match(payload: Dict[str, Any]) -> html.Div:
     Renders the Pre-Match preparation hub.
     Shows fixture details, opponent info, and a rule-based Game-Plan insight.
     """
-    opponent = payload.get("opponent", "Rival")
+    opponent = payload.get("opponent", "Opponent")
     home = payload.get("home_team", "")
     away = payload.get("away_team", "")
     date_str = payload.get("kickoff_display") or str(payload.get("date", ""))[:16]
@@ -140,11 +140,11 @@ def render_pre_match(payload: Dict[str, Any]) -> html.Div:
 
     # ── Fixture header ─────────────────────────────────────────────────────
     streaming_link = html.A(
-        [html.I(className="bi bi-play-circle me-1"), "Ver en streaming"],
+        [html.I(className="bi bi-play-circle me-1"), "Watch stream"],
         href=streaming_url,
         target="_blank",
         className="btn btn-sm btn-outline-primary mt-2",
-    ) if streaming_url else html.Small("Sin retransmisión disponible", className="text-muted")
+    ) if streaming_url else html.Small("No broadcast available", className="text-muted")
 
     fixture_card = dbc.Card([
         dbc.CardBody([
@@ -159,7 +159,7 @@ def render_pre_match(payload: Dict[str, Any]) -> html.Div:
                 html.I(className="bi bi-calendar3 me-1"),
                 html.Span(date_str, className="me-3"),
                 html.I(className="bi bi-geo-alt me-1"),
-                html.Span(stadium or "Estadio por confirmar"),
+                html.Span(stadium or "Stadium to be confirmed"),
             ], className="small text-muted"),
             html.Div(streaming_link, className="mt-2"),
         ])
@@ -175,19 +175,19 @@ def render_pre_match(payload: Dict[str, Any]) -> html.Div:
 
     if has_opp_data:
         game_plan_text = (
-            f"Análisis disponible para {opponent}. "
-            "Revisa sus estadísticas defensivas y ofensivas para preparar la táctica."
+            f"Analysis available for {opponent}. "
+            "Review their defensive and offensive stats to prepare tactics."
         )
     else:
         game_plan_text = (
-            f"Prepárate para el partido contra {opponent}. "
-            "Enfócate en transiciones rápidas y presión alta en el mediocampo."
+            f"Prepare for the match against {opponent}. "
+            "Focus on quick transitions and high pressure in midfield."
         )
 
     game_plan_card = dbc.Card([
         dbc.CardHeader([
             html.I(className="bi bi-robot me-2"),
-            html.Span("Game-Plan AI", className="fw-semibold"),
+            html.Span("AI Game-Plan", className="fw-semibold"),
         ], className="border-0"),
         dbc.CardBody([
             html.P(game_plan_text, className="mb-0 small"),
@@ -204,7 +204,7 @@ def render_career_insights(payload: Dict[str, Any], user_role: str = "player") -
     """
     season = payload.get("season", "")
     player_id = payload.get("player_id", "")
-    player_name = payload.get("player_name", "Jugador")
+    player_name = payload.get("player_name", "Player")
     current_season = _get_current_season()
 
     # ── Projection figure (context-aware: wrap_up vs projection mode) ──────
@@ -212,7 +212,7 @@ def render_career_insights(payload: Dict[str, Any], user_role: str = "player") -
     projection_section = dbc.Card([
         dbc.CardHeader([
             html.I(className="bi bi-graph-up-arrow me-2"),
-            html.Span("Proyección de Rendimiento", className="fw-semibold"),
+            html.Span("Performance Projection", className="fw-semibold"),
         ], className="border-0"),
         dbc.CardBody([
             dcc.Graph(figure=projection_fig, config={"displayModeBar": False}),
@@ -224,7 +224,7 @@ def render_career_insights(payload: Dict[str, Any], user_role: str = "player") -
     umap_section = dbc.Card([
         dbc.CardHeader([
             html.I(className="bi bi-diagram-3 me-2"),
-            html.Span("Mapa de Estilo de Juego (UMAP)", className="fw-semibold"),
+            html.Span("Playstyle Map (UMAP)", className="fw-semibold"),
         ], className="border-0"),
         dbc.CardBody([
             dcc.Graph(figure=umap_fig, config={"displayModeBar": False}),
@@ -236,7 +236,7 @@ def render_career_insights(payload: Dict[str, Any], user_role: str = "player") -
     if user_role == "agent":
         dossier_button = html.Div([
             dbc.Button(
-                [html.I(className="bi bi-file-earmark-pdf me-2"), "Exportar Dossier PDF"],
+                [html.I(className="bi bi-file-earmark-pdf me-2"), "Export PDF Dossier"],
                 id="export-dossier-btn",
                 color="danger",
                 outline=True,
@@ -249,7 +249,7 @@ def render_career_insights(payload: Dict[str, Any], user_role: str = "player") -
     return html.Div([
         html.H6([
             html.I(className="bi bi-calendar3 me-2"),
-            f"Perspectiva de Carrera — Temporada {season}",
+            f"Career Perspective — Season {season}",
         ], className="mb-3 text-muted"),
         dbc.Row([
             dbc.Col(projection_section, width=12, lg=6),
@@ -272,7 +272,7 @@ def get_umap_figure(player_id: str) -> go.Figure:
         df = dm.processed_data
         if df is None or df.empty:
             fig = go.Figure()
-            fig.add_annotation(text="No hay datos disponibles para clustering", showarrow=False)
+            fig.add_annotation(text="No data available for clustering", showarrow=False)
             return apply_hkfa_theme(fig)
 
         # 1. Resolve player name
@@ -318,11 +318,11 @@ def get_umap_figure(player_id: str) -> go.Figure:
                     marker=dict(size=15, color="white", line=dict(width=3, color=HKFATheme.ACCENT_RED)),
                     text=[player_name],
                     textposition="top center",
-                    name="Seleccionado",
+                    name="Selected",
                     showlegend=True
                 ))
 
-        fig.update_layout(title="Mapa de Estilo de Juego (UMAP)")
+        fig.update_layout(title="Playstyle Map (UMAP)")
         return apply_hkfa_theme(fig)
     except Exception as e:
         logger.error(f"Error generating UMAP figure: {e}")
@@ -362,15 +362,15 @@ def get_projection_figure(
         player_info = pi.get_player_info(player_id)
         if not player_info:
             fig = go.Figure()
-            fig.add_annotation(text="Jugador no encontrado", showarrow=False)
+            fig.add_annotation(text="Player not found", showarrow=False)
             return apply_hkfa_theme(fig)
 
-        player_name = player_info.get("canonical_name", "Jugador")
+        player_name = player_info.get("canonical_name", "Player")
         seasons = sorted(player_info.get("seasons", []))
 
         if not seasons:
             fig = go.Figure()
-            fig.add_annotation(text="Datos insuficientes", showarrow=False)
+            fig.add_annotation(text="Insufficient data", showarrow=False)
             return apply_hkfa_theme(fig)
 
         if mode == "wrap_up":
@@ -445,19 +445,19 @@ def _build_wrapup_chart(
             marker_color=HKFATheme.ACCENT_BLUE,
         ))
         fig.add_trace(go.Bar(
-            name="Liga Media",
+            name="League Average",
             x=metrics,
             y=league_vals,
             marker_color=HKFATheme.ACCENT_RED,
             opacity=0.7,
         ))
 
-        note = "" if selected_season == current_season else f" (datos proxy: {current_season})"
+        note = "" if selected_season == current_season else f" (proxy data: {current_season})"
         fig.update_layout(
-            title=f"Resumen Temporada {selected_season} — {player_name}{note}",
+            title=f"Season Summary {selected_season} — {player_name}{note}",
             barmode="group",
-            xaxis_title="Métrica",
-            yaxis_title="Valor",
+            xaxis_title="Metric",
+            yaxis_title="Value",
             hovermode="x unified",
         )
         return apply_hkfa_theme(fig)
@@ -466,7 +466,7 @@ def _build_wrapup_chart(
         logger.warning(f"Wrap-up chart fallback: {e}")
         fig = go.Figure()
         fig.add_annotation(
-            text=f"Resumen temporada {selected_season} — datos de liga no disponibles",
+            text=f"Season summary {selected_season} — league data not available",
             showarrow=False,
         )
         return apply_hkfa_theme(fig)
@@ -501,7 +501,7 @@ def _build_projection_chart(
             x=seasons,
             y=historical_y,
             mode="lines+markers",
-            name=f"Histórico ({metric_label})",
+            name=f"Historical ({metric_label})",
             line=dict(color=HKFATheme.ACCENT_BLUE, width=3),
             marker=dict(size=8),
         ))
@@ -509,13 +509,13 @@ def _build_projection_chart(
             x=[seasons[-1], next_season],
             y=[last_val, projected_val],
             mode="lines+markers",
-            name="Proyección AI",
+            name="AI Projection",
             line=dict(color=HKFATheme.ACCENT_RED, width=3, dash="dash"),
             marker=dict(size=10, symbol="star"),
         ))
         fig.update_layout(
-            title=f"Proyección de Rendimiento: {player_name}",
-            xaxis_title="Temporada",
+            title=f"Performance Projection: {player_name}",
+            xaxis_title="Season",
             yaxis_title=metric_label,
             hovermode="x unified",
         )

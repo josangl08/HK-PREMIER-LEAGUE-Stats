@@ -31,6 +31,7 @@ def _render_milestone_item(milestone: dict, index: int) -> dbc.ListGroupItem:
     color = _COLOR_MAP.get(m_type, "secondary")
     payload = milestone.get("payload", {})
     matches = payload.get("matches", [])
+    summary = payload.get("summary", {})
     
     date_str = ""
     if milestone.get("date"):
@@ -50,8 +51,16 @@ def _render_milestone_item(milestone: dict, index: int) -> dbc.ListGroupItem:
     toggle_icon = html.I(
         className="bi bi-chevron-down ms-auto small text-muted",
         id={"type": "match-history-toggle", "index": index},
-        style={"cursor": "pointer", "padding": "4px"}
+        style={"cursor": "pointer", "padding": "4px"},
+        n_clicks=0
     ) if has_matches else None
+
+    # Career summary text (e.g. "15 Goles · 4 Asist.")
+    summary_text = None
+    if m_type == "career" and summary:
+        g = summary.get("goals", 0)
+        a = summary.get("assists", 0)
+        summary_text = html.Small(f"{g} Goles · {a} Asist.", className="text-warning extra-small fw-bold d-block")
 
     match_rows = []
     if has_matches:
@@ -80,7 +89,7 @@ def _render_milestone_item(milestone: dict, index: int) -> dbc.ListGroupItem:
                 html.Div([
                     html.Span(milestone.get("label", ""), className="small fw-semibold", 
                               id={"type": "timeline-milestone-label", "index": index}),
-                    html.Br(),
+                    summary_text,
                     html.Small(date_str, className="text-muted"),
                 ], id={"type": "timeline-milestone-text", "index": index}),
             ], className="d-flex align-items-center flex-grow-1", style={"cursor": "pointer"}),
@@ -88,7 +97,7 @@ def _render_milestone_item(milestone: dict, index: int) -> dbc.ListGroupItem:
         ], className="d-flex align-items-center py-2 px-2"),
         sub_list
     ],
-        action=False, # Changed to False to handle internal clicks better
+        action=False,
         className="border-0 p-0",
         style={"borderRadius": "8px"},
     )

@@ -767,3 +767,45 @@ i[class*=" bi-"]:hover {
     display: inline-flex;
     align-items: center;
 }
+
+/* ── SKELETON SCREENS (Loading Placeholders) ────────────────────────── */
+
+@keyframes skeleton-pulse {
+    0% { opacity: 1; }
+    50% { opacity: 0.4; }
+    100% { opacity: 1; }
+}
+
+.skeleton {
+    animation: skeleton-pulse 1.5s ease-in-out infinite;
+    background: rgba(255, 255, 255, 0.05) !important;
+    border-radius: 4px;
+    display: inline-block;
+}
+
+.skeleton-card {
+    background: rgba(255, 255, 255, 0.02) !important;
+    border: 1px solid rgba(255, 255, 255, 0.1) !important;
+    border-radius: var(--border-radius-card);
+    padding: 1.5rem;
+}
+
+.skeleton-text {
+    height: 16px;
+    margin-bottom: 8px;
+}
+
+.skeleton-title {
+    height: 24px;
+    width: 60%;
+    margin-bottom: 16px;
+}
+
+.skeleton-circle {
+    border-radius: 50% !important;
+}
+
+.skeleton-chart {
+    height: 300px;
+    border-radius: var(--border-radius-card);
+}
