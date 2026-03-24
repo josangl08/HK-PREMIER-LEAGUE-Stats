@@ -1,5 +1,5 @@
-# ABOUTME: Callbacks for the Player Portal 'Career Stage' architecture.
-# ABOUTME: Handles Timeline population, milestone selection, Stage rendering, and Decision Nodes injection.
+# ABOUTME: Callbacks for the Player Portal Phase 2 SPA navigation architecture.
+# ABOUTME: Handles Timeline population, milestone selection, Stage rendering, sliding panel navigation, and year-scroll navigation.
 
 import logging
 from dash import Input, Output, State, callback, html, no_update, ALL, ctx, dcc
@@ -39,18 +39,80 @@ def _get_glass_class(milestone: dict) -> str:
     return _GLASS_CLASS_MAP.get(m_type, "glass-career")
 
 
+def _build_collapse_content(m_type: str, payload: dict, matches: list) -> html.Div:
+    """Builds the type-specific collapse content for a milestone card."""
+    if m_type == "career":
+        if not matches:
+            return html.Div(
+                html.Small("Sin partidos registrados.", className="text-muted fst-italic"),
+                className="px-3 pb-2",
+            )
+        rows = []
+        for m in matches:
+            goals = m.get("goals", 0)
+            rows.append(html.Div(
+                [
+                    html.Small(m.get("date", ""), className="text-muted", style={"minWidth": "80px"}),
+                    html.Small(
+                        m.get("opponent", "Rival"),
+                        className="flex-grow-1 text-truncate px-2 small",
+                    ),
+                    html.Small(f"{m.get('minutes_played', 0)}'", className="text-muted", style={"minWidth": "32px"}),
+                    html.Small(
+                        f"⚽{goals}" if goals else "",
+                        className="text-warning fw-bold",
+                        style={"minWidth": "28px"},
+                    ),
+                ],
+                className="d-flex align-items-center border-bottom border-secondary py-1",
+            ))
+        return html.Div(rows, className="px-3 pb-2 pt-1")
+
+    if m_type == "pre-match":
+        details = []
+        if payload.get("kickoff_display"):
+            details.append(html.Small([html.I(className="bi bi-clock me-1"), payload["kickoff_display"]], className="text-muted me-3"))
+        if payload.get("stadium"):
+            details.append(html.Small([html.I(className="bi bi-geo-alt me-1"), payload["stadium"]], className="text-muted me-3"))
+        if payload.get("competition"):
+            details.append(html.Small([html.I(className="bi bi-trophy me-1"), payload["competition"]], className="text-muted"))
+        return html.Div(details or [html.Small("Sin detalles.", className="text-muted fst-italic")],
+                        className="d-flex flex-wrap gap-2 px-3 pb-2 pt-1")
+
+    # post-match
+    stats = payload.get("player_stats", {})
+    perf = stats.get("performance_stats", {})
+    minutes = perf.get("Minutes", payload.get("minutes_played", "—"))
+    goals = perf.get("Goals", 0)
+    assists = perf.get("Assists", 0)
+    status = payload.get("confirmation_status", "")
+    badge_color = "success" if status == "Confirmed" else "secondary"
+    return html.Div(
+        [
+            html.Span(status, className=f"badge bg-{badge_color} me-2 small") if status else None,
+            html.Small([html.I(className="bi bi-stopwatch me-1"), f"{minutes}'"], className="text-muted me-3"),
+            html.Small([html.I(className="bi bi-bullseye me-1"), f"{goals} goles"], className="text-muted me-3"),
+            html.Small([html.I(className="bi bi-arrow-up-right me-1"), f"{assists} asist."], className="text-muted"),
+        ],
+        className="d-flex flex-wrap align-items-center gap-2 px-3 pb-2 pt-1",
+    )
+
+
 def _render_milestone_item(milestone: dict, index: int) -> html.Div:
-    """Renders a single timeline milestone as a glass card with expand/collapse inline summary."""
+    """Renders a single timeline milestone as a glass card.
+
+    Level 1 header (always visible): icon · label · date · Ver Detalle · chevron
+    Collapse: type-specific content (match list, fixture details, or match stats)
+    """
     m_type = milestone.get("type", "career")
     icon_cls = _ICON_MAP.get(m_type, "bi-circle")
     color = _COLOR_MAP.get(m_type, "secondary")
     glass_cls = _get_glass_class(milestone)
     payload = milestone.get("payload", {})
     matches = payload.get("matches", [])
-    summary = payload.get("summary", {})
-    opponent = payload.get("opponent", "")
 
     date_str = ""
+    year_str = ""
     if milestone.get("date"):
         try:
             from datetime import datetime
@@ -59,104 +121,60 @@ def _render_milestone_item(milestone: dict, index: int) -> html.Div:
             else:
                 dt = milestone["date"]
             date_str = dt.strftime("%d/%m/%Y")
+            year_str = str(dt.year)
         except Exception:
             date_str = str(milestone["date"])[:10]
+            year_str = str(milestone["date"])[:4]
 
-    # Career summary text (e.g. "15 Goles · 4 Asist.")
-    summary_text = None
-    if m_type == "career" and summary:
-        g = summary.get("goals", 0)
-        a = summary.get("assists", 0)
-        summary_text = html.Small(f"{g} Goles · {a} Asist.", className="text-warning extra-small fw-bold d-block")
-
-    # Inline expand/collapse summary (task 5.2) — shown on chevron click, no stage dispatch
-    inline_summary_items = [
-        html.Small(milestone.get("label", ""), className="fw-semibold d-block"),
-        html.Small(date_str, className="text-muted"),
-    ]
-    if opponent:
-        inline_summary_items.append(
-            html.Span(opponent, className=f"badge bg-{color} ms-1 small")
-        )
-    if m_type == "career" and summary:
-        inline_summary_items.append(summary_text)
-
-    inline_collapse = dbc.Collapse(
-        html.Div(inline_summary_items, className="px-2 pb-2 pt-1 small"),
-        id={"type": "milestone-inline-collapse", "index": index},
-        is_open=False,
-    )
-
-    # Match history sub-list (career type)
-    has_matches = m_type == "career" and len(matches) > 0
-    match_rows = []
-    if has_matches:
-        for m in matches:
-            match_rows.append(html.Div([
-                html.Small(m.get("date", ""), className="text-muted", style={"width": "75px"}),
-                html.Small(m.get("opponent", "Rival"), className="fw-normal flex-grow-1 text-truncate px-2"),
-                html.Small(f"{m.get('minutes_played', 0)}'", className="text-muted text-end", style={"width": "40px"}),
-            ], className="d-flex border-bottom py-1 align-items-center"))
-
-    match_history_collapse = dbc.Collapse(
-        html.Div(match_rows, className="ps-4 pe-2 pb-2 rounded-bottom"),
-        id={"type": "match-history-collapse", "index": index},
-        is_open=False,
-    ) if has_matches else None
-
-    toggle_icon = html.I(
-        className="bi bi-chevron-down ms-auto small text-muted",
-        id={"type": "milestone-inline-toggle", "index": index},
-        style={"cursor": "pointer", "padding": "4px"},
-        n_clicks=0,
-    )
-
-    history_toggle = html.I(
-        className="bi bi-list-ul ms-1 small text-muted",
-        id={"type": "match-history-toggle", "index": index},
-        style={"cursor": "pointer", "padding": "4px"},
-        n_clicks=0,
-    ) if has_matches else None
-
-    return html.Div([
-        html.Div([
-            html.Div([
-                html.Span(
-                    html.I(className=f"bi {icon_cls}"),
-                    className=f"badge rounded-pill bg-{color} me-2",
-                    id={"type": "timeline-milestone", "index": index},
-                    n_clicks=0,
-                    style={"cursor": "pointer"},
-                ),
-                html.Div([
-                    html.Span(milestone.get("label", ""), className="small fw-semibold",
-                              id={"type": "timeline-milestone-label", "index": index}),
+    # ── Level 1 header (always visible) ─────────────────────────────────
+    header_row = html.Div(
+        [
+            html.Span(
+                html.I(className=f"bi {icon_cls}"),
+                className=f"badge rounded-pill bg-{color} me-2 flex-shrink-0",
+                id={"type": "timeline-milestone", "index": index},
+                n_clicks=0,
+                style={"cursor": "pointer"},
+            ),
+            html.Div(
+                [
+                    html.Span(milestone.get("label", ""), className="small fw-semibold"),
                     html.Small(date_str, className="text-muted d-block"),
-                ], id={"type": "timeline-milestone-text", "index": index}, style={"cursor": "pointer"}),
-            ], className="d-flex align-items-center flex-grow-1"),
-            html.Div([
-                history_toggle,
-                toggle_icon,
-            ], className="d-flex align-items-center"),
-        ], className="d-flex align-items-center py-2 px-2"),
-        inline_collapse,
-        match_history_collapse,
-    ], className=f"glass-card {glass_cls} mb-2")
+                ],
+                className="flex-grow-1",
+                id={"type": "timeline-milestone-text", "index": index},
+                style={"cursor": "pointer"},
+            ),
+            dbc.Button(
+                [html.I(className="bi bi-arrow-right-circle me-1"), "Ver Detalle"],
+                id={"type": "milestone-detail-btn", "index": index},
+                color=color,
+                outline=True,
+                size="sm",
+                className="flex-shrink-0 me-1",
+                n_clicks=0,
+            ),
+            html.I(
+                className="bi bi-chevron-down flex-shrink-0 small text-muted milestone-expand-icon",
+                id={"type": "milestone-toggle", "index": index},
+                style={"cursor": "pointer", "padding": "4px"},
+                n_clicks=0,
+            ),
+        ],
+        className="d-flex align-items-center gap-1 py-2 px-2",
+    )
 
+    # ── Single collapse per card ─────────────────────────────────────────
+    milestone_collapse = dbc.Collapse(
+        _build_collapse_content(m_type, payload, matches),
+        id={"type": "milestone-collapse", "index": index},
+        is_open=False,
+    )
 
-def _render_pill(milestone: dict, index: int) -> dbc.Button:
-    """Renders a pill button for the mobile carousel."""
-    m_type = milestone.get("type", "career")
-    icon_cls = _ICON_MAP.get(m_type, "bi-circle")
-    color = _COLOR_MAP.get(m_type, "secondary")
-    return dbc.Button(
-        [html.I(className=f"bi {icon_cls} me-1"), milestone.get("label", "")[:20]],
-        id={"type": "timeline-pill", "index": index},
-        color=color,
-        outline=True,
-        size="sm",
-        className="flex-shrink-0 rounded-pill",
-        n_clicks=0,
+    year_cls = f" year-{year_str}" if year_str else ""
+    return html.Div(
+        [header_row, milestone_collapse],
+        className=f"glass-card {glass_cls} mb-2{year_cls}",
     )
 
 
@@ -164,75 +182,47 @@ def register_player_portal_callbacks(app):
     """Registers all Player Portal callbacks."""
 
     # ------------------------------------------------------------------ #
-    # ETL → milestones-data-store + mobile pills                          #
+    # ETL → milestones-data-store                                         #
     # ------------------------------------------------------------------ #
     @app.callback(
         Output("milestones-data-store", "data"),
-        Output("timeline-pills-mobile", "children"),
         Input("url", "pathname"),
         prevent_initial_call=False,
     )
     def update_timeline(pathname):
-        """Fetches timeline milestones and stores serialized data; builds mobile pills."""
+        """Fetches timeline milestones and stores serialized data."""
         if pathname != "/player-portal":
-            return no_update, no_update
+            return no_update
 
         try:
             player_id = getattr(current_user, "player_id", None)
             if not player_id:
-                return None, html.Div("Sin datos de jugador vinculados.", className="text-muted small p-2")
+                return None
 
             aggregator = TimelineAggregator(data_manager=get_hong_kong_data_manager())
             milestones = aggregator.get_player_timeline(player_id)
 
             if not milestones:
-                return None, html.Div("No hay hitos disponibles.", className="text-muted small p-2")
+                return None
 
-            pills = [_render_pill(m, i) for i, m in enumerate(milestones)]
-            return _serialize_milestones(milestones), pills
+            return _serialize_milestones(milestones)
 
         except Exception as e:
             logger.error(f"update_timeline error: {e}")
-            err = dbc.Alert("Error cargando el timeline.", color="danger", className="small")
-            return None, err
+            return None
 
     # ------------------------------------------------------------------ #
-    # milestones-data-store + selected-year → timeline-milestones         #
-    # (task 5.1 glass wrapping + task 4.3 year filtering)                 #
+    # milestones-data-store + selected-year-store → year-navigator-pills  #
+    # (task 7.1 — migrated to year-navigator-pills ID)                   #
     # ------------------------------------------------------------------ #
     @app.callback(
-        Output("timeline-milestones", "children"),
+        Output("year-navigator-pills", "children"),
         Input("milestones-data-store", "data"),
         Input("selected-year-store", "data"),
-        prevent_initial_call=False,
-    )
-    def render_timeline_milestones(milestones_data, selected_year):
-        """Renders glass-card milestone items, optionally filtered by selected year."""
-        if not milestones_data:
-            return no_update
-
-        filtered = milestones_data
-        if selected_year:
-            filtered = [
-                m for m in milestones_data
-                if str(m.get("date", ""))[:4] == str(selected_year)
-            ]
-            if not filtered:
-                return html.Div(f"No hay hitos para {selected_year}.", className="text-muted small p-2")
-
-        items = [_render_milestone_item(m, i) for i, m in enumerate(filtered)]
-        return items
-
-    # ------------------------------------------------------------------ #
-    # task 4.1  milestones-data-store → year-navigator chips              #
-    # ------------------------------------------------------------------ #
-    @app.callback(
-        Output("year-navigator", "children"),
-        Input("milestones-data-store", "data"),
         prevent_initial_call=True,
     )
-    def update_year_navigator(milestones_data):
-        """Builds year chip buttons from available milestone years."""
+    def update_year_navigator(milestones_data, selected_year):
+        """Builds year pill buttons from available milestone years; marks active year."""
         if not milestones_data:
             return []
 
@@ -243,51 +233,72 @@ def register_player_portal_callbacks(app):
         if not years:
             return []
 
-        chips = []
+        pills = []
         for year in years:
-            chips.append(
-                dbc.Button(
-                    year,
+            is_active = year == str(selected_year) if selected_year else False
+            pills.append(
+                html.Button(
+                    [html.Span(className="year-nav-icon"), year],
                     id={"type": "year-chip", "year": year},
-                    color="secondary",
-                    outline=True,
-                    size="sm",
-                    className="me-1 rounded-pill year-chip",
+                    className=f"year-nav-pill {'active' if is_active else ''}".strip(),
                     n_clicks=0,
-                    style={"display": "inline-block"},
                 )
             )
-        return chips
+        return pills
 
     # ------------------------------------------------------------------ #
-    # task 4.2  Clientside auto-scroll to current-year chip               #
+    # Clientside: scroll year pill bar to active/current year             #
     # ------------------------------------------------------------------ #
     app.clientside_callback(
         """
-        function(children) {
+        function(children, selected_year) {
             if (!children || children.length === 0) return null;
+            var targetYear = selected_year ? selected_year.toString() : new Date().getFullYear().toString();
             setTimeout(function() {
-                var bar = document.getElementById('year-navigator');
+                var bar = document.getElementById('year-navigator-pills');
                 if (!bar) return;
-                var currentYear = new Date().getFullYear().toString();
                 var buttons = bar.querySelectorAll('button');
                 for (var i = 0; i < buttons.length; i++) {
-                    if (buttons[i].textContent.trim() === currentYear) {
+                    if (buttons[i].textContent.trim() === targetYear) {
                         buttons[i].scrollIntoView({behavior: 'smooth', inline: 'center', block: 'nearest'});
                         break;
                     }
                 }
-            }, 100);
+            }, 150);
             return null;
         }
         """,
         Output("year-nav-scroll-dummy", "data"),
-        Input("year-navigator", "children"),
+        Input("year-navigator-pills", "children"),
+        Input("selected-year-store", "data"),
         prevent_initial_call=True,
     )
 
     # ------------------------------------------------------------------ #
-    # task 4.3  Year chip click → selected-year-store                     #
+    # Clientside: scroll milestone list to selected year section          #
+    # ------------------------------------------------------------------ #
+    app.clientside_callback(
+        """
+        function(selected_year) {
+            if (!selected_year) return null;
+            setTimeout(function() {
+                var container = document.querySelector('.milestone-list-container');
+                if (!container) return;
+                var target = container.querySelector('.year-' + selected_year);
+                if (target) {
+                    target.scrollIntoView({behavior: 'smooth', block: 'start'});
+                }
+            }, 150);
+            return null;
+        }
+        """,
+        Output("year-timeline-scroll-dummy", "data"),
+        Input("selected-year-store", "data"),
+        prevent_initial_call=True,
+    )
+
+    # ------------------------------------------------------------------ #
+    # Year chip click → selected-year-store                               #
     # ------------------------------------------------------------------ #
     @app.callback(
         Output("selected-year-store", "data"),
@@ -302,26 +313,55 @@ def register_player_portal_callbacks(app):
         triggered = ctx.triggered_id
         if isinstance(triggered, dict) and triggered.get("type") == "year-chip":
             year = triggered["year"]
-            return None if year == current_year else year
+            return None if year == str(current_year) else year
         return no_update
 
     # ------------------------------------------------------------------ #
-    # 5.2  Milestone click → update timeline-context-store                #
+    # milestones-data-store → timeline-milestones (continuous, no filter) #
+    # ------------------------------------------------------------------ #
+    @app.callback(
+        Output("timeline-milestones", "children"),
+        Input("milestones-data-store", "data"),
+        prevent_initial_call=False,
+    )
+    def render_timeline_milestones(milestones_data):
+        """Renders all glass-card milestone items continuously (no year filter)."""
+        if not milestones_data:
+            return no_update
+
+        return [_render_milestone_item(m, i) for i, m in enumerate(milestones_data)]
+
+    # ------------------------------------------------------------------ #
+    # Milestone click / Ver Detalle / Year chip → timeline-context-store  #
     # ------------------------------------------------------------------ #
     @app.callback(
         Output("timeline-context-store", "data"),
         Input({"type": "timeline-milestone", "index": ALL}, "n_clicks"),
-        Input({"type": "timeline-pill", "index": ALL}, "n_clicks"),
+        Input({"type": "milestone-detail-btn", "index": ALL}, "n_clicks"),
+        Input("selected-year-store", "data"),
         State("milestones-data-store", "data"),
         prevent_initial_call=True,
     )
-    def select_milestone(milestone_clicks, pill_clicks, milestones_data):
-        """Updates the context store when a milestone is clicked."""
+    def select_milestone(milestone_clicks, detail_clicks, selected_year, milestones_data):
+        """Updates the context store when a milestone icon, Ver Detalle, or year chip is clicked."""
         if not ctx.triggered_id or not milestones_data:
             return no_update
 
         triggered = ctx.triggered_id
-        if isinstance(triggered, dict) and triggered.get("type") in ("timeline-milestone", "timeline-pill"):
+
+        # Year chip: find career milestone for the selected year
+        if triggered == "selected-year-store":
+            if not selected_year:
+                return no_update
+            for m in milestones_data:
+                if m.get("type") == "career" and str(m.get("date", ""))[:4] == str(selected_year):
+                    return {"type": "career", "payload": m["payload"]}
+            return no_update
+
+        if isinstance(triggered, dict) and triggered.get("type") in (
+            "timeline-milestone",
+            "milestone-detail-btn",
+        ):
             index = triggered["index"]
             if 0 <= index < len(milestones_data):
                 m = milestones_data[index]
@@ -330,7 +370,7 @@ def register_player_portal_callbacks(app):
         return no_update
 
     # ------------------------------------------------------------------ #
-    # 5.3  timeline-context-store → Stage content                         #
+    # timeline-context-store → Stage content                              #
     # ------------------------------------------------------------------ #
     @app.callback(
         Output("stage-content", "children"),
@@ -359,47 +399,88 @@ def register_player_portal_callbacks(app):
             logger.error(f"update_stage error: {e}")
             return dbc.Alert("Error al renderizar el escenario.", color="danger")
 
-
     # ------------------------------------------------------------------ #
-    # task 5.2  Inline milestone expand/collapse toggle                   #
-    # ------------------------------------------------------------------ #
-    @app.callback(
-        Output({"type": "milestone-inline-collapse", "index": ALL}, "is_open"),
-        Input({"type": "milestone-inline-toggle", "index": ALL}, "n_clicks"),
-        State({"type": "milestone-inline-collapse", "index": ALL}, "is_open"),
-        prevent_initial_call=True,
-    )
-    def toggle_milestone_inline(n_clicks_list, is_open_list):
-        """Toggles inline summary collapse for milestone cards without stage dispatch."""
-        if not ctx.triggered_id:
-            return no_update
-        triggered_index = ctx.triggered_id.get("index")
-        result = list(is_open_list)
-        for i, (nc, current_open) in enumerate(zip(n_clicks_list, is_open_list)):
-            if i == triggered_index and nc:
-                result[i] = not current_open
-        return result
-
-    # ------------------------------------------------------------------ #
-    # Match-history expand/collapse toggle (career milestones)            #
+    # Milestone expand/collapse toggle — manual + year-chip auto-expand   #
+    # (all milestones have milestone-collapse, so index maps 1:1)         #
     # ------------------------------------------------------------------ #
     @app.callback(
-        Output({"type": "match-history-collapse", "index": ALL}, "is_open"),
-        Input({"type": "match-history-toggle", "index": ALL}, "n_clicks"),
-        State({"type": "match-history-collapse", "index": ALL}, "is_open"),
+        Output({"type": "milestone-collapse", "index": ALL}, "is_open"),
+        Input({"type": "milestone-toggle", "index": ALL}, "n_clicks"),
+        Input("selected-year-store", "data"),
+        State({"type": "milestone-collapse", "index": ALL}, "is_open"),
+        State("milestones-data-store", "data"),
         prevent_initial_call=True,
     )
-    def toggle_match_history(n_clicks_list, is_open_list):
-        """Toggles the visibility of the match-history sub-list for the triggered milestone."""
+    def toggle_milestone(n_clicks_list, selected_year, is_open_list, milestones_data):
+        """Toggles Level 2 collapse; year chip auto-expands the matching career card."""
         if not ctx.triggered_id:
             return no_update
 
-        triggered_index = ctx.triggered_id.get("index")
-        result = list(is_open_list)
-        for i, (nc, current_open) in enumerate(zip(n_clicks_list, is_open_list)):
-            if i == triggered_index and nc:
-                result[i] = not current_open
-        return result
+        triggered = ctx.triggered_id
+
+        # Year chip: open matching career card (multi-expand — don't close others)
+        if triggered == "selected-year-store":
+            if not selected_year or not milestones_data:
+                return no_update
+            result = list(is_open_list)
+            for i, m in enumerate(milestones_data):
+                if i < len(result):
+                    year = str(m.get("date", ""))[:4]
+                    if m.get("type") == "career" and year == str(selected_year):
+                        result[i] = True
+            return result
+
+        # Manual toggle
+        if isinstance(triggered, dict) and triggered.get("type") == "milestone-toggle":
+            triggered_index = triggered["index"]
+            result = list(is_open_list)
+            if triggered_index < len(result):
+                result[triggered_index] = not result[triggered_index]
+            return result
+
+        return no_update
+
+    # ------------------------------------------------------------------ #
+    # tasks 6.1 + 6.2  Clientside sliding panel navigation               #
+    # ------------------------------------------------------------------ #
+    app.clientside_callback(
+        """
+        function(detail_clicks, back_clicks) {
+            var triggered = dash_clientside.callback_context.triggered;
+            if (!triggered || triggered.length === 0) {
+                return [window.dash_clientside.no_update, window.dash_clientside.no_update];
+            }
+            var prop_id = triggered[0].prop_id || "";
+
+            if (prop_id.includes("milestone-detail-btn")) {
+                return ["portal-viewport show-stage", {"panel": "stage"}];
+            }
+            if (prop_id === "portal-back-btn.n_clicks") {
+                return ["portal-viewport", {"panel": "timeline"}];
+            }
+            return [window.dash_clientside.no_update, window.dash_clientside.no_update];
+        }
+        """,
+        Output("portal-viewport", "className"),
+        Output("portal-panel-state", "data"),
+        Input({"type": "milestone-detail-btn", "index": ALL}, "n_clicks"),
+        Input("portal-back-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )
+
+    # ------------------------------------------------------------------ #
+    # task 6.3  Back button visibility from portal-panel-state            #
+    # ------------------------------------------------------------------ #
+    @app.callback(
+        Output("portal-back-button", "style"),
+        Input("portal-panel-state", "data"),
+        prevent_initial_call=False,
+    )
+    def toggle_back_button_visibility(panel_state):
+        """Shows the back button when the stage panel is active (mobile only via CSS)."""
+        if panel_state and panel_state.get("panel") == "stage":
+            return {"display": "flex", "alignItems": "center"}
+        return {"display": "none"}
 
 
 def _serialize_milestones(milestones: list) -> list:

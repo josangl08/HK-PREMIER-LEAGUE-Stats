@@ -4,8 +4,8 @@
 
 :root {
     /* Nueva paleta de colores HKFA */
-    --background-primary: #18181A;
-    --background-secondary: #232326;
+    --background-primary: #2a2a2a;
+    --background-secondary: #3a1a2a;
     --accent-primary: #93312a;
     --text-primary: #FFFFFF;
     --text-secondary: #A7A7A7;
@@ -16,8 +16,8 @@
     --border-radius-button: 8px;
 
     /* Glassmorphism System */
-    --glass-bg: rgba(255, 255, 255, 0.03);
-    --glass-border: rgba(255, 255, 255, 0.08);
+    --glass-bg: rgba(255, 255, 255, 0.05);
+    --glass-border: rgba(255, 255, 255, 0.12);
     --glass-blur: blur(12px);
     --card-accent: var(--accent-primary);
     --card-glow-opacity: 0.15;
@@ -41,15 +41,15 @@
     --info-color: #17a2b8;
     --light-color: #A7A7A7;
     --pink-color: #dc1d75;
-    --dark-color: #232326;
-    --background-color: #18181A;
+    --dark-color: #3a1a2a;
+    --background-color: #2a2a2a;
     --card-shadow: none; /* Las nuevas tarjetas no usan sombra */
     --border-radius: 8px; /* Mantener para componentes no actualizados */
 }
 
 body {
     font-family: 'Roboto', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    background-color: var(--background-primary); /* #18181A - fondo más oscuro */
+    background: linear-gradient(180deg, #2a2a2a 0%, #5a1535 100%) fixed;
     color: var(--text-primary);
     margin: 0;
     padding: 0;
@@ -122,7 +122,7 @@ a:hover, .link:hover {
 
 /* Personalización de Cards (HKFA Style) */
 .card {
-    background-color: var(--background-secondary); /* #232326 */
+    background-color: var(--background-secondary);
     border-radius: var(--border-radius-card); /* 12px */
     border: none;
     box-shadow: none;
@@ -465,7 +465,7 @@ a:hover, .link:hover {
 .league-view-container,
 .team-view-container,
 .player-view-container {
-    background-color: var(--background-primary); /* #18181A - fondo oscuro para contrastar */
+    background: transparent;
     padding: 0;
     margin: 0;
 }
@@ -519,7 +519,7 @@ a:hover, .link:hover {
 
 /* Auth Specific Overrides (Login/Register) */
 .bg-light.min-vh-100 {
-    background-color: var(--background-primary) !important;
+    background: linear-gradient(180deg, #2a2a2a 0%, #5a1535 100%) fixed !important;
 }
 
 .auth-card {

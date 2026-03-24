@@ -114,21 +114,50 @@ def create_skeleton_table(
 
 def create_skeleton_timeline(num_items: int = 6):
     """
-    Create a skeleton loader for the Player Portal Timeline.
+    Create a skeleton loader for the Player Portal Timeline (Sidebar).
+    Adjusted for 25% width context.
     """
     items = []
     for _ in range(num_items):
         items.append(
             html.Div([
-                html.Div(className="skeleton skeleton-circle me-3", 
-                         style={"width": "24px", "height": "24px", "flexShrink": 0}),
+                # Milestone icon placeholder
+                html.Div(className="skeleton skeleton-circle me-2", 
+                         style={"width": "20px", "height": "20px", "flexShrink": 0}),
                 html.Div([
-                    html.Div(className="skeleton", style={"width": "120px", "height": "16px", "marginBottom": "4px"}),
-                    html.Div(className="skeleton", style={"width": "80px", "height": "12px"}),
+                    # Title placeholder
+                    html.Div(className="skeleton", style={"width": "100%", "height": "14px", "marginBottom": "4px"}),
+                    # Date/Subtitle placeholder
+                    html.Div(className="skeleton", style={"width": "60%", "height": "10px"}),
                 ], className="flex-grow-1")
             ], className="d-flex align-items-center mb-4 px-2")
         )
-    return html.Div(items)
+    return html.Div(items, className="milestone-list-container")
+
+
+def create_skeleton_year_navigator(num_pills: int = 6):
+    """
+    Create a skeleton loader for the Unified Year Navigator.
+    """
+    pills = []
+    for _ in range(num_pills):
+        pills.append(
+            html.Div(
+                className="skeleton year-nav-pill",
+                style={
+                    "width": "60px", 
+                    "height": "32px", 
+                    "marginRight": "8px",
+                    "display": "inline-block",
+                    "border": "none" # Override pill border for skeleton look
+                }
+            )
+        )
+    return html.Div(
+        pills, 
+        id="year-navigator-pills-skeleton",
+        className="d-flex overflow-hidden py-2 mb-3"
+    )
 
 
 def create_skeleton_stage():

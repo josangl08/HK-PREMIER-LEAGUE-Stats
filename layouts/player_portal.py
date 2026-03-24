@@ -1,94 +1,96 @@
-# ABOUTME: Player Portal layout implementing the 'Career Stage' architecture.
-# ABOUTME: Timeline (sticky sidebar) drives a dynamic Stage that renders post-match, pre-match, or career-insights scenarios.
+# ABOUTME: Player Portal layout implementing the Phase 2 SPA navigation architecture.
+# ABOUTME: Renders a .portal-viewport with sliding panels (mobile) and split-screen grid (desktop).
 
 from dash import html, dcc
 import dash_bootstrap_components as dbc
-from utils.skeleton_components import create_skeleton_timeline, create_skeleton_stage
+from utils.skeleton_components import (
+    create_skeleton_timeline,
+    create_skeleton_stage,
+    create_skeleton_year_navigator,
+)
 
 
-def _build_year_navigator() -> html.Div:
-    """Sticky horizontal year-chip bar above the timeline milestone list."""
+def create_unified_year_navigator() -> html.Div:
+    """
+    Horizontally scrollable Year Navigator container.
+    Content (pills) is populated by update_year_navigator callback.
+    """
     return html.Div(
-        id="year-navigator",
-        children=[],  # populated by update_year_navigator callback
-        style={
-            "overflowX": "auto",
-            "whiteSpace": "nowrap",
-            "position": "sticky",
-            "top": 0,
-            "zIndex": 10,
-            "paddingBottom": "6px",
-            "marginBottom": "8px",
-        },
+        id="year-navigator-pills",
+        children=[create_skeleton_year_navigator()],
     )
 
 
-def _build_timeline_component() -> html.Div:
-    """Sticky sidebar timeline — desktop (d-none d-md-flex)."""
+def _build_timeline_column() -> html.Div:
+    """Timeline column: sticky header (title + year nav) + scrollable milestone list."""
     return html.Div(
-        id="player-timeline",
+        className="timeline-column px-3 pb-3",
         children=[
-            html.Div([
-                html.I(className="bi bi-clock-history me-2"),
-                html.Span("Timeline", className="fw-bold"),
-            ], className="mb-3", style={"color": "var(--bs-body-color)"}),
-            _build_year_navigator(),
-            dcc.Loading(
-                id="timeline-loading",
-                type="dot",
-                children=html.Div(id="timeline-milestones", children=[
-                    create_skeleton_timeline(8),
-                ]),
-            ),
-        ],
-        style={
-            "position": "sticky",
-            "top": "1rem",
-            "maxHeight": "calc(100vh - 80px)",
-            "overflowY": "auto",
-            "paddingRight": "8px",
-        },
-    )
-
-
-def _build_mobile_carousel() -> html.Div:
-    """Horizontal pill carousel — mobile only (d-flex d-md-none)."""
-    return html.Div(
-        id="player-timeline-mobile",
-        children=[
-            dcc.Loading(
-                id="pills-loading",
-                type="dot",
-                children=html.Div(id="timeline-pills-mobile", children=[
-                    html.Div(className="skeleton rounded-pill me-2", style={"width": "100px", "height": "32px"}),
-                    html.Div(className="skeleton rounded-pill me-2", style={"width": "120px", "height": "32px"}),
-                    html.Div(className="skeleton rounded-pill me-2", style={"width": "90px", "height": "32px"}),
-                ], className="d-flex gap-2 overflow-auto pb-2"),
-            ),
-        ],
-        className="mb-3 d-flex d-md-none",
-    )
-
-
-def _build_stage_component() -> html.Div:
-    """Dynamic Stage area with loading wrapper and decision nodes slot."""
-    return html.Div([
-        dcc.Store(id="timeline-context-store"),
-        dcc.Loading(
-            id="stage-loading",
-            type="circle",
-            color="var(--bs-primary)",
-            children=html.Div(
-                id="stage-content",
+            html.Div(
+                className="sticky-sidebar-header",
                 children=[
-                    # Default welcome state (wrapped in skeleton for initial load)
-                    create_skeleton_stage()
+                    html.Div(
+                        [
+                            html.I(className="bi bi-clock-history me-2"),
+                            html.Span("Timeline", className="fw-bold"),
+                        ],
+                        className="mb-2",
+                        style={"color": "var(--bs-body-color)"},
+                    ),
+                    create_unified_year_navigator(),
                 ],
             ),
-            className="mb-3",
-        ),
-        html.Div(id="stage-decision-nodes"),
-    ])
+            html.Div(
+                className="milestone-list-container",
+                children=[
+                    dcc.Loading(
+                        id="timeline-loading",
+                        type="dot",
+                        children=html.Div(
+                            id="timeline-milestones",
+                            children=[create_skeleton_timeline(8)],
+                        ),
+                    ),
+                ],
+            ),
+        ],
+    )
+
+
+def _build_stage_column() -> html.Div:
+    """Stage column: back button (mobile only) + dynamic stage content."""
+    return html.Div(
+        className="stage-column px-3 pb-3",
+        children=[
+            dcc.Store(id="timeline-context-store"),
+            # Back button — visible on mobile when stage panel is active
+            html.Div(
+                id="portal-back-button",
+                style={"display": "none"},
+                children=[
+                    dbc.Button(
+                        [html.I(className="bi bi-arrow-left me-2"), "Volver"],
+                        id="portal-back-btn",
+                        color="link",
+                        size="sm",
+                        className="mb-2 ps-0",
+                        n_clicks=0,
+                    ),
+                ],
+            ),
+            dcc.Loading(
+                id="stage-loading",
+                type="circle",
+                color="var(--bs-primary)",
+                children=html.Div(
+                    id="stage-content",
+                    children=[create_skeleton_stage()],
+                ),
+                className="mb-3",
+            ),
+            html.Div(id="stage-decision-nodes"),
+        ],
+    )
 
 
 def create_player_portal_layout(user_role: str = "player") -> html.Div:
@@ -96,41 +98,44 @@ def create_player_portal_layout(user_role: str = "player") -> html.Div:
     Returns the full Player Portal layout.
     user_role is passed for server-side conditional rendering (e.g. Dossier button).
     """
-    return html.Div([
-        # Stores (static — populated by callbacks)
-        dcc.Store(id="milestones-data-store"),
-        dcc.Store(id="selected-year-store", data=None),
-        dcc.Store(id="year-nav-scroll-dummy"),  # sink for year-navigator clientside scroll
+    return html.Div(
+        id="player-portal-container",
+        children=[
+            # Stores (static — populated by callbacks)
+            dcc.Store(id="milestones-data-store"),
+            dcc.Store(id="selected-year-store", data=None),
+            dcc.Store(id="year-nav-scroll-dummy"),
+            dcc.Store(id="year-timeline-scroll-dummy"),
+            dcc.Store(id="portal-panel-state", data={"panel": "timeline"}),
 
-        dbc.Container([
-            # Page header
-            dbc.Row([
-                dbc.Col([
-                    html.H4([
-                        html.I(className="bi bi-person-badge me-2"),
-                        "Player Portal",
-                    ], className="mb-0"),
-                    html.Small("Career Stage", className="text-muted"),
-                ], className="mb-4"),
-            ]),
+            dbc.Container(
+                [
+                    # Page header
+                    dbc.Row([
+                        dbc.Col([
+                            html.H4(
+                                [
+                                    html.I(className="bi bi-person-badge me-2"),
+                                    "Player Portal",
+                                ],
+                                className="mb-0",
+                            ),
+                            html.Small("Career Stage", className="text-muted"),
+                        ], className="mb-4"),
+                    ]),
 
-            # Mobile pill carousel (hidden on desktop)
-            _build_mobile_carousel(),
-
-            # Main layout: Timeline (desktop) + Stage
-            dbc.Row([
-                # Desktop sidebar timeline (hidden on mobile)
-                dbc.Col(
-                    _build_timeline_component(),
-                    width=3,
-                    className="d-none d-md-flex flex-column",
-                ),
-                # Stage (full width on mobile, 9 cols on desktop)
-                dbc.Col(
-                    _build_stage_component(),
-                    width=12,
-                    md=9,
-                ),
-            ]),
-        ], fluid=True, className="py-3"),
-    ])
+                    # Portal Viewport — sliding on mobile, grid on desktop
+                    html.Div(
+                        id="portal-viewport",
+                        className="portal-viewport",
+                        children=[
+                            _build_timeline_column(),
+                            _build_stage_column(),
+                        ],
+                    ),
+                ],
+                fluid=True,
+                className="py-3",
+            ),
+        ],
+    )
