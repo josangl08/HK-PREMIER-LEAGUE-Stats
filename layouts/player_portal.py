@@ -1,5 +1,5 @@
-# ABOUTME: Player Portal layout implementing the Phase 2 SPA navigation architecture.
-# ABOUTME: Renders a .portal-viewport with sliding panels (mobile) and split-screen grid (desktop).
+# ABOUTME: Player Portal layout implementing Phase 3 interactive global header and scroll-sync.
+# ABOUTME: Full-width title header, year nav inside timeline column, sliding panels on mobile.
 
 from dash import html, dcc
 import dash_bootstrap_components as dbc
@@ -21,27 +21,40 @@ def create_unified_year_navigator() -> html.Div:
     )
 
 
-def _build_timeline_column() -> html.Div:
-    """Timeline column: sticky header (title + year nav) + scrollable milestone list."""
+def _build_global_header() -> html.Div:
+    """
+    Full-width sticky header. Only shows the portal title — no year nav.
+    Year navigator has been moved into the timeline column.
+    """
     return html.Div(
-        className="timeline-column px-3 pb-3",
+        className="portal-global-header d-flex align-items-center",
         children=[
-            html.Div(
-                className="sticky-sidebar-header",
-                children=[
-                    html.Div(
-                        [
-                            html.I(className="bi bi-clock-history me-2"),
-                            html.Span("Timeline", className="fw-bold"),
-                        ],
-                        className="mb-2",
-                        style={"color": "var(--bs-body-color)"},
-                    ),
-                    create_unified_year_navigator(),
-                ],
+            html.I(
+                **{"data-lucide": "user-circle", "className": "lucide-header-icon me-2"},
+                style={"color": "var(--accent-cyan)"},
             ),
+            html.H5("Player Portal", className="mb-0 fw-bold"),
+            html.Small(
+                "Interactive Career Timeline",
+                className="text-muted ms-3 d-none d-md-block",
+            ),
+        ],
+    )
+
+
+def _build_timeline_column() -> html.Div:
+    """Timeline column: sticky year navigator at top + scrollable milestone list."""
+    return html.Div(
+        className="timeline-column pb-3",
+        children=[
+            # Year navigator — sticky at top of timeline column, above events
             html.Div(
-                className="milestone-list-container",
+                create_unified_year_navigator(),
+                className="timeline-year-nav px-3",
+            ),
+            # Scrollable milestone list
+            html.Div(
+                className="milestone-list-container px-3",
                 children=[
                     dcc.Loading(
                         id="timeline-loading",
@@ -78,6 +91,14 @@ def _build_stage_column() -> html.Div:
                     ),
                 ],
             ),
+            # Gallery close button — always in DOM (hidden) to avoid Dash 4 Input validation error
+            html.Button(
+                [html.I(className="bi bi-x-lg me-1"), "Cerrar galería"],
+                id="gallery-close-btn",
+                style={"display": "none"},
+                className="btn btn-sm btn-outline-secondary mb-2",
+                n_clicks=0,
+            ),
             dcc.Loading(
                 id="stage-loading",
                 type="circle",
@@ -96,46 +117,35 @@ def _build_stage_column() -> html.Div:
 def create_player_portal_layout(user_role: str = "player") -> html.Div:
     """
     Returns the full Player Portal layout.
-    user_role is passed for server-side conditional rendering (e.g. Dossier button).
+    Global header is OUTSIDE the container to span the full page width.
     """
     return html.Div(
         id="player-portal-container",
         children=[
-            # Stores (static — populated by callbacks)
+            # Stores (Phase 2 & 3)
             dcc.Store(id="milestones-data-store"),
             dcc.Store(id="selected-year-store", data=None),
             dcc.Store(id="year-nav-scroll-dummy"),
             dcc.Store(id="year-timeline-scroll-dummy"),
             dcc.Store(id="portal-panel-state", data={"panel": "timeline"}),
+            dcc.Store(id="timeline-expand-store", data=[]),
+            dcc.Store(id="active-year-store", data=None),
 
+            # Full-width sticky title header (outside Container)
+            _build_global_header(),
+
+            # Portal Viewport — no horizontal padding on container
             dbc.Container(
-                [
-                    # Page header
-                    dbc.Row([
-                        dbc.Col([
-                            html.H4(
-                                [
-                                    html.I(className="bi bi-person-badge me-2"),
-                                    "Player Portal",
-                                ],
-                                className="mb-0",
-                            ),
-                            html.Small("Career Stage", className="text-muted"),
-                        ], className="mb-4"),
-                    ]),
-
-                    # Portal Viewport — sliding on mobile, grid on desktop
-                    html.Div(
-                        id="portal-viewport",
-                        className="portal-viewport",
-                        children=[
-                            _build_timeline_column(),
-                            _build_stage_column(),
-                        ],
-                    ),
-                ],
+                html.Div(
+                    id="portal-viewport",
+                    className="portal-viewport",
+                    children=[
+                        _build_timeline_column(),
+                        _build_stage_column(),
+                    ],
+                ),
                 fluid=True,
-                className="py-3",
+                className="py-0 px-0",
             ),
         ],
     )

@@ -1,8 +1,10 @@
-# ABOUTME: Helper functions for rendering Stage scenarios and AI widgets (Feature G).
-# ABOUTME: Dispatches rendering for post-match, pre-match, and career-insights with contextual projector.
+# ABOUTME: Helper functions for rendering Stage scenarios, AI widgets, and image gallery (Feature G).
+# ABOUTME: Dispatches rendering for post-match, pre-match, career-insights, and Action Node gallery views.
 
 import logging
+import os
 import threading
+from pathlib import Path
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
@@ -31,6 +33,7 @@ POSITION_METRICS: Dict[str, List[str]] = {
 }
 
 _CURRENT_SEASON_FALLBACK = "2025-26"
+_CARD_CACHE_DIR = Path("data/cache/cards")
 
 
 def _get_current_season() -> str:
@@ -39,6 +42,61 @@ def _get_current_season() -> str:
         return get_hong_kong_data_manager().current_season or _CURRENT_SEASON_FALLBACK
     except Exception:
         return _CURRENT_SEASON_FALLBACK
+
+
+def get_cached_image_path(milestone_id: str) -> Optional[str]:
+    """
+    Checks the card cache directory for a generated image matching the milestone ID.
+    Returns the path string if found, None otherwise.
+    """
+    if not milestone_id:
+        return None
+    try:
+        for ext in (".png", ".jpg", ".jpeg", ".webp"):
+            candidate = _CARD_CACHE_DIR / f"{milestone_id}{ext}"
+            if candidate.exists():
+                return str(candidate)
+    except Exception as e:
+        logger.warning(f"get_cached_image_path error for '{milestone_id}': {e}")
+    return None
+
+
+def render_image_gallery(image_path: Optional[str]) -> html.Div:
+    """
+    Returns a glassmorphic image gallery view for the Stage panel.
+    Shows the image if path is valid, otherwise a graceful placeholder.
+    Close button is rendered statically in the layout (gallery-close-btn).
+    """
+    if image_path and os.path.isfile(image_path):
+        content = html.Div(
+            [
+                html.Div(
+                    html.Img(
+                        src=image_path,
+                        className="img-fluid rounded",
+                        style={"maxHeight": "400px", "objectFit": "contain"},
+                    ),
+                    className="text-center",
+                ),
+                html.Small(
+                    os.path.basename(image_path),
+                    className="text-muted d-block text-center mt-2",
+                ),
+            ]
+        )
+    else:
+        content = html.Div(
+            [
+                html.I(className="bi bi-image text-muted", style={"fontSize": "3rem"}),
+                html.P("No hay imagen disponible", className="text-muted mt-2 mb-0"),
+            ],
+            className="text-center py-4",
+        )
+
+    return html.Div(
+        content,
+        className="stage-gallery-view",
+    )
 
 
 def _infer_position_group(position: str) -> str:

@@ -160,7 +160,7 @@ def create_navbar(pathname):
         ],
         dark=True,
         color="dark",
-        className="mb-4 shadow-sm",
+        className="shadow-sm",
     )
 
     return navbar
