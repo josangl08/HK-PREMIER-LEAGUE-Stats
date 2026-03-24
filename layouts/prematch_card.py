@@ -98,7 +98,7 @@ def create_prematch_card(fixture: dict | None) -> html.Div:
         className="btn btn-sm btn-outline-danger mt-3 w-100",
     ) if streaming_url else None
 
-    return html.Div(
+    return html.Div([
         dbc.Card(
             dbc.CardBody([
                 # Competition badge

@@ -148,13 +148,14 @@ def register_agent_callbacks(app):
     # ------------------------------------------------------------------ #
     @app.callback(
         Output("stage-decision-nodes", "children"),
+        Output("stage-context-snapshot", "data"),
         Input("timeline-context-store", "data"),
         prevent_initial_call=True,
     )
     def update_decision_nodes(context):
         """Injects Decision Node buttons into the Stage based on active timeline context."""
         if not context:
-            return no_update
+            return no_update, no_update
 
         user_role = getattr(current_user, "role", "player") if current_user else "player"
         m_type = context.get("type")
@@ -162,16 +163,16 @@ def register_agent_callbacks(app):
 
         try:
             if m_type == "post-match":
-                return _decision_nodes_post_match(payload)
+                return _decision_nodes_post_match(payload), context
             elif m_type == "pre-match":
-                return _decision_nodes_pre_match(payload)
+                return _decision_nodes_pre_match(payload), context
             elif m_type == "career":
-                return _decision_nodes_career(payload, user_role)
+                return _decision_nodes_career(payload, user_role), context
         except Exception as exc:
             logger.error(f"update_decision_nodes error: {exc}")
-            return dbc.Alert("Error al cargar las acciones.", color="danger", className="small")
+            return dbc.Alert("Error al cargar las acciones.", color="danger", className="small"), no_update
 
-        return no_update
+        return no_update, no_update
 
     # ------------------------------------------------------------------ #
     # Original agent query callback                                        #

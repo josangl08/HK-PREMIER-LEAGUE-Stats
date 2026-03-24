@@ -217,7 +217,7 @@ a:hover, .link:hover {
 .animate-glass-draw::after {
     content: '';
     position: absolute;
-    bottom: 0;
+    bottom: -2px;
     left: 0;
     height: 2px;
     background: var(--accent-primary);

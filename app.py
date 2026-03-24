@@ -190,6 +190,13 @@ try:
 except ImportError as e:
     logger.info(f"⚠️ Player Portal callbacks no disponibles: {e}")
 
+try:
+    from callbacks.stage_action_callbacks import register_stage_action_callbacks
+    register_stage_action_callbacks(app)
+    logger.info("✓ Stage Action callbacks registrados")
+except ImportError as e:
+    logger.info(f"⚠️ Stage Action callbacks no disponibles: {e}")
+
 logger.info("✓ Callbacks importados correctamente.")
 
 # Obtener nombres de jugadores para el Store global (una sola vez al arrancar)

@@ -298,29 +298,17 @@ def render_career_insights(payload: Dict[str, Any], user_role: str = "player") -
 
     # ── Projection figure (context-aware: wrap_up vs projection mode) ──────
     projection_fig = get_projection_figure(player_id, season, current_season=current_season)
-    projection_section = dbc.Card([
-        dbc.CardHeader([
-            html.I(className="bi bi-graph-up-arrow me-2"),
-            html.Span("Performance Projection", className="fw-semibold"),
-        ], className="border-0"),
-        dbc.CardBody([
-            dcc.Graph(figure=projection_fig, config={"displayModeBar": False}),
-        ])
-    ], className="border-0 shadow-sm mb-3")
+    projection_section = html.Div(
+        dcc.Graph(figure=projection_fig, config={"displayModeBar": False}, className="w-100"),
+        className="mb-3",
+    )
 
-    # ── UMAP clustering figure (nested glass-card, task 6.3) ──────────────
+    # ── UMAP clustering figure ─────────────────────────────────────────────
     umap_fig = get_umap_figure(player_id)
-    umap_section = html.Div([
-        dbc.Card([
-            dbc.CardHeader([
-                html.I(className="bi bi-diagram-3 me-2"),
-                html.Span("Playstyle Map (UMAP)", className="fw-semibold"),
-            ], className="border-0"),
-            dbc.CardBody([
-                dcc.Graph(figure=umap_fig, config={"displayModeBar": False}),
-            ])
-        ], className="border-0 shadow-sm mb-3"),
-    ], className="glass-card")
+    umap_section = html.Div(
+        dcc.Graph(figure=umap_fig, config={"displayModeBar": False}, className="w-100"),
+        className="mb-3",
+    )
 
     # ── Agent role: Dossier export button ──────────────────────────────────
     dossier_button = html.Div()
@@ -345,13 +333,13 @@ def render_career_insights(payload: Dict[str, Any], user_role: str = "player") -
                     f"Career Perspective — Season {season}",
                     className="animate-glass-draw",
                 ),
-            ], className="mb-3 text-muted"),
+            ], className="mb-3 fw-semibold", style={"color": "var(--accent-cyan, #00d4ff)"}),
             dbc.Row([
                 dbc.Col(projection_section, width=12, lg=6),
                 dbc.Col(umap_section, width=12, lg=6),
             ]),
             dossier_button,
-        ]),
+        ], className="pb-2"),
         className="glass-card glass-career",
     )
 

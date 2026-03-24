@@ -76,6 +76,8 @@ def _build_stage_column() -> html.Div:
         className="stage-column px-3 pb-3",
         children=[
             dcc.Store(id="timeline-context-store"),
+            dcc.Store(id="stage-context-snapshot"),
+            dcc.Download(id="stage-action-download"),
             # Back button — visible on mobile when stage panel is active
             html.Div(
                 id="portal-back-button",

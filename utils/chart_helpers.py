@@ -47,6 +47,9 @@ class HKFATheme:
     # Borders
     BORDER_COLOR = "#3A3A3C"
 
+    # Grid lines (lighter than border for chart readability)
+    GRID_COLOR = "#525255"
+
     # Data series palette (colorblind-safe)
     DATA_SERIES = [
         "#ED1C24",  # HKFA Red
@@ -98,7 +101,7 @@ def apply_hkfa_theme(fig: go.Figure) -> go.Figure:
 
         # Gridlines
         xaxis=dict(
-            gridcolor=HKFATheme.BG_TERTIARY,
+            gridcolor=HKFATheme.GRID_COLOR,
             gridwidth=0.5,
             showgrid=True,
             zeroline=False,
@@ -108,7 +111,7 @@ def apply_hkfa_theme(fig: go.Figure) -> go.Figure:
             title_font=dict(color=HKFATheme.TEXT_SECONDARY)
         ),
         yaxis=dict(
-            gridcolor=HKFATheme.BG_TERTIARY,
+            gridcolor=HKFATheme.GRID_COLOR,
             gridwidth=0.5,
             showgrid=True,
             zeroline=False,
@@ -147,12 +150,12 @@ def apply_hkfa_theme(fig: go.Figure) -> go.Figure:
     fig.update_xaxes(
         showgrid=True,
         gridwidth=0.5,
-        gridcolor=HKFATheme.BG_TERTIARY
+        gridcolor=HKFATheme.GRID_COLOR
     )
     fig.update_yaxes(
         showgrid=True,
         gridwidth=0.5,
-        gridcolor=HKFATheme.BG_TERTIARY
+        gridcolor=HKFATheme.GRID_COLOR
     )
 
     return fig
@@ -367,7 +370,7 @@ def create_radar_chart(
                 visible=True,
                 range=[0, 100],
                 tickfont=dict(color=HKFATheme.TEXT_SECONDARY),
-                gridcolor=HKFATheme.BG_TERTIARY
+                gridcolor=HKFATheme.GRID_COLOR
             ),
             bgcolor=HKFATheme.BG_SECONDARY
         ),
