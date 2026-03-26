@@ -1,3 +1,7 @@
+import json
+import re
+from pathlib import Path
+
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Optional, Union, Any
@@ -1309,3 +1313,173 @@ class HongKongStatsAggregator:
     def get_available_players(self, team_name: Optional[str] = None) -> List[str]:
         """Retorna lista de jugadores disponibles."""
         return self.get_available_entities('players', team_name)
+
+
+# ── Module-level helpers for timeline enrichment ──────────────────────────────
+
+_HISTORICAL_RECORDS_DIR = Path(__file__).parent.parent / "historical_records"
+
+# Wyscout player_id → Transfermarkt numeric ID (mirrors TM_ID_MAP in timeline_aggregator)
+_WYSCOUT_TO_TM: Dict[str, str] = {
+    "148891": "160182",  # José Ángel
+    "125040": "146608",  # Manuel Bleda
+    "355333": "339749",  # Felipe Sá
+}
+
+
+def get_season_summary(player_id: str, season: str) -> Dict:
+    """
+    Returns aggregated season stats for a player from local Transfermarkt historical records.
+
+    Args:
+        player_id: Wyscout or TM player ID.
+        season: Season string, e.g. "2023-24".
+
+    Returns:
+        Dict with keys: season, pj, goals, assists, minutes,
+        by_competition (list of {competition, pj, goals, assists}).
+        Returns empty dict on error.
+    """
+    # Resolve TM ID: accept both Wyscout IDs (converted) and direct TM IDs
+    tm_id = _WYSCOUT_TO_TM.get(player_id, player_id)
+    record_path = _HISTORICAL_RECORDS_DIR / f"{tm_id}.json"
+
+    if not record_path.exists():
+        logger.debug(f"Historical records not found for TM ID {tm_id}")
+        return {}
+
+    try:
+        data = json.loads(record_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning(f"Failed to read historical records for {tm_id}: {exc}")
+        return {}
+
+    season_data = data.get("seasons", {}).get(season)
+    if not season_data:
+        logger.debug(f"Season {season} not found in records for TM ID {tm_id}")
+        return {}
+
+    matches: List[Dict] = season_data.get("matches", [])
+    summary = season_data.get("summary", {})
+
+    # Aggregate by competition
+    comp_stats: Dict[str, Dict] = {}
+    for m in matches:
+        comp = m.get("competition", "Unknown")
+        if comp not in comp_stats:
+            comp_stats[comp] = {"competition": comp, "pj": 0, "goals": 0, "assists": 0}
+        comp_stats[comp]["pj"] += 1
+        comp_stats[comp]["goals"] += int(m.get("goals", 0) or 0)
+        comp_stats[comp]["assists"] += int(m.get("assists", 0) or 0)
+
+    return {
+        "season": season,
+        "pj": summary.get("total_matches", len(matches)),
+        "goals": summary.get("goals", 0),
+        "assists": summary.get("assists", 0),
+        "minutes": summary.get("minutes_played", 0),
+        "by_competition": list(comp_stats.values()),
+    }
+
+
+def _strip_team_rank(name: str) -> str:
+    """Remove ranking suffix from team name, e.g. 'Kitchee(7.)' → 'Kitchee'."""
+    return re.sub(r"\s*\(\d+\.?\)\s*", "", name).strip()
+
+
+def _parse_h2h_match(opponent_field: str, result: str) -> Optional[Dict]:
+    """
+    Parse a match from TM historical records opponent field.
+
+    Args:
+        opponent_field: e.g. "Kitchee(7.) vs Eastern(1.)" or "Eastern vs Lee Man"
+        result: e.g. "2:1", "1:1", "0:3"
+
+    Returns:
+        Dict with home_team, away_team, home_score, away_score or None if unparseable.
+    """
+    if " vs " not in opponent_field:
+        return None
+    parts = opponent_field.split(" vs ", 1)
+    home = _strip_team_rank(parts[0])
+    away = _strip_team_rank(parts[1])
+
+    score_match = re.match(r"(\d+)\s*:\s*(\d+)", result or "")
+    if not score_match:
+        return None
+
+    return {
+        "home_team": home,
+        "away_team": away,
+        "home_score": int(score_match.group(1)),
+        "away_score": int(score_match.group(2)),
+    }
+
+
+def get_h2h_record(team_a: str, team_b: str, last_n: int = 3) -> Dict:
+    """
+    Returns head-to-head record for team_a vs team_b from local historical records.
+
+    Scans all files in data/historical_records/ and collects unique matches
+    where both teams appear. Reports W/D/L for team_a.
+
+    Args:
+        team_a: English team name (home team perspective for W/D/L).
+        team_b: English team name.
+        last_n: Maximum number of most recent matches to consider.
+
+    Returns:
+        Dict with wins, draws, losses (from team_a's perspective), matches_found.
+    """
+    team_a_lower = team_a.lower()
+    team_b_lower = team_b.lower()
+
+    # Collect unique matches keyed by (date, opponent_field) to avoid duplicates
+    seen: Dict[str, Dict] = {}
+
+    for record_path in _HISTORICAL_RECORDS_DIR.glob("*.json"):
+        try:
+            data = json.loads(record_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+
+        for season_data in data.get("seasons", {}).values():
+            for m in season_data.get("matches", []):
+                parsed = _parse_h2h_match(m.get("opponent", ""), m.get("result", ""))
+                if not parsed:
+                    continue
+
+                h_lower = parsed["home_team"].lower()
+                a_lower = parsed["away_team"].lower()
+
+                # Check if both teams are in this match
+                teams_in_match = {h_lower, a_lower}
+                if team_a_lower in teams_in_match and team_b_lower in teams_in_match:
+                    key = f"{m.get('date','')}-{m.get('opponent','')}"
+                    if key not in seen:
+                        seen[key] = {**parsed, "date": m.get("date", "")}
+
+    # Sort by date (most recent first) and take last_n
+    matches = sorted(seen.values(), key=lambda x: x.get("date", ""), reverse=True)[:last_n]
+
+    wins = draws = losses = 0
+    for m in matches:
+        h_lower = m["home_team"].lower()
+        hs, as_ = m["home_score"], m["away_score"]
+
+        if h_lower == team_a_lower:
+            if hs > as_:
+                wins += 1
+            elif hs == as_:
+                draws += 1
+            else:
+                losses += 1
+        else:  # team_a is away
+            if as_ > hs:
+                wins += 1
+            elif as_ == hs:
+                draws += 1
+            else:
+                losses += 1
+
+    return {"wins": wins, "draws": draws, "losses": losses, "matches_found": len(matches)}

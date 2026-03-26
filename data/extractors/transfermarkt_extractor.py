@@ -1,5 +1,5 @@
 # ABOUTME: Extractor for Transfermarkt data (team injuries and player match history).
-# ABOUTME: Provides get_match_history() with detailed match events (including injuries/bench) and continental cups.
+# ABOUTME: Provides get_match_history() with competition logo download and detailed match events.
 
 import requests
 from bs4 import BeautifulSoup, Tag
@@ -28,6 +28,7 @@ class TransfermarktExtractor:
         self.last_request_time = 0
         self.cache_dir = Path(cache_dir)
         self.historical_records_dir = Path("data/historical_records")
+        self.competition_logos_dir = Path("assets/competition_logos")
         self.logger = logging.getLogger(__name__)
 
         # Whitelist ampliada: Todo lo que juegue un equipo de HK
@@ -84,30 +85,55 @@ class TransfermarktExtractor:
             
         return result.get("matches", [])
 
+    def _download_competition_logo(self, comp_name: str, img_url: str) -> Optional[str]:
+        """Download competition logo from Transfermarkt CDN. Returns local web path or None."""
+        slug = re.sub(r"[^a-z0-9]", "_", comp_name.lower()).strip("_")
+        self.competition_logos_dir.mkdir(parents=True, exist_ok=True)
+        local_path = self.competition_logos_dir / f"{slug}.png"
+        if local_path.exists():
+            return f"/assets/competition_logos/{slug}.png"
+        try:
+            r = requests.get(img_url, headers=self.headers, timeout=10)
+            r.raise_for_status()
+            local_path.write_bytes(r.content)
+            self.logger.info(f"Downloaded competition logo: {comp_name} → {local_path.name}")
+            return f"/assets/competition_logos/{slug}.png"
+        except Exception as e:
+            self.logger.warning(f"Failed to download logo for '{comp_name}': {e}")
+            return None
+
     def _parse_detailed_performance(self, soup: BeautifulSoup) -> Dict:
         matches = []
         summary = {"goals": 0, "assists": 0, "yellow_cards": 0, "red_cards": 0, "minutes_played": 0, "total_matches": 0}
-        
+
         # En la vista detallada, los partidos están en 'boxes' por competición
         boxes = soup.find_all("div", {"class": "box"})
         for box in boxes:
             header = box.find(["h2", "div"], {"class": ["content-box-headline", "table-header"]})
             if not header: continue
-            
+
             comp_name = header.get_text(strip=True)
             # Filtro: ¿Es una competición de HK o internacional asiática?
             if not any(c.lower() in comp_name.lower() for c in self.ALLOWED_COMPETITIONS):
                 continue
 
+            # Extract and download competition logo from header image
+            comp_logo_url = None
+            logo_img = header.find("img")
+            if logo_img:
+                img_src = logo_img.get("src") or logo_img.get("data-src")
+                if img_src:
+                    comp_logo_url = self._download_competition_logo(comp_name, img_src)
+
             table = box.find("table")
             if not table: continue
-            
+
             rows = table.find_all("tr")
             for row in rows:
                 cells = row.find_all("td")
                 # Las filas de partido en vista 'plus/1' tienen muchas celdas
                 if len(cells) < 8: continue
-                
+
                 try:
                     # Celda 0: Jornada / Ronda
                     # Celda 1: Fecha
@@ -115,13 +141,11 @@ class TransfermarktExtractor:
                     if not date_txt or len(date_txt) < 5: continue # Cabeceras o filas vacías
 
                     # Identificar estado (Jugado vs No Jugado)
-                    # Si la celda 7 (Posición) o la celda 14 (Minutos) tienen texto especial
                     status_text = ""
                     is_played = True
-                    
-                    # Verificar si hay mensaje de "No convocado", "Lesionado", etc en las celdas finales
+
                     potential_status = row.get_text()
-                    if "No convocado" in potential_status: 
+                    if "No convocado" in potential_status:
                         status_text = "No convocado"
                         is_played = False
                     elif "En el banquillo" in potential_status:
@@ -137,11 +161,12 @@ class TransfermarktExtractor:
                     home = cells[3].get_text(strip=True)
                     away = cells[5].get_text(strip=True)
                     res = cells[6].get_text(strip=True)
-                    
+
                     match_entry = {
                         "date": date_txt,
                         "opponent": f"{home} vs {away}",
                         "competition": comp_name,
+                        "competition_logo": comp_logo_url,
                         "result": res,
                         "status": status_text if not is_played else "Jugado",
                         "goals": 0, "assists": 0, "yellow_cards": 0, "red_cards": 0, "minutes_played": 0

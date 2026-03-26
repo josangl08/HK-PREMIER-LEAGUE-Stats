@@ -132,6 +132,7 @@ def create_player_portal_layout(user_role: str = "player") -> html.Div:
             dcc.Store(id="portal-panel-state", data={"panel": "timeline"}),
             dcc.Store(id="timeline-expand-store", data=[]),
             dcc.Store(id="active-year-store", data=None),
+            dcc.Store(id="card-expand-store", data={}),
 
             # Full-width sticky title header (outside Container)
             _build_global_header(),

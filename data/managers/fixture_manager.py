@@ -1,7 +1,7 @@
 # ABOUTME: Manager for HKFA fixtures — ICS extraction, team normalization, TheSportsDB enrichment.
-# ABOUTME: Exposes get_next_fixture(team) with 24h in-memory cache. Follows ETL Manager pattern.
+# ABOUTME: Emits Super-Fixture schema with flat aliases; persists to fixtures.json as offline fallback.
 
-import os
+import json
 import re
 import logging
 import requests
@@ -22,8 +22,10 @@ CACHE_TTL = 86400  # 24 hours
 HKT = timezone(timedelta(hours=8))
 
 ASSETS_LOGOS_DIR = Path(__file__).parent.parent.parent / "assets" / "team_logos"
+ASSETS_MEDIA_DIR = Path(__file__).parent.parent.parent / "assets" / "team_media"
+FIXTURES_JSON_PATH = Path(__file__).parent.parent / "fixtures" / "fixtures.json"
 
-THESPORTSDB_TEAMS_URL = "https://www.thesportsdb.com/api/v1/json/3/lookup_all_teams.php?id=4825"
+THESPORTSDB_TEAMS_URL = "https://www.thesportsdb.com/api/v1/json/3/search_all_teams.php?l=Hong-Kong+Premier+League"
 
 # Mapping: Traditional Chinese (ICS) → English (used in processed data + TheSportsDB)
 TEAM_MAPPING: dict[str, str] = {
@@ -104,6 +106,7 @@ TEAM_MAPPING.update({
 COMPETITION_MAPPING: dict[str, str] = {
     "中銀人壽香港超級聯賽": "HK Premier League",
     "香港超級聯賽": "HK Premier League",
+    "Hong Kong Premier League": "HK Premier League",   # English alias in cached fixtures
     "足總盃": "HKFA Cup",
     "賽馬會菁英盃": "Sapling Cup",
     "菁英盃": "Sapling Cup",
@@ -258,8 +261,15 @@ def _normalize_team(chinese_name: str) -> str:
 
 
 def _normalize_competition(raw: str) -> str:
-    """Look up English name from COMPETITION_MAPPING; return raw string if not found."""
-    return COMPETITION_MAPPING.get(raw, raw)
+    """Look up English name from COMPETITION_MAPPING; return raw string if not found.
+    Falls back to substring matching (longest key first) to handle ICS names with
+    round/stage suffixes like '賽馬會菁英盃分組賽(A組)' or '足總盃決賽'."""
+    if raw in COMPETITION_MAPPING:
+        return COMPETITION_MAPPING[raw]
+    for key in sorted(COMPETITION_MAPPING, key=len, reverse=True):
+        if key in raw:
+            return COMPETITION_MAPPING[key]
+    return raw
 
 
 def _normalize_stadium(raw: str) -> str:
@@ -273,7 +283,11 @@ _thesportsdb_team_cache: dict[str, dict] = {}  # local runtime cache for API res
 
 
 def _load_thesportsdb_teams() -> dict[str, dict]:
-    """Fetch all HKPL teams from TheSportsDB once; returns {team_name_lower: team_obj}."""
+    """
+    Fetch all HKPL teams from TheSportsDB once; returns {team_name_lower: full_team_record}.
+    The full record (~60 fields) is stored so callers can access strTeamFanart1,
+    strStadiumThumb, strWebsite, strInstagram, etc. without additional API calls.
+    """
     global _thesportsdb_team_cache
     if _thesportsdb_team_cache:
         return _thesportsdb_team_cache
@@ -286,7 +300,16 @@ def _load_thesportsdb_teams() -> dict[str, dict]:
         _thesportsdb_team_cache = {
             t["strTeam"].lower(): t for t in teams if t.get("strTeam")
         }
-        logger.info(f"Loaded {len(_thesportsdb_team_cache)} teams from TheSportsDB.")
+        # Add common aliases so fixture team names resolve correctly
+        _TSDB_ALIASES = {
+            "hong kong football club": "hong kong fc",
+            "eastern": "eastern sc",
+            "rangers": "hong kong rangers",
+        }
+        for alias, canonical in _TSDB_ALIASES.items():
+            if canonical in _thesportsdb_team_cache and alias not in _thesportsdb_team_cache:
+                _thesportsdb_team_cache[alias] = _thesportsdb_team_cache[canonical]
+        logger.info(f"Loaded {len(_thesportsdb_team_cache)} teams from TheSportsDB (full records).")
     except Exception as e:
         logger.warning(f"TheSportsDB fetch failed: {e}")
 
@@ -323,16 +346,20 @@ def _resolve_logo(team_name: str) -> Optional[str]:
         return f"/assets/team_logos/{local_path.name}"
 
     teams = _load_thesportsdb_teams()
-    team_data = teams.get(team_name.lower())
+    name_lower = team_name.lower()
+    team_data = teams.get(name_lower)
     if not team_data:
-        # Try partial match
+        # Partial match as last resort for unmapped teams.
+        # Known ambiguous names (e.g. "Eastern" vs "Eastern District") must be
+        # handled via the _TSDB_ALIASES block in _load_thesportsdb_teams().
         for key, val in teams.items():
-            if team_name.lower() in key or key in team_name.lower():
+            if name_lower in key or key in name_lower:
                 team_data = val
                 break
 
-    if team_data and team_data.get("strTeamBadge"):
-        return _download_logo(team_name, team_data["strTeamBadge"])
+    badge_url = team_data.get("strBadge") or team_data.get("strTeamBadge") if team_data else None
+    if badge_url:
+        return _download_logo(team_name, badge_url)
 
     return None
 
@@ -344,6 +371,100 @@ def _resolve_stadium(home_team: str) -> Optional[str]:
     if team_data:
         return team_data.get("strStadium") or None
     return None
+
+
+def _download_team_media(team_name: str, url: str, kind: str) -> Optional[str]:
+    """Download team media to assets/team_media/<slug>/<kind>.jpg. Returns local web path or None."""
+    slug = _team_slug(team_name)
+    local_dir = ASSETS_MEDIA_DIR / slug
+    local_path = local_dir / f"{kind}.jpg"
+
+    if local_path.exists():
+        return f"/assets/team_media/{slug}/{kind}.jpg"
+
+    try:
+        local_dir.mkdir(parents=True, exist_ok=True)
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        local_path.write_bytes(resp.content)
+        logger.info(f"Downloaded {kind} for '{team_name}' → {local_path.name}")
+        return f"/assets/team_media/{slug}/{kind}.jpg"
+    except Exception as e:
+        logger.warning(f"Failed to download {kind} for '{team_name}': {e}")
+        return None
+
+
+def _resolve_fanart(team_name: str) -> Optional[str]:
+    """Return local web path for team fanart (strTeamFanart1), downloading if needed."""
+    slug = _team_slug(team_name)
+    local_path = ASSETS_MEDIA_DIR / slug / "fanart.jpg"
+    if local_path.exists():
+        return f"/assets/team_media/{slug}/fanart.jpg"
+
+    teams = _load_thesportsdb_teams()
+    team_data = teams.get(team_name.lower())
+    if not team_data:
+        for key, val in teams.items():
+            if team_name.lower() in key or key in team_name.lower():
+                team_data = val
+                break
+
+    fanart_url = team_data.get("strFanart1") or team_data.get("strTeamFanart1") if team_data else None
+    if fanart_url:
+        return _download_team_media(team_name, fanart_url, "fanart")
+
+    return None
+
+
+def _resolve_stadium_thumb(home_team: str) -> Optional[str]:
+    """
+    Return local web path for home team's stadium thumbnail, downloading if needed.
+    Resolves via lookupvenue.php using the team's idVenue — strStadiumThumb is not
+    available directly in the team record for HKPL teams.
+    """
+    slug = _team_slug(home_team)
+    local_path = ASSETS_MEDIA_DIR / slug / "stadium_thumb.jpg"
+    if local_path.exists():
+        return f"/assets/team_media/{slug}/stadium_thumb.jpg"
+
+    teams = _load_thesportsdb_teams()
+    team_data = teams.get(home_team.lower())
+    if not team_data:
+        for key, val in teams.items():
+            if home_team.lower() in key or key in home_team.lower():
+                team_data = val
+                break
+
+    if not team_data:
+        return None
+
+    # Prefer direct field if present (populated for some leagues)
+    thumb_url = team_data.get("strStadiumThumb") or team_data.get("strTeamStadiumThumb")
+
+    # Fallback: fetch from venue endpoint using idVenue
+    if not thumb_url and team_data.get("idVenue"):
+        try:
+            venue_url = f"https://www.thesportsdb.com/api/v1/json/3/lookupvenue.php?id={team_data['idVenue']}"
+            resp = requests.get(venue_url, timeout=10)
+            resp.raise_for_status()
+            venues = resp.json().get("venues") or []
+            if venues:
+                thumb_url = venues[0].get("strThumb")
+        except Exception as e:
+            logger.warning(f"Failed to fetch venue data for '{home_team}': {e}")
+
+    if thumb_url:
+        return _download_team_media(home_team, thumb_url, "stadium_thumb")
+
+    return None
+
+
+def _extract_social(team_data: dict) -> dict:
+    """Extract social/web links from a TheSportsDB team record."""
+    return {
+        "website": team_data.get("strWebsite") or None,
+        "instagram": team_data.get("strInstagram") or None,
+    }
 
 
 def _extract_streaming_url(description: Optional[str]) -> Optional[str]:
@@ -372,14 +493,28 @@ class FixtureManager:
     def get_fixtures(self) -> list[dict]:
         """
         Return all upcoming enriched fixtures for adult-male HKFA competitions.
-        Result is cached for 24h using the project's AdvancedCacheManager.
+        Result is cached for 24h. Falls back to persisted fixtures.json if upstream fails.
         """
         cached = self._cache.get(CACHE_KEY, default=None)
         if cached is not None:
             logger.debug("Fixtures served from cache.")
             return cached
 
-        fixtures = self._fetch_and_build()
+        try:
+            fixtures = self._fetch_and_build()
+        except Exception as e:
+            logger.error(f"Unexpected error in _fetch_and_build: {e}")
+            fixtures = []
+
+        if not fixtures:
+            persisted = self._load_persisted_fixtures()
+            if persisted:
+                logger.warning("Serving fixtures from persisted JSON (upstream unavailable).")
+                self._cache.set(CACHE_KEY, persisted, ttl_seconds=CACHE_TTL)
+                return persisted
+        else:
+            self._persist_fixtures(fixtures)
+
         self._cache.set(CACHE_KEY, fixtures, ttl_seconds=CACHE_TTL)
         return fixtures
 
@@ -411,6 +546,47 @@ class FixtureManager:
 
     # ── Private ──────────────────────────────────────────────────────────────
 
+    def _persist_fixtures(self, fixtures: list[dict]) -> None:
+        """Write fixtures to data/fixtures/fixtures.json as a durable offline fallback."""
+        def _serialize(obj):
+            if isinstance(obj, datetime):
+                return obj.isoformat()
+            raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+
+        try:
+            FIXTURES_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "fetched_at": datetime.now(timezone.utc).isoformat(),
+                "fixtures": fixtures,
+            }
+            with open(FIXTURES_JSON_PATH, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, default=_serialize, ensure_ascii=False, indent=2)
+            logger.info(f"Persisted {len(fixtures)} fixtures to {FIXTURES_JSON_PATH}.")
+        except Exception as e:
+            logger.warning(f"Failed to persist fixtures: {e}")
+
+    def _load_persisted_fixtures(self) -> list[dict]:
+        """Read fixtures.json and restore datetime objects. Returns [] on any error."""
+        try:
+            with open(FIXTURES_JSON_PATH, encoding="utf-8") as fh:
+                payload = json.load(fh)
+            fixtures = payload.get("fixtures", [])
+            for fix in fixtures:
+                # Restore flat datetime aliases
+                for key in ("kickoff_utc", "kickoff_hkt"):
+                    if isinstance(fix.get(key), str):
+                        fix[key] = datetime.fromisoformat(fix[key])
+                # Restore nested schedule datetimes
+                schedule = fix.get("schedule", {})
+                for key in ("kickoff_utc", "kickoff_hkt"):
+                    if isinstance(schedule.get(key), str):
+                        schedule[key] = datetime.fromisoformat(schedule[key])
+            logger.info(f"Loaded {len(fixtures)} fixtures from persisted JSON.")
+            return fixtures
+        except Exception as e:
+            logger.debug(f"Could not load persisted fixtures: {e}")
+            return []
+
     def _fetch_and_build(self) -> list[dict]:
         """Fetch ICS, parse, normalize, enrich, and return fixture list."""
         try:
@@ -429,7 +605,7 @@ class FixtureManager:
         return fixtures
 
     def _build_fixture(self, event: dict) -> Optional[dict]:
-        """Parse and enrich a single ICS event. Returns None if event should be excluded."""
+        """Parse and enrich a single ICS event into a Super-Fixture dict with flat aliases."""
         summary = event.get("summary") or ""
         parsed = _parse_summary(summary)
         if parsed is None:
@@ -448,24 +624,65 @@ class FixtureManager:
             dtstart = dtstart.replace(tzinfo=timezone.utc)
         kickoff_utc = dtstart.astimezone(timezone.utc)
         kickoff_hkt = kickoff_utc.astimezone(HKT)
+        kickoff_display = kickoff_hkt.strftime("%-d %b %Y, %H:%M HKT")
 
         stadium_raw = event.get("location")
-        # TheSportsDB has stadium in English; normalize ICS location (may be Chinese) as fallback
         stadium_raw_en = _normalize_stadium((stadium_raw or "").strip()) if stadium_raw else None
         stadium_en = _resolve_stadium(home_en) or stadium_raw_en or None
 
+        uid = event.get("uid")
+        home_logo_url = _resolve_logo(home_en)
+        away_logo_url = _resolve_logo(away_en)
+        home_fanart_url = _resolve_fanart(home_en)
+        away_fanart_url = _resolve_fanart(away_en)
+        stadium_thumb_url = _resolve_stadium_thumb(home_en)
+        streaming_url = _extract_streaming_url(event.get("description"))
+
+        teams_cache = _load_thesportsdb_teams()
+        home_data = teams_cache.get(home_en.lower()) or {}
+        away_data = teams_cache.get(away_en.lower()) or {}
+
         return {
-            "uid": event.get("uid"),
+            # ── Super-Fixture nested schema ──────────────────────────────────
+            "fixture_id": uid,
+            "schedule": {
+                "kickoff_utc": kickoff_utc,
+                "kickoff_hkt": kickoff_hkt,
+                "kickoff_display": kickoff_display,
+            },
+            "teams": {
+                "home": {
+                    "name": home_en,
+                    "assets": {"badge": home_logo_url, "fanart": home_fanart_url},
+                    "social": _extract_social(home_data),
+                },
+                "away": {
+                    "name": away_en,
+                    "assets": {"badge": away_logo_url, "fanart": away_fanart_url},
+                    "social": _extract_social(away_data),
+                },
+            },
+            "raw_metadata": {
+                "competition": competition,
+                "stadium": stadium_en,
+                "stadium_thumb": stadium_thumb_url,
+                "streaming_url": streaming_url,
+            },
+            # ── Flat backward-compat aliases (all current consumers) ─────────
+            "uid": uid,
             "home_team": home_en,
             "away_team": away_en,
             "competition": competition,
             "kickoff_utc": kickoff_utc,
             "kickoff_hkt": kickoff_hkt,
-            "kickoff_display": kickoff_hkt.strftime("%-d %b %Y, %H:%M HKT"),
+            "kickoff_display": kickoff_display,
             "stadium": stadium_en,
-            "home_logo_url": _resolve_logo(home_en),
-            "away_logo_url": _resolve_logo(away_en),
-            "streaming_url": _extract_streaming_url(event.get("description")),
+            "home_logo_url": home_logo_url,
+            "away_logo_url": away_logo_url,
+            "streaming_url": streaming_url,
+            "home_fanart_url": home_fanart_url,
+            "away_fanart_url": away_fanart_url,
+            "stadium_thumb_url": stadium_thumb_url,
         }
 
 

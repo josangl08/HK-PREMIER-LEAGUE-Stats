@@ -211,6 +211,13 @@ DS_Store
 .DESARROLLO.md
 .setup.py
 
+# Fixtures
+data/fixtures/fixtures.json
+
+# Team Media
+assets/team_media/*
+!assets/team_media/.gitkeep
+
 # .claude
 .claude/
 CLAUDE.md

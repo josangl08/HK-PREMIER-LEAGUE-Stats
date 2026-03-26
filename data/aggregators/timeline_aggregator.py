@@ -2,15 +2,17 @@
 # ABOUTME: Combines historical season data, fixtures, and TM match history; adds confirmation_status to milestones.
 
 import logging
+import re
 from datetime import datetime, timezone, timedelta, date
 from typing import List, Dict, Any, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from data.hong_kong_data_manager import HongKongDataManager
 
-from data.managers.fixture_manager import get_fixture_manager
+from data.managers.fixture_manager import get_fixture_manager, _resolve_logo as _resolve_team_logo
 from utils.player_index import get_player_index
 from data.extractors.transfermarkt_extractor import TransfermarktExtractor
+from data.processors.player_match_processor import enrich_absence_reason
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +35,15 @@ def _parse_tm_date(date_str: str) -> Optional[date]:
         except ValueError:
             continue
     return None
+
+
+def _parse_opponent(opponent_str: str) -> tuple:
+    """Parse 'Team A(n.) vs Team B(m.)' → (home_team, away_team), stripping rank suffixes."""
+    cleaned = re.sub(r'\(\d+\.\)', '', opponent_str or "").strip()
+    parts = re.split(r'\s+[Vv][Ss]\s+', cleaned, maxsplit=1)
+    if len(parts) == 2:
+        return parts[0].strip(), parts[1].strip()
+    return cleaned, ""
 
 
 def _find_tm_match(fixture_utc: datetime, tm_matches: List[Dict]) -> Optional[Dict]:
@@ -75,7 +86,15 @@ class TimelineAggregator:
 
         player_name = player_info.get("canonical_name")
         seasons = player_info.get("seasons", [])
-        
+
+        # Resolve current season and its end-year (used as group_year for ICS post-match milestones
+        # so they are grouped under the same year section as their career card).
+        current_season = seasons[0] if seasons else None
+        try:
+            current_season_end_year = str(int(current_season.split('-')[0]) + 1) if current_season else None
+        except Exception:
+            current_season_end_year = None
+
         # 2. Find player's current team
         current_team = None
         player_stats = self.data_manager.get_player_overview(player_name)
@@ -108,6 +127,9 @@ class TimelineAggregator:
                         "away_logo": next_fix.get("away_logo_url"),
                         "streaming_url": next_fix.get("streaming_url"),
                         "competition": next_fix.get("competition"),
+                        "home_fanart": next_fix.get("home_fanart_url"),
+                        "away_fanart": next_fix.get("away_fanart_url"),
+                        "stadium_thumb": next_fix.get("stadium_thumb_url"),
                         "confirmation_status": "Scheduled",
                     }
                 })
@@ -122,46 +144,78 @@ class TimelineAggregator:
             ]
             past_team_matches.sort(key=lambda x: x.get("kickoff_utc"), reverse=True)
 
-            current_season_str = seasons[0] if seasons else None
+            # Load TM match history for all player seasons so past fixtures
+            # from any season can be matched (historical JSON only covers older seasons;
+            # newer ones are scraped live — loading all seasons maximises coverage).
             tm_current_matches: List[Dict[str, Any]] = []
-            if tm_id and current_season_str:
-                try:
-                    extractor = TransfermarktExtractor()
-                    tm_current_matches = extractor.get_match_history(tm_id, current_season_str)
-                except Exception as exc:
-                    logger.debug(f"Could not load TM history for post-match confirmation: {exc}")
+            if tm_id:
+                for season_str in seasons:
+                    try:
+                        extractor = TransfermarktExtractor()
+                        season_matches = extractor.get_match_history(tm_id, season_str)
+                        tm_current_matches.extend(season_matches)
+                    except Exception as exc:
+                        logger.debug(f"TM history unavailable for {player_id}/{season_str}: {exc}")
 
-            for match in past_team_matches[:5]:
+            for match in past_team_matches:  # no [:5] limit — show all past matches
                 opponent = match.get("away_team") if match.get("home_team") == current_team else match.get("home_team")
                 kickoff_utc = match.get("kickoff_utc")
                 tm_match = _find_tm_match(kickoff_utc, tm_current_matches) if kickoff_utc else None
                 confirmation_status = "Confirmed" if tm_match and tm_match.get("minutes_played", 0) > 0 else "Scheduled"
-                
+
+                # Extract TM performance data for this specific match
+                tm_result = tm_match.get("result") if tm_match else None
+                tm_minutes = int(tm_match.get("minutes_played", 0) or 0) if tm_match else 0
+                tm_goals = int(tm_match.get("goals", 0) or 0) if tm_match else 0
+                tm_assists = int(tm_match.get("assists", 0) or 0) if tm_match else 0
+                absence_reason = None
+                if tm_match and tm_minutes == 0:
+                    enriched = enrich_absence_reason(tm_match, None)
+                    absence_reason = enriched.get("absence_reason")
+
+                # group_year: use the current season's end year so all ICS fixtures
+                # (including those played in the first half of the season, e.g. Sep-Dec 2025)
+                # land in the same section as their career card (anchored to May 2026).
+                group_year = current_season_end_year or (str(kickoff_utc.year) if kickoff_utc else None)
+
                 timeline.append({
                     "type": "post-match",
                     "label": f"Result: vs {opponent}",
                     "icon": "chart-bar",
                     "date": kickoff_utc,
+                    "group_year": group_year,
                     "payload": {
                         "opponent": opponent,
                         "date": kickoff_utc,
                         "kickoff_display": match.get("kickoff_display"),
                         "home_team": match.get("home_team"),
                         "away_team": match.get("away_team"),
+                        "home_logo": match.get("home_logo_url") or _resolve_team_logo(match.get("home_team", "")),
+                        "away_logo": match.get("away_logo_url") or _resolve_team_logo(match.get("away_team", "")),
+                        "competition": match.get("competition"),
+                        "stadium": match.get("stadium"),
+                        "result": tm_result,
+                        "minutes_played": tm_minutes,
+                        "goals": tm_goals,
+                        "assists": tm_assists,
+                        "absence_reason": absence_reason,
                         "player_stats": player_stats,
                         "match_id": match.get("uid"),
                         "confirmation_status": confirmation_status,
                     }
                 })
 
-        # 5. Add Career Milestones (career)
+        # 5. Add Career Milestones (career) + per-match cards for past seasons
         for season in seasons:
             try:
-                # "2024-25" → May 2025
+                # "2024-25" → end year 2025; career card anchored to May of that year
                 year_end = int(season.split('-')[0]) + 1
                 season_date = datetime(year_end, 5, 30, tzinfo=timezone.utc)
             except Exception:
+                year_end = now_utc.year
                 season_date = now_utc - timedelta(days=365)
+
+            group_year = str(year_end)
 
             # Derive Transfermarkt saison_id (start year) and fetch match history
             matches: List[Dict[str, Any]] = []
@@ -169,7 +223,8 @@ class TimelineAggregator:
                 try:
                     season_start_year = season.split('-')[0]
                     extractor = TransfermarktExtractor()
-                    matches = extractor.get_match_history(tm_id, season_start_year)
+                    raw_matches = extractor.get_match_history(tm_id, season_start_year)
+                    matches = [enrich_absence_reason(m, None) for m in raw_matches]
                 except Exception as match_exc:
                     logger.debug(f"Match history unavailable for {player_id}/{season}: {match_exc}")
 
@@ -178,6 +233,7 @@ class TimelineAggregator:
                 "label": f"Season {season}",
                 "icon": "trophy",
                 "date": season_date,
+                "group_year": group_year,
                 "payload": {
                     "season": season,
                     "player_id": player_id,
@@ -185,6 +241,37 @@ class TimelineAggregator:
                     "matches": matches,
                 }
             })
+
+            # For past seasons only (not current): generate individual post-match milestones
+            # from TM data so each match appears as a card under its season header.
+            # Current season matches come from the ICS fixture calendar above.
+            if season != current_season:
+                for tm_m in matches:
+                    tm_date = _parse_tm_date(tm_m.get("date", ""))
+                    if tm_date is None:
+                        continue
+                    match_dt = datetime(tm_date.year, tm_date.month, tm_date.day, tzinfo=timezone.utc)
+                    home_t, away_t = _parse_opponent(tm_m.get("opponent", ""))
+                    minutes = int(tm_m.get("minutes_played", 0) or 0)
+                    timeline.append({
+                        "type": "post-match",
+                        "label": f"Result: {tm_m.get('opponent', '')}",
+                        "icon": "chart-bar",
+                        "date": match_dt,
+                        "group_year": group_year,   # group under the career card, not calendar year
+                        "payload": {
+                            "kickoff_display": tm_m.get("date", ""),
+                            "home_team": home_t,
+                            "away_team": away_t,
+                            "competition": tm_m.get("competition", ""),
+                            "result": tm_m.get("result"),
+                            "minutes_played": minutes,
+                            "goals": int(tm_m.get("goals", 0) or 0),
+                            "assists": int(tm_m.get("assists", 0) or 0),
+                            "absence_reason": tm_m.get("absence_reason"),
+                            "confirmation_status": "Confirmed" if minutes > 0 else "Not played",
+                        }
+                    })
 
         # Final sort: most recent first
         timeline.sort(key=lambda x: x["date"], reverse=True)

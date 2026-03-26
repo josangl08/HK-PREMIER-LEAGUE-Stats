@@ -1,6 +1,12 @@
 /* ABOUTME: CSS rules for the Player Portal Phase 2/3.
 Handles sliding viewport, full-width header, year nav in timeline column, Lucide events. */
 
+/* ── Timeline card compact padding ───────────────────────────── */
+.timeline-event .glass-card {
+    padding: 10px;
+    margin-bottom: 8px;
+}
+
 :root {
     --accent-cyan-rgb: 0, 242, 255;
     --navbar-height: 60px;
@@ -310,7 +316,7 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
     border: 1px solid rgba(255, 255, 255, 0.2);
     background: transparent;
     cursor: pointer;
-    transition: background 0.2s, border-color 0.2s, transform 0.2s;
+    transition: background 0.2s, border-color 0.2s, transform 0.3s ease;
 }
 .event-detail-btn:hover { transform: scale(1.1); }
 .event-detail-btn-primary { color: var(--bs-primary, #0d6efd); }
@@ -371,4 +377,40 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
     object-fit: contain;
     border-radius: 8px;
     margin-bottom: 1.5rem;
+}
+
+/* ── Task 4.3: Expandable Card Transitions ───────────────────── */
+.next-game-card__detail,
+.past-game-card__detail {
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.4s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease-in-out, padding 0.3s ease;
+    opacity: 0;
+    padding-top: 0 !important;
+    padding-bottom: 0 !important;
+    border-top: none !important;
+}
+
+/* Smooth transitions for elements that are NOT display: none. */
+.next-game-card__detail:not([style*="display: none"]),
+.past-game-card__detail:not([style*="display: none"]) {
+    max-height: 1000px;
+    opacity: 1;
+    padding-top: 0.75rem !important;
+    padding-bottom: 0.75rem !important;
+    border-top: 1px solid rgba(255, 255, 255, 0.1) !important;
+}
+
+/* ── Season Card Styles ──────────────────────────────────────── */
+.season-card {
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.season-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15) !important;
+}
+
+.last-child-no-border:last-child {
+    border-bottom: none !important;
 }
