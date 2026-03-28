@@ -112,18 +112,7 @@ def _decision_nodes_career(payload: dict, user_role: str) -> list:
         dbc.CardBody(html.P(scouting_text, className="small mb-0")),
     ], className="border-0 shadow-sm mb-3", color="dark", outline=True)
 
-    buttons = [
-        dbc.Button(
-            [html.I(className="bi bi-diagram-3 me-1"), "Ver Arquetipo"],
-            id="dn-arquetipo",
-            color="warning", outline=True, size="sm", className="me-2", n_clicks=0,
-        ),
-        dbc.Button(
-            [html.I(className="bi bi-graph-up me-1"), "Proyectar Final"],
-            id="dn-proyectar",
-            color="success", outline=True, size="sm", n_clicks=0,
-        ),
-    ]
+    buttons = []
 
     if user_role == "agent":
         buttons.append(dbc.Button(

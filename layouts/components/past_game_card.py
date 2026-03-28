@@ -103,7 +103,7 @@ def render_past_game_card(
     comp_color = _COMP_COLOR_MAP.get(competition, "primary")
     comp_logo = _COMP_LOGO_MAP.get(competition)
 
-    # Competition logo for top-right corner
+    # Competition logo for top-right corner (text fallback when no logo asset)
     comp_logo_el = (
         html.Img(
             src=comp_logo,
@@ -111,7 +111,16 @@ def render_past_game_card(
             title=competition,
         )
         if comp_logo
-        else html.Span()
+        else (
+            html.Span(
+                competition[:4].upper(),
+                className="small fw-semibold portal-text-muted",
+                style={"fontSize": "0.55rem"},
+                title=competition,
+            )
+            if competition
+            else html.Span()
+        )
     )
 
     # Competition badge (no logo — logo is in the corner)
@@ -217,13 +226,27 @@ def render_past_game_card(
                 )
             )
     else:
-        reason = absence_reason or "unknown"
-        badge_color, label = _ABSENCE_LABELS.get(reason, ("light", reason))
+        # Task 8.2: Enhanced absence badge with descriptive text
+        if isinstance(absence_reason, dict):
+            category = absence_reason.get("category", "unknown")
+            text = absence_reason.get("text")
+            badge_color, label = _ABSENCE_LABELS.get(category, ("light", category))
+            display_text = f"Absence: {text}" if text else f"Absence: {label}"
+        else:
+            reason = absence_reason or "unknown"
+            badge_color, label = _ABSENCE_LABELS.get(reason, ("light", reason))
+            display_text = f"Absence: {label}"
+
         detail_rows.append(
             html.Div(
                 [
                     _lucide("user-x"),
-                    dbc.Badge(label, color=badge_color, className="small"),
+                    dbc.Badge(
+                        display_text, 
+                        color=badge_color, 
+                        pill=True, 
+                        className="small border border-white border-opacity-10 shadow-sm"
+                    ),
                 ],
                 className="d-flex align-items-center gap-2",
             )

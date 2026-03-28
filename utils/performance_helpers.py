@@ -9,6 +9,17 @@ from utils.common import validate_filters, safe_get_analysis_level
 
 logger = logging.getLogger(__name__)
 
+def get_streaming_label(url: Optional[str], platform: Optional[str]) -> str:
+    """
+    Returns a user-friendly streaming label based on platform and URL.
+    Task 2.1/2.2: Platform-aware streaming labels.
+    """
+    if not url:
+        return "No Streaming"
+    if platform:
+        return f"Watch on {platform}"
+    return "Watch on Streaming"
+
 def validate_performance_data(performance_data: Any, context: str = "") -> bool:
     """
     Valida datos de performance con logging contextual.

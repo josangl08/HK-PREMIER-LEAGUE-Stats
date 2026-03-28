@@ -3,8 +3,10 @@
 
 import logging
 import re
+import json
 from datetime import datetime, timezone, timedelta, date
 from typing import List, Dict, Any, Optional, TYPE_CHECKING
+from pathlib import Path
 
 if TYPE_CHECKING:
     from data.hong_kong_data_manager import HongKongDataManager
@@ -46,6 +48,20 @@ def _parse_opponent(opponent_str: str) -> tuple:
     return cleaned, ""
 
 
+def _build_match_report_from_tm_status(tm_match: dict) -> Optional[dict]:
+    """Map TM match `status` field to a match_report dict for enrich_absence_reason."""
+    status = (tm_match.get("status") or "").lower()
+    if not status:
+        return None
+    if "no convocado" in status:
+        return {"in_squad": False}
+    if "lesion" in status or "lesionado" in status:
+        return {"absence_marker": "lesion"}
+    if "sancionado" in status:
+        return {"absence_marker": "suspendido"}
+    return None
+
+
 def _find_tm_match(fixture_utc: datetime, tm_matches: List[Dict]) -> Optional[Dict]:
     """
     Return the TM match dict whose date is within ±1 day of fixture_utc.
@@ -61,6 +77,19 @@ def _find_tm_match(fixture_utc: datetime, tm_matches: List[Dict]) -> Optional[Di
     return None
 
 
+def _map_absence_reason(reason: Optional[str]) -> Optional[str]:
+    """Map internal absence slug to user-friendly display text."""
+    if not reason:
+        return None
+    mapping = {
+        "not_summoned": "Not Summoned",
+        "injured": "Absence: Injury",
+        "suspended": "Absence: Suspension",
+        "unknown": "Absence: Unknown"
+    }
+    return mapping.get(reason, f"Absence: {reason.replace('_', ' ').title()}")
+
+
 class TimelineAggregator:
     def __init__(self, data_manager: Optional['HongKongDataManager'] = None):
         if data_manager is None:
@@ -72,9 +101,12 @@ class TimelineAggregator:
         self.fixture_manager = get_fixture_manager()
         self.player_index = get_player_index()
 
-    def get_player_timeline(self, player_id: str) -> List[Dict[str, Any]]:
+    def get_player_timeline(
+        self, player_id: str, insights: Optional[List[Dict]] = None
+    ) -> List[Dict[str, Any]]:
         """
         Returns a chronological list of milestones for a player.
+        Pass optional `insights` to inject ai-insight type milestones at correct positions.
         """
         timeline = []
         
@@ -87,8 +119,17 @@ class TimelineAggregator:
         player_name = player_info.get("canonical_name")
         seasons = player_info.get("seasons", [])
 
-        # Resolve current season and its end-year (used as group_year for ICS post-match milestones
-        # so they are grouped under the same year section as their career card).
+        # Load historical record JSON for metadata merging (Task 3.2)
+        historical_record = {}
+        historical_path = Path(__file__).parent.parent / "historical_records" / f"{player_id}.json"
+        if historical_path.exists():
+            try:
+                with open(historical_path, "r", encoding="utf-8") as f:
+                    historical_record = json.load(f)
+            except Exception as e:
+                logger.warning(f"Failed to load historical record for {player_id}: {e}")
+
+        # Resolve current season and its end-year
         current_season = seasons[0] if seasons else None
         try:
             current_season_end_year = str(int(current_season.split('-')[0]) + 1) if current_season else None
@@ -126,6 +167,7 @@ class TimelineAggregator:
                         "home_logo": next_fix.get("home_logo_url"),
                         "away_logo": next_fix.get("away_logo_url"),
                         "streaming_url": next_fix.get("streaming_url"),
+                        "streaming_platform": next_fix.get("streaming_platform"),
                         "competition": next_fix.get("competition"),
                         "home_fanart": next_fix.get("home_fanart_url"),
                         "away_fanart": next_fix.get("away_fanart_url"),
@@ -144,9 +186,6 @@ class TimelineAggregator:
             ]
             past_team_matches.sort(key=lambda x: x.get("kickoff_utc"), reverse=True)
 
-            # Load TM match history for all player seasons so past fixtures
-            # from any season can be matched (historical JSON only covers older seasons;
-            # newer ones are scraped live — loading all seasons maximises coverage).
             tm_current_matches: List[Dict[str, Any]] = []
             if tm_id:
                 for season_str in seasons:
@@ -157,25 +196,39 @@ class TimelineAggregator:
                     except Exception as exc:
                         logger.debug(f"TM history unavailable for {player_id}/{season_str}: {exc}")
 
-            for match in past_team_matches:  # no [:5] limit — show all past matches
+            for match in past_team_matches:
                 opponent = match.get("away_team") if match.get("home_team") == current_team else match.get("home_team")
                 kickoff_utc = match.get("kickoff_utc")
                 tm_match = _find_tm_match(kickoff_utc, tm_current_matches) if kickoff_utc else None
-                confirmation_status = "Confirmed" if tm_match and tm_match.get("minutes_played", 0) > 0 else "Scheduled"
-
-                # Extract TM performance data for this specific match
-                tm_result = tm_match.get("result") if tm_match else None
+                
+                # Resolve confirmation status and performance data
                 tm_minutes = int(tm_match.get("minutes_played", 0) or 0) if tm_match else 0
+                if tm_match:
+                    confirmation_status = "Confirmed" if tm_minutes > 0 else "Not played"
+                else:
+                    confirmation_status = "Scheduled"
+
+                tm_result = tm_match.get("result") if tm_match else None
                 tm_goals = int(tm_match.get("goals", 0) or 0) if tm_match else 0
                 tm_assists = int(tm_match.get("assists", 0) or 0) if tm_match else 0
                 absence_reason = None
                 if tm_match and tm_minutes == 0:
-                    enriched = enrich_absence_reason(tm_match, None)
-                    absence_reason = enriched.get("absence_reason")
+                    enriched = enrich_absence_reason(tm_match, _build_match_report_from_tm_status(tm_match))
+                    absence_reason = _map_absence_reason(enriched.get("absence_reason"))
 
-                # group_year: use the current season's end year so all ICS fixtures
-                # (including those played in the first half of the season, e.g. Sep-Dec 2025)
-                # land in the same section as their career card (anchored to May 2026).
+                # Task 3.2: Merge metadata from historical record JSON (precedence over ICS)
+                json_stadium = None
+                json_platform = None
+                if historical_record and kickoff_utc:
+                    fix_date_str = kickoff_utc.strftime("%d/%m/%Y")
+                    for s_key, s_data in historical_record.get("seasons", {}).items():
+                        for m in s_data.get("matches", []):
+                            if m.get("date") == fix_date_str and opponent in m.get("opponent", ""):
+                                json_stadium = m.get("stadium")
+                                json_platform = m.get("streaming_platform")
+                                break
+                        if json_stadium or json_platform: break
+
                 group_year = current_season_end_year or (str(kickoff_utc.year) if kickoff_utc else None)
 
                 timeline.append({
@@ -193,7 +246,8 @@ class TimelineAggregator:
                         "home_logo": match.get("home_logo_url") or _resolve_team_logo(match.get("home_team", "")),
                         "away_logo": match.get("away_logo_url") or _resolve_team_logo(match.get("away_team", "")),
                         "competition": match.get("competition"),
-                        "stadium": match.get("stadium"),
+                        "stadium": json_stadium or match.get("stadium"),
+                        "streaming_platform": json_platform or match.get("streaming_platform"),
                         "result": tm_result,
                         "minutes_played": tm_minutes,
                         "goals": tm_goals,
@@ -208,7 +262,6 @@ class TimelineAggregator:
         # 5. Add Career Milestones (career) + per-match cards for past seasons
         for season in seasons:
             try:
-                # "2024-25" → end year 2025; career card anchored to May of that year
                 year_end = int(season.split('-')[0]) + 1
                 season_date = datetime(year_end, 5, 30, tzinfo=timezone.utc)
             except Exception:
@@ -217,14 +270,13 @@ class TimelineAggregator:
 
             group_year = str(year_end)
 
-            # Derive Transfermarkt saison_id (start year) and fetch match history
             matches: List[Dict[str, Any]] = []
             if tm_id:
                 try:
                     season_start_year = season.split('-')[0]
                     extractor = TransfermarktExtractor()
                     raw_matches = extractor.get_match_history(tm_id, season_start_year)
-                    matches = [enrich_absence_reason(m, None) for m in raw_matches]
+                    matches = [enrich_absence_reason(m, _build_match_report_from_tm_status(m)) for m in raw_matches]
                 except Exception as match_exc:
                     logger.debug(f"Match history unavailable for {player_id}/{season}: {match_exc}")
 
@@ -242,9 +294,6 @@ class TimelineAggregator:
                 }
             })
 
-            # For past seasons only (not current): generate individual post-match milestones
-            # from TM data so each match appears as a card under its season header.
-            # Current season matches come from the ICS fixture calendar above.
             if season != current_season:
                 for tm_m in matches:
                     tm_date = _parse_tm_date(tm_m.get("date", ""))
@@ -253,27 +302,60 @@ class TimelineAggregator:
                     match_dt = datetime(tm_date.year, tm_date.month, tm_date.day, tzinfo=timezone.utc)
                     home_t, away_t = _parse_opponent(tm_m.get("opponent", ""))
                     minutes = int(tm_m.get("minutes_played", 0) or 0)
+                    
+                    # Map absence reason
+                    abs_reason = _map_absence_reason(tm_m.get("absence_reason"))
+
                     timeline.append({
                         "type": "post-match",
                         "label": f"Result: {tm_m.get('opponent', '')}",
                         "icon": "chart-bar",
                         "date": match_dt,
-                        "group_year": group_year,   # group under the career card, not calendar year
+                        "group_year": group_year,
                         "payload": {
                             "kickoff_display": tm_m.get("date", ""),
                             "home_team": home_t,
                             "away_team": away_t,
+                            "home_logo": _resolve_team_logo(home_t),
+                            "away_logo": _resolve_team_logo(away_t),
                             "competition": tm_m.get("competition", ""),
                             "result": tm_m.get("result"),
                             "minutes_played": minutes,
                             "goals": int(tm_m.get("goals", 0) or 0),
                             "assists": int(tm_m.get("assists", 0) or 0),
-                            "absence_reason": tm_m.get("absence_reason"),
+                            "absence_reason": abs_reason,
                             "confirmation_status": "Confirmed" if minutes > 0 else "Not played",
                         }
                     })
 
+        # Inject AI insight milestones at chronologically correct positions
+        if insights:
+            for ins in insights:
+                ts = ins.get("timestamp")
+                if not ts:
+                    continue
+                try:
+                    ins_dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+                    if ins_dt.tzinfo is None:
+                        ins_dt = ins_dt.replace(tzinfo=timezone.utc)
+                except (ValueError, AttributeError):
+                    logger.warning(f"Could not parse insight timestamp: {ts}")
+                    continue
+                timeline.append({
+                    "type": "ai-insight",
+                    "label": ins.get("title", "AI Insight"),
+                    "icon": "cpu",
+                    "date": ins_dt,
+                    "group_year": str(ins_dt.year),
+                    "payload": {
+                        "title": ins.get("title", "AI Insight"),
+                        "summary": ins.get("summary", ""),
+                        "detail": ins.get("detail", ""),
+                        "timestamp": ts,
+                    }
+                })
+
         # Final sort: most recent first
         timeline.sort(key=lambda x: x["date"], reverse=True)
-        
+
         return timeline

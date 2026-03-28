@@ -4,7 +4,38 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
 /* ── Timeline card compact padding ───────────────────────────── */
 .timeline-event .glass-card {
     padding: 10px;
-    margin-bottom: 8px;
+    margin-bottom: 0px;
+    overflow: visible !important; /* Allow logos/pills to bleed out slightly */
+}
+
+/* ── Competition logo visibility fix ─────────────────────────── */
+.milestone-header {
+    overflow: visible !important;
+}
+
+.competition-logo-container {
+    overflow: visible;
+    z-index: 2; /* Sit above the card light-beam */
+    flex-shrink: 0;
+    min-width: 22px;
+}
+
+.competition-logo-img {
+    filter: drop-shadow(0 0 2px rgba(255, 255, 255, 0.5));
+    transition: transform 0.3s ease;
+}
+
+.competition-logo-img:hover {
+    transform: scale(1.2);
+}
+
+/* ── Card header semantic spacing ─────────────────────────────── */
+.card-row--competition {
+    margin-bottom: 10px !important;
+}
+
+.card-row--teams {
+    margin-bottom: 10px !important;
 }
 
 :root {
@@ -188,13 +219,15 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
 
 /* ── Timeline event layout ────────────────────────────────────── */
 /*
- * align-items: center → card and circle share the same vertical midpoint.
- * event-node uses align-self: stretch so ::before spans the full event height.
+ * align-items: flex-start → event-node stretches to full column height
+ * (card + action-node pill). Circle is offset via padding-top so it aligns
+ * with the card's vertical midpoint.
  */
 .timeline-event {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     position: relative;
+    margin-top: 12px;
     margin-bottom: 12px;
 }
 
@@ -204,9 +237,10 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
     width: 44px;
     align-self: stretch;   /* stretches to full event height for vertical line */
     display: flex;
-    align-items: center;   /* circle sits at vertical midpoint */
+    align-items: flex-start;
     justify-content: center;
     position: relative;
+    padding-top: 18px;     /* positions circle center at ~38px = card midpoint */
 }
 
 /*
@@ -229,7 +263,8 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
 /* Type-colored vertical line segments */
 .event-node-primary::before { background: var(--bs-primary, #0d6efd); }
 .event-node-success::before  { background: var(--bs-success, #198754); }
-.event-node-warning::before  { background: var(--bs-warning, #ffc107); }
+/* Warning yellow has ~2× the luminance of cyan — reduce opacity to match visual weight */
+.event-node-warning::before  { background: rgba(255, 193, 7, 0.65); width: 2px; }
 
 /* ── Event circle (Lucide icon) ───────────────────────────────── */
 .event-circle {
@@ -274,6 +309,20 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
  *    Connector is drawn from event-node::after (not event-card::before)
  *    to avoid being clipped by glass-card { overflow: hidden }.
  * ─────────────────────────────────────────────────────────────── */
+/* Column wrapper: card + action node pill in vertical flow */
+.event-card-column {
+    flex: 1;
+    min-width: 0;
+    margin-left: 16px;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+}
+
+.event-card-column > .event-card {
+    margin-left: 0;
+}
+
 .event-card {
     flex: 1;
     min-width: 0;
@@ -290,8 +339,8 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
 .event-node::after {
     content: '';
     position: absolute;
-    top: 50%;
-    transform: translateY(-50%);
+    top: 38px;                /* 18px padding-top + 20px (half circle) = card midpoint */
+    transform: none;
     left: calc(50% + 20px);   /* circle right edge: center(22px) + radius(20px) */
     width: 18px;              /* 2px remaining node + 16px margin gap to card */
     height: 2px;
@@ -303,7 +352,7 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
 /* Type-colored horizontal connector */
 .event-node-primary::after { background: var(--bs-primary, #0d6efd); }
 .event-node-success::after  { background: var(--bs-success, #198754); }
-.event-node-warning::after  { background: var(--bs-warning, #ffc107); }
+.event-node-warning::after  { background: rgba(255, 193, 7, 0.65); }
 
 /* ── Icon-only detail button (colored arrow) ─────────────────── */
 .event-detail-btn {
@@ -409,6 +458,216 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
 .season-card:hover {
     transform: translateY(-2px);
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15) !important;
+}
+
+/* ── AI Insight Card Styles ──────────────────────────────────── */
+.ai-insight-card {
+    background: linear-gradient(-45deg, #00f2ff, #7b2ff7, #00f2ff);
+    background-size: 400% 400%;
+    animation: ai-gradient 15s ease infinite;
+    border: none !important;
+    position: relative;
+    overflow: hidden;
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.ai-insight-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 24px rgba(123, 47, 247, 0.4) !important;
+}
+
+@keyframes ai-gradient {
+    0% { background-position: 0% 50%; }
+    50% { background-position: 100% 50%; }
+    100% { background-position: 0% 50%; }
+}
+
+.ai-insight-card__overlay {
+    background: rgba(0, 0, 0, 0.7);
+    backdrop-filter: blur(4px);
+    height: 100%;
+    width: 100%;
+    padding: 12px;
+}
+
+.ai-insight-card__title {
+    color: #fff;
+    font-weight: 700;
+    font-size: 0.95rem;
+    margin-bottom: 4px;
+    text-shadow: 0 2px 4px rgba(0,0,0,0.3);
+}
+
+.ai-insight-card__summary {
+    color: rgba(255, 255, 255, 0.9);
+    font-size: 0.85rem;
+    line-height: 1.4;
+}
+
+.ai-insight-tag {
+    background: rgba(255, 255, 255, 0.2);
+    color: #fff;
+    font-size: 0.65rem;
+    padding: 2px 8px;
+    border-radius: 4px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-weight: 800;
+    margin-bottom: 8px;
+    display: inline-block;
+}
+
+/* ── Action Nodes — vertical pill below the match card ──────── */
+
+/*
+ * Container sits in .event-card-column below the card.
+ * flex-column + align-items: center → connector line and pill are centered.
+ */
+.action-node-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    margin-bottom: 8px;
+}
+
+/* Vertical connector from card bottom to pill center */
+.action-node-connector {
+    width: 2px;
+    height: 18px;
+    background: rgba(255, 255, 255, 0.18);
+    flex-shrink: 0;
+}
+
+.action-node-pill {
+    background: rgba(255, 255, 255, 0.05);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 999px !important;
+    padding: 5px 18px;
+    color: var(--accent-cyan, #00D4FF);
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.4px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255,255,255,0.06);
+}
+
+.action-node-pill:hover {
+    background: rgba(var(--accent-cyan-rgb), 0.12);
+    border-color: rgba(var(--accent-cyan-rgb), 0.5);
+    box-shadow: 0 4px 18px rgba(var(--accent-cyan-rgb), 0.25);
+    transform: translateY(-1px);
+}
+
+/* ── Action node pill type-color variants ──────────────────────── */
+.action-node-pill-primary {
+    border-color: rgba(13, 110, 253, 0.45);
+    color: #6ea8fe;
+}
+
+.action-node-pill-primary:hover {
+    background: rgba(13, 110, 253, 0.12);
+    border-color: rgba(13, 110, 253, 0.6);
+    box-shadow: 0 4px 18px rgba(13, 110, 253, 0.25);
+}
+
+.action-node-pill-success {
+    border-color: rgba(25, 135, 84, 0.45);
+    color: #75b798;
+}
+
+.action-node-pill-success:hover {
+    background: rgba(25, 135, 84, 0.12);
+    border-color: rgba(25, 135, 84, 0.6);
+    box-shadow: 0 4px 18px rgba(25, 135, 84, 0.25);
+}
+
+.action-node-connector-primary {
+    background: rgba(13, 110, 253, 0.35);
+}
+
+.action-node-connector-success {
+    background: rgba(25, 135, 84, 0.35);
+}
+
+/* ── Timeline hidden items (revealed by clientside Load More) ── */
+.timeline-item-hidden {
+    display: none;
+}
+
+/* ── Competition logo: subtle contrast on dark cards ──────────── */
+.competition-logo-img {
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 4px;
+    padding: 2px;
+}
+
+/* ── Load More row: two-column flex matching timeline-event layout ─ */
+.load-more-row {
+    display: flex;
+    align-items: center;
+    padding: 0px 0 0px;   /* 16px top clears the 12px vertical-line extension */
+}
+
+/* Spacer width adjusted so the button starts before the 22px vertical line center */
+.load-more-axis-spacer {
+    flex-shrink: 0;
+    width: 0px;
+    position: relative;
+}
+
+/* Continue the vertical timeline line through the Load More area */
+/* left: 22px = center of the 44px event-node column, regardless of spacer width */
+.load-more-axis-spacer::before {
+    content: "";
+    position: absolute;
+    left: 22px;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: var(--accent-cyan);
+    transform: none;
+}
+
+/* Card column for the button — removed margin so button starts at 14px */
+.load-more-card-col {
+    flex: 1;
+    min-width: 0;
+    margin-left: 0;
+    display: flex;
+    align-items: center;
+}
+
+.load-more-pill {
+    background: rgba(255, 255, 255, 0.04);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 999px;
+    padding: 7px 22px;
+    color: var(--portal-text-muted, rgba(255,255,255,0.5));
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.4px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    transition: all 0.25s ease;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.15), inset 0 1px 0 rgba(255,255,255,0.04);
+}
+
+.load-more-pill:hover {
+    background: rgba(var(--accent-cyan-rgb), 0.08);
+    border-color: rgba(var(--accent-cyan-rgb), 0.35);
+    color: var(--accent-cyan, #00D4FF);
+    box-shadow: 0 4px 18px rgba(var(--accent-cyan-rgb), 0.18);
+    transform: translateY(-1px);
 }
 
 .last-child-no-border:last-child {

@@ -5,6 +5,7 @@ from typing import Dict, Any, Optional
 
 from dash import html
 import dash_bootstrap_components as dbc
+from utils.performance_helpers import get_streaming_label
 
 
 # Badge color per competition — distinct from type colors (primary/success/warning).
@@ -103,11 +104,12 @@ def render_next_game_card(
     kickoff_display = milestone_payload.get("kickoff_display", "")
     stadium = milestone_payload.get("stadium")
     streaming_url = milestone_payload.get("streaming_url")
+    streaming_platform = milestone_payload.get("streaming_platform")
 
     comp_color = _COMP_COLOR_MAP.get(competition, "primary")
     comp_logo = _COMP_LOGO_MAP.get(competition)
 
-    # Competition logo for top-right corner
+    # Competition logo for top-right corner (text fallback when no logo asset)
     comp_logo_el = (
         html.Img(
             src=comp_logo,
@@ -115,7 +117,16 @@ def render_next_game_card(
             title=competition,
         )
         if comp_logo
-        else html.Span()
+        else (
+            html.Span(
+                competition[:4].upper(),
+                className="small fw-semibold portal-text-muted",
+                style={"fontSize": "0.55rem"},
+                title=competition,
+            )
+            if competition
+            else html.Span()
+        )
     )
 
     # Competition badge (left side, no logo — logo is in the corner)
@@ -178,18 +189,29 @@ def render_next_game_card(
             )
         )
 
+    platform_label = get_streaming_label(streaming_url, streaming_platform)
     if streaming_url:
         detail_rows.append(
             html.Div(
                 [
                     _lucide("tv"),
                     html.A(
-                        "Ver en streaming",
+                        platform_label,
                         href=streaming_url,
                         target="_blank",
                         rel="noopener noreferrer",
-                        className="small text-primary",
+                        className="small text-primary fw-semibold",
                     ),
+                ],
+                className="d-flex align-items-center gap-1 mb-1",
+            )
+        )
+    else:
+        detail_rows.append(
+            html.Div(
+                [
+                    _lucide("tv-off"),
+                    html.Small(platform_label, className="portal-text-muted"),
                 ],
                 className="d-flex align-items-center gap-1 mb-1",
             )

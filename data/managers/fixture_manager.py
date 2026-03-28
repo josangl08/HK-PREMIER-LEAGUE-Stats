@@ -305,6 +305,8 @@ def _load_thesportsdb_teams() -> dict[str, dict]:
             "hong kong football club": "hong kong fc",
             "eastern": "eastern sc",
             "rangers": "hong kong rangers",
+            "southern": "southern district",
+            "eastern dist.": "eastern district",
         }
         for alias, canonical in _TSDB_ALIASES.items():
             if canonical in _thesportsdb_team_cache and alias not in _thesportsdb_team_cache:
@@ -357,9 +359,15 @@ def _resolve_logo(team_name: str) -> Optional[str]:
                 team_data = val
                 break
 
+    # Always derive the download name from the TheSportsDB canonical strTeam field,
+    # whether team_data was found via direct key, alias, or partial match.
+    # This prevents duplicate assets for short/abbreviated input names like
+    # "Eastern", "Southern", "Eastern Dist." mapping to wrong slugs.
+    canonical_name = team_data.get("strTeam", team_name) if team_data else team_name
+
     badge_url = team_data.get("strBadge") or team_data.get("strTeamBadge") if team_data else None
     if badge_url:
-        return _download_logo(team_name, badge_url)
+        return _download_logo(canonical_name, badge_url)
 
     return None
 
@@ -478,6 +486,27 @@ def _extract_streaming_url(description: Optional[str]) -> Optional[str]:
     return match.group(0) if match else None
 
 
+def _detect_streaming_platform(url: Optional[str]) -> Optional[str]:
+    """
+    Detect the streaming platform name from a URL.
+    Returns labeled platform string or None if no match.
+    """
+    if not url:
+        return None
+    url_lower = url.lower()
+    if "youtube.com" in url_lower or "youtu.be" in url_lower:
+        return "YouTube"
+    if "rthk.hk" in url_lower:
+        return "RTHK"
+    if "now.com" in url_lower or "nowtv" in url_lower:
+        return "Now TV"
+    if "tvb.com" in url_lower or "mytvsuper" in url_lower:
+        return "myTV SUPER"
+    if "facebook.com" in url_lower or "fb.com" in url_lower:
+        return "Facebook Live"
+    return "Streaming"
+
+
 # ── FixtureManager ────────────────────────────────────────────────────────────
 
 class FixtureManager:
@@ -514,6 +543,8 @@ class FixtureManager:
                 return persisted
         else:
             self._persist_fixtures(fixtures)
+            # Perform fixture-to-history transition check for metadata persistence
+            self._check_fixture_transitions(fixtures)
 
         self._cache.set(CACHE_KEY, fixtures, ttl_seconds=CACHE_TTL)
         return fixtures
@@ -587,6 +618,82 @@ class FixtureManager:
             logger.debug(f"Could not load persisted fixtures: {e}")
             return []
 
+    def _check_fixture_transitions(self, fixtures: list[dict]) -> None:
+        """
+        Identify fixtures that have passed and write their metadata (stadium, streaming_platform)
+        to the historical records of the players involved to ensure durability.
+        """
+        now_utc = datetime.now(timezone.utc)
+        # We consider fixtures that ended (roughly kickoff + 2h)
+        passed_fixtures = [
+            f for f in fixtures 
+            if f.get("kickoff_utc") and (now_utc - f["kickoff_utc"]) > timedelta(hours=2)
+        ]
+        if not passed_fixtures:
+            return
+
+        logger.info(f"Checking metadata transitions for {len(passed_fixtures)} passed fixtures.")
+
+        try:
+            # Lazy imports to avoid circular dependency
+            from data.hong_kong_data_manager import HongKongDataManager
+            from utils.player_index import get_player_index
+            
+            dm = HongKongDataManager(auto_load=True)
+            index = get_player_index()
+            historical_dir = Path(__file__).parent.parent / "historical_records"
+        except Exception as e:
+            logger.warning(f"Failed to initialize DataManager/Index for transition check: {e}")
+            return
+
+        for fix in passed_fixtures:
+            home = fix.get("home_team")
+            away = fix.get("away_team")
+            teams = [home, away]
+            
+            for team_name in teams:
+                if not team_name:
+                    continue
+                
+                player_names = dm.get_available_players(team_name)
+                for p_name in player_names:
+                    p_id = index.get_player_id(p_name)
+                    if not p_id:
+                        continue
+                    
+                    record_path = historical_dir / f"{p_id}.json"
+                    if record_path.exists():
+                        self._update_historical_record(record_path, fix, team_name)
+
+    def _update_historical_record(self, record_path: Path, fixture: dict, team: str) -> None:
+        """Update a specific player's historical record with fixture metadata."""
+        try:
+            with open(record_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            
+            fix_date_str = fixture["kickoff_utc"].strftime("%d/%m/%Y")
+            opponent = fixture["away_team"] if fixture["home_team"] == team else fixture["home_team"]
+            
+            updated = False
+            for season_key, season_data in data.get("seasons", {}).items():
+                matches = season_data.get("matches", [])
+                for match in matches:
+                    # Match by date and opponent substring
+                    if match.get("date") == fix_date_str and opponent in match.get("opponent", ""):
+                        # Only update if fields are missing or different
+                        if match.get("stadium") != fixture.get("stadium") or \
+                           match.get("streaming_platform") != fixture.get("streaming_platform"):
+                            match["stadium"] = fixture.get("stadium")
+                            match["streaming_platform"] = fixture.get("streaming_platform")
+                            updated = True
+            
+            if updated:
+                with open(record_path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                logger.debug(f"Updated historical record {record_path.name} for match on {fix_date_str}")
+        except Exception as e:
+            logger.warning(f"Failed to update historical record {record_path.name}: {e}")
+
     def _fetch_and_build(self) -> list[dict]:
         """Fetch ICS, parse, normalize, enrich, and return fixture list."""
         try:
@@ -637,6 +744,7 @@ class FixtureManager:
         away_fanart_url = _resolve_fanart(away_en)
         stadium_thumb_url = _resolve_stadium_thumb(home_en)
         streaming_url = _extract_streaming_url(event.get("description"))
+        streaming_platform = _detect_streaming_platform(streaming_url)
 
         teams_cache = _load_thesportsdb_teams()
         home_data = teams_cache.get(home_en.lower()) or {}
@@ -667,6 +775,7 @@ class FixtureManager:
                 "stadium": stadium_en,
                 "stadium_thumb": stadium_thumb_url,
                 "streaming_url": streaming_url,
+                "streaming_platform": streaming_platform,
             },
             # ── Flat backward-compat aliases (all current consumers) ─────────
             "uid": uid,
@@ -680,6 +789,7 @@ class FixtureManager:
             "home_logo_url": home_logo_url,
             "away_logo_url": away_logo_url,
             "streaming_url": streaming_url,
+            "streaming_platform": streaming_platform,
             "home_fanart_url": home_fanart_url,
             "away_fanart_url": away_fanart_url,
             "stadium_thumb_url": stadium_thumb_url,

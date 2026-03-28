@@ -15,7 +15,7 @@ from flask_login import current_user
 from callbacks.agent_callbacks import _run_agent_with_timeout
 from layouts.prematch_card import create_prematch_card
 from utils.ical_export import build_ical_bytes
-from utils.stage_helpers import get_projection_figure, get_umap_figure, render_image_gallery
+from utils.stage_helpers import get_projection_figure, render_image_gallery
 
 logger = logging.getLogger(__name__)
 
@@ -133,38 +133,6 @@ def caption_ai_callback(n_clicks, context):
     )
 
 
-def show_arquetipo_callback(n_clicks, context):
-    """Renders a focused UMAP archetype chart with the player highlighted."""
-    if not n_clicks or not context:
-        return no_update
-    if context.get("type") != "career":
-        return no_update
-    payload = context.get("payload", {})
-    player_id = payload.get("player_id", "")
-    try:
-        fig = get_umap_figure(player_id)
-        if not fig.data:
-            return dbc.Alert("Datos de clustering no disponibles.", color="info")
-        return html.Div(
-            html.Div(
-                [
-                    html.H6(
-                        "Arquetipo de Jugador",
-                        className="fw-bold mb-3 text-warning",
-                    ),
-                    dcc.Graph(
-                        figure=fig,
-                        config={"displayModeBar": False},
-                        className="w-100",
-                    ),
-                ]
-            ),
-            className="glass-card",
-        )
-    except Exception as exc:
-        logger.error(f"show_arquetipo error: {exc}")
-        return dbc.Alert("Datos de clustering no disponibles.", color="info")
-
 
 def show_proyectar_callback(n_clicks, context):
     """Renders the season performance projection chart in the Stage."""
@@ -272,22 +240,6 @@ def register_stage_action_callbacks(app):
         State("stage-context-snapshot", "data"),
         prevent_initial_call=True,
     )(caption_ai_callback)
-
-    # 4.6 — dn-arquetipo
-    app.callback(
-        Output("stage-content", "children", allow_duplicate=True),
-        Input("dn-arquetipo", "n_clicks"),
-        State("stage-context-snapshot", "data"),
-        prevent_initial_call=True,
-    )(show_arquetipo_callback)
-
-    # 4.7 — dn-proyectar
-    app.callback(
-        Output("stage-content", "children", allow_duplicate=True),
-        Input("dn-proyectar", "n_clicks"),
-        State("stage-context-snapshot", "data"),
-        prevent_initial_call=True,
-    )(show_proyectar_callback)
 
     # 4.8 — dn-dossier-pdf
     app.callback(

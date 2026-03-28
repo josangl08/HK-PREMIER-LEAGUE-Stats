@@ -40,11 +40,24 @@ def create_agent(flow: str = "scouting") -> Any:
     # Normalize flow name via aliases
     flow = FLOW_ALIASES.get(flow, flow)
 
+    # 1. Try to load Subscriber Credentials (OAuth Bridge)
+    from google.oauth2.credentials import Credentials
+    creds = None
+    if os.path.exists("token.json"):
+        try:
+            # Match the scope used in auth_bridge.py (Generative Language API — AI Studio track)
+            creds = Credentials.from_authorized_user_file("token.json", ["https://www.googleapis.com/auth/generative-language"])
+            print("🚀 BRIDGE ACTIVE: Using Gemini Subscriber Account (OAuth).")
+            logger.info("Using Gemini Subscriber Bridge (OAuth Credentials).")
+        except Exception as e:
+            print(f"⚠️ BRIDGE ERROR: {e}")
+            logger.warning("Failed to load subscriber credentials: %s", e)
+
     api_key = os.environ.get("GOOGLE_API_KEY", "").strip().strip('"').strip("'")
-    if not api_key:
+    if not api_key and not creds:
         raise EnvironmentError(
-            "GOOGLE_API_KEY environment variable is not set. "
-            "Set it before using the agentic AI features."
+            "Neither GOOGLE_API_KEY nor subscriber 'token.json' found. "
+            "Set GOOGLE_API_KEY or run scripts/auth_bridge.py."
         )
 
     if flow not in ("content", "scouting"):
@@ -79,12 +92,22 @@ def create_agent(flow: str = "scouting") -> Any:
         query_players,
     )
 
-    model_name = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
-    llm = ChatGoogleGenerativeAI(
-        model=model_name,
-        google_api_key=api_key,
-        temperature=0,
-    )
+    # Use Flash 2.0 by default — faster latency for Dash callbacks, active on AI Studio track
+    model_name = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+    
+    # Initialize LLM with credentials (OAuth Bridge) or API Key
+    if creds:
+        llm = ChatGoogleGenerativeAI(
+            model=model_name,
+            credentials=creds,
+            temperature=0,
+        )
+    else:
+        llm = ChatGoogleGenerativeAI(
+            model=model_name,
+            google_api_key=api_key,
+            temperature=0,
+        )
     tools = [query_players, get_percentiles, detect_changes, generate_card, create_dossier, generate_caption]
 
     if flow == "content":
