@@ -22,6 +22,35 @@ import html as _html_lib
 
 logger = logging.getLogger(__name__)
 
+# Static team color palette — sourced from official club identity (primary, secondary)
+_TEAM_COLORS = {
+    "kitchee": {"colour1": "#E31837", "colour2": "#003087"},
+    "kitchee sc": {"colour1": "#E31837", "colour2": "#003087"},
+    "eastern": {"colour1": "#004EA2", "colour2": "#FFD700"},
+    "eastern aa": {"colour1": "#004EA2", "colour2": "#FFD700"},
+    "eastern sc": {"colour1": "#004EA2", "colour2": "#FFD700"},
+    "lee man": {"colour1": "#C8102E", "colour2": "#1a1a2e"},
+    "lee man fc": {"colour1": "#C8102E", "colour2": "#1a1a2e"},
+    "southern district": {"colour1": "#0057A8", "colour2": "#E31837"},
+    "southern": {"colour1": "#0057A8", "colour2": "#E31837"},
+    "rangers": {"colour1": "#0057A8", "colour2": "#ffffff"},
+    "hk rangers": {"colour1": "#0057A8", "colour2": "#ffffff"},
+    "tai po": {"colour1": "#003087", "colour2": "#FFB612"},
+    "north district": {"colour1": "#F58220", "colour2": "#1a1a2e"},
+    "hong kong football club": {"colour1": "#E41B17", "colour2": "#ffffff"},
+    "hkfc": {"colour1": "#E41B17", "colour2": "#ffffff"},
+    "kowloon city": {"colour1": "#6A0DAD", "colour2": "#1a1a2e"},
+}
+
+
+def _get_team_colors(team_name: str) -> dict:
+    """Returns team color dict {colour1, colour2} for a given team name, or empty dict."""
+    if not team_name:
+        return {}
+    key = team_name.lower().strip()
+    return _TEAM_COLORS.get(key, {})
+
+
 _COMPETITION_LOGO_MAP = {
     "HK Premier League": "/assets/competition_logos/hong_kong_premier_league.png",
     "HKFA Cup": "/assets/competition_logos/hong_kong_fa_cup.png",
@@ -1417,36 +1446,37 @@ def register_player_portal_callbacks(app):
         return {"display": "none"}
 
     # ------------------------------------------------------------------ #
-    # Action Node pill click → card generation or gallery open            #
-    # Tasks 6.3 + 6.4: route to generate/view; transition label via store #
-    # ------------------------------------------------------------------ #
+    # Action Node pill click → Card Studio (new) or gallery open (already generated) #
+    # Task 8.1: Route to Card Studio via run_card_design_agent; "View" path unchanged #
+    # ------------------------------------------------------------------------------ #
     @app.callback(
         Output("stage-content", "children", allow_duplicate=True),
         Output("timeline-pagination-store", "data", allow_duplicate=True),
+        Output("card-editor-state", "data", allow_duplicate=True),
         Input({"type": "action-node-pill", "index": ALL}, "n_clicks"),
         State("milestones-data-store", "data"),
         State("timeline-pagination-store", "data"),
         prevent_initial_call=True,
     )
     def handle_action_node_pill(n_clicks_list, milestones_data, pagination_store):
-        """Generate or view social card from action node pill below each match card."""
+        """Open Card Studio on first click; show gallery if already generated."""
         if not ctx.triggered_id or not any(n_clicks_list or []):
-            return no_update, no_update
+            return no_update, no_update, no_update
         triggered = ctx.triggered_id
         if (
             not isinstance(triggered, dict)
             or triggered.get("type") != "action-node-pill"
         ):
-            return no_update, no_update
+            return no_update, no_update, no_update
 
         milestone_id = triggered["index"]
         if not milestones_data:
-            return no_update, no_update
+            return no_update, no_update, no_update
         m = next(
             (item for item in milestones_data if item.get("id") == milestone_id), None
         )
         if not m:
-            return no_update, no_update
+            return no_update, no_update, no_update
 
         store = pagination_store or {}
         generated = dict(store.get("generated", {}))
@@ -1454,27 +1484,110 @@ def register_player_portal_callbacks(app):
         m_type = m.get("type")
         payload = m.get("payload", {})
 
+        # Already generated → show gallery from new player_cards dir (with cache fallback)
         if is_generated:
             path = get_cached_image_path(milestone_id)
-            return render_image_gallery(path), no_update
+            return render_image_gallery(path), no_update, no_update
 
-        # Generate card
+        # Only handle card-type milestones
+        if m_type not in ("pre-match", "post-match"):
+            return no_update, no_update, no_update
+
+        card_type = m_type
+
+        # Load saved draft if it exists
         try:
-            if m_type == "pre-match":
-                from layouts.prematch_card import create_prematch_card
+            from flask_login import current_user as _cu
+            player_id = str(_cu.id) if _cu and _cu.is_authenticated else "unknown"
+        except Exception:
+            player_id = "unknown"
 
-                result = create_prematch_card(payload)
-            elif m_type == "post-match":
-                result = render_post_match(payload)
+        from pathlib import Path as _Path
+        import json as _json
+        draft_path = _Path("data/player_cards") / player_id / milestone_id / "card_editor.json"
+        saved_draft = None
+        if draft_path.exists():
+            try:
+                saved_draft = _json.loads(draft_path.read_text("utf-8"))
+            except Exception:
+                saved_draft = None
+
+        # Show spinner while agent runs (synchronous call — Dash 4 doesn't block here noticeably)
+        try:
+            from layouts.components.card_editor import create_card_studio_spinner
+            from utils.card_design_agent import run_card_design_agent
+
+            _team_colors = _get_team_colors(payload.get("home_team", ""))
+            proposals = run_card_design_agent(
+                match_payload=payload,
+                player_profile={},
+                team_colors=_team_colors,
+                player_history=[],
+                has_player_photo=False,
+                card_type=card_type,
+            )
+            ai_notice = None
+        except Exception as exc:
+            logger.error(f"handle_action_node_pill agent error: {exc}")
+            from utils.card_design_agent import _deterministic_fallback
+            proposals = _deterministic_fallback({
+                "match_payload": payload,
+                "team_colors": _get_team_colors(payload.get("home_team", "")),
+                "has_player_photo": False,
+                "card_type": card_type,
+            })
+            ai_notice = "IA no disponible — propuesta básica cargada."
+
+        # Build initial editor state (draft overrides AI proposal if exists)
+        first_proposal = proposals[0] if proposals else {}
+        if saved_draft:
+            editor_state = saved_draft
+        else:
+            editor_state = {
+                "milestone_id": milestone_id,
+                "card_type": card_type,
+                "template": (first_proposal.get("design") or {}).get("template", "A"),
+                "format": "1:1",
+                "ai_proposal": first_proposal,
+                "elements": (first_proposal.get("design") or {}).get("elements") or {},
+                "selected_photo_idx": None,
+                "last_saved": None,
+            }
+
+        # Render the appropriate Card Studio layout
+        try:
+            from layouts.components.card_editor import (
+                create_pre_game_card_studio,
+                create_performance_card_studio,
+            )
+
+            match_context = {
+                "home_team": payload.get("home_team"),
+                "away_team": payload.get("away_team"),
+                "competition": payload.get("competition"),
+                "date": payload.get("date"),
+                "score": payload.get("score"),
+            }
+
+            from callbacks.card_editor_callbacks import _build_preview_layout
+            initial_preview = _build_preview_layout(editor_state, {})
+
+            if card_type == "pre-match":
+                studio = create_pre_game_card_studio(milestone_id, match_context, proposals,
+                                                     initial_preview=initial_preview)
             else:
-                return no_update, no_update
-        except Exception as e:
-            logger.error(f"handle_action_node_pill generation error: {e}")
-            return dbc.Alert("Error generating card.", color="danger"), no_update
+                studio = create_performance_card_studio(milestone_id, match_context, proposals,
+                                                        initial_preview=initial_preview)
 
-        generated[milestone_id] = True
-        new_store = {**store, "generated": generated}
-        return result, new_store
+            children = [studio]
+            if ai_notice:
+                children.insert(0, dbc.Alert(ai_notice, color="warning", className="small mb-2"))
+            result = html.Div(children)
+        except Exception as exc:
+            logger.error(f"handle_action_node_pill studio render error: {exc}")
+            return dbc.Alert("Error abriendo el Card Studio.", color="danger"), no_update, no_update
+
+        return result, no_update, editor_state
 
     # ------------------------------------------------------------------ #
     # AI Insight card click → Stage deep-dive (Task 7.1)                 #

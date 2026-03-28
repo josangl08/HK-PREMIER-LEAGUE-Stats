@@ -1,4 +1,9 @@
 import os
+import warnings
+
+# Silence noisy UMAP/Numba warnings about n_jobs and TBB
+warnings.filterwarnings("ignore", message=".*n_jobs value 1 overridden.*")
+warnings.filterwarnings("ignore", message=".*TBB failed to initialize.*")
 
 # Configure Numba threading before any import that triggers numba/umap.
 # The default 'workqueue' layer crashes under concurrent Flask threads.
@@ -103,6 +108,9 @@ def is_werkzeug_reloader_process():
     """Verifica si estamos en el proceso padre del reloader de Werkzeug."""
     return os.environ.get('WERKZEUG_RUN_MAIN') != 'true'
 
+# Placeholders para el proceso padre
+_player_options = []
+
 # Solo inicializar si NO estamos en el proceso padre del reloader
 if not is_werkzeug_reloader_process():
     logger.info("Inicializando el gestor de datos y autenticación...")
@@ -148,68 +156,70 @@ if not is_werkzeug_reloader_process():
         logger.info("✓ Admin sincronizado desde .env en users.json")
     except Exception as e:
         logger.error(f"❌ Error en Admin Safety Sync: {e}")
+
+    # ==============================================================================
+    # IMPORTACIÓN DE CALLBACKS (Solo en el proceso hijo)
+    # ==============================================================================
+    ENABLE_INJURIES_MODULE = os.getenv("ENABLE_INJURIES", "False").lower() == "true"
+
+    import callbacks.auth_callbacks
+    import callbacks.navigation_callbacks
+    import callbacks.home_callbacks
+    import callbacks.performance_callbacks
+    import callbacks.fixture_callbacks
+    import callbacks.content_generation_callbacks
+
+    if ENABLE_INJURIES_MODULE:
+        import callbacks.injuries_callbacks
+        logger.info("✓ Módulo de lesiones habilitado")
+    else:
+        logger.info("⚠️ Módulo de lesiones deshabilitado (ENABLE_INJURIES=False)")
+
+    try:
+        import callbacks.ai_insights_callbacks
+        from callbacks.agent_callbacks import register_agent_callbacks
+        register_agent_callbacks(app)
+        logger.info("✓ Módulo AI Insights y Agent habilitados")
+    except ImportError:
+        logger.info("⚠️ Módulo AI Insights no disponible aún (pendiente de Gemini)")
+
+    try:
+        from callbacks.player_portal_callbacks import register_player_portal_callbacks
+        register_player_portal_callbacks(app)
+        logger.info("✓ Player Portal callbacks registrados")
+    except ImportError as e:
+        logger.info(f"⚠️ Player Portal callbacks no disponibles: {e}")
+
+    try:
+        from callbacks.stage_action_callbacks import register_stage_action_callbacks
+        register_stage_action_callbacks(app)
+        logger.info("✓ Stage Action callbacks registrados")
+    except ImportError as e:
+        logger.info(f"⚠️ Stage Action callbacks no disponibles: {e}")
+
+    try:
+        from callbacks.card_editor_callbacks import register_card_editor_callbacks
+        register_card_editor_callbacks(app)
+        logger.info("✓ Card Editor callbacks registrados")
+    except ImportError as e:
+        logger.info(f"⚠️ Card Editor callbacks no disponibles: {e}")
+
+    logger.info("✓ Callbacks importados correctamente.")
+
+    # Obtener nombres de jugadores para el Store global
+    try:
+        from utils.player_index import get_player_index as _get_player_index
+        _player_options = [
+            {"label": name, "value": name}
+            for name in sorted(_get_player_index().get_all_player_names())
+        ]
+        logger.info(f"✓ player-names-store preparado ({len(_player_options)} jugadores)")
+    except Exception as _e:
+        logger.warning(f"⚠️ No se pudieron cargar nombres de jugadores para el Store: {_e}")
+        _player_options = []
 else:
     logger.info("⏳ Proceso padre del reloader - esperando al proceso hijo...")
 
-# ==============================================================================
-# IMPORTACIÓN DE CALLBACKS
-# ==============================================================================
-# Se importan después de que 'app' y 'data_manager' están definidos y registrados
-# Los callbacks ahora usan app_context para evitar crear instancias duplicadas
-#
-# NOTA: Solo importar callbacks activos. El módulo 'injuries' está deshabilitado
-# por configuración (ENABLE_INJURIES=False por defecto)
-# ==============================================================================
-ENABLE_INJURIES_MODULE = os.getenv("ENABLE_INJURIES", "False").lower() == "true"
-
-import callbacks.auth_callbacks
-import callbacks.navigation_callbacks
-import callbacks.home_callbacks
-import callbacks.performance_callbacks
-import callbacks.fixture_callbacks
-import callbacks.content_generation_callbacks
-
-if ENABLE_INJURIES_MODULE:
-    import callbacks.injuries_callbacks
-    logger.info("✓ Módulo de lesiones habilitado")
-else:
-    logger.info("⚠️ Módulo de lesiones deshabilitado (ENABLE_INJURIES=False)")
-
-try:
-    import callbacks.ai_insights_callbacks
-    from callbacks.agent_callbacks import register_agent_callbacks
-    register_agent_callbacks(app)
-    logger.info("✓ Módulo AI Insights y Agent habilitados")
-except ImportError:
-    logger.info("⚠️ Módulo AI Insights no disponible aún (pendiente de Gemini)")
-
-try:
-    from callbacks.player_portal_callbacks import register_player_portal_callbacks
-    register_player_portal_callbacks(app)
-    logger.info("✓ Player Portal callbacks registrados")
-except ImportError as e:
-    logger.info(f"⚠️ Player Portal callbacks no disponibles: {e}")
-
-try:
-    from callbacks.stage_action_callbacks import register_stage_action_callbacks
-    register_stage_action_callbacks(app)
-    logger.info("✓ Stage Action callbacks registrados")
-except ImportError as e:
-    logger.info(f"⚠️ Stage Action callbacks no disponibles: {e}")
-
-logger.info("✓ Callbacks importados correctamente.")
-
-# Obtener nombres de jugadores para el Store global (una sola vez al arrancar)
-try:
-    from utils.player_index import get_player_index as _get_player_index
-    _player_options = [
-        {"label": name, "value": name}
-        for name in sorted(_get_player_index().get_all_player_names())
-    ]
-    logger.info(f"✓ player-names-store preparado ({len(_player_options)} jugadores)")
-except Exception as _e:
-    logger.warning(f"⚠️ No se pudieron cargar nombres de jugadores para el Store: {_e}")
-    _player_options = []
 
 # Definir layout principal de la aplicación
 app.layout = dbc.Container([

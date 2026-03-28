@@ -60,28 +60,43 @@ class TransfermarktExtractor:
             return None
 
     def get_match_history(self, player_id: str, season_id: str) -> List[Dict]:
-        """Obtiene el historial de partidos filtrando por equipo de HK o competición de HK."""
+        """
+        Obtiene el historial de partidos filtrando por equipo de HK o competición de HK.
+        Usa cache persistente para evitar scraping redundante (TTL diario para temporadas activas).
+        """
         season_key, tm_season_id = self._season_key(season_id)
         
-        # Cache histórico (solo si la temporada ya terminó)
+        # 1. Intentar cargar desde cache local
+        records = self._read_historical_records(player_id)
         is_completed = self._is_season_completed(season_key)
-        if is_completed:
-            records = self._read_historical_records(player_id)
-            if season_key in records.get("seasons", {}) and records["seasons"][season_key].get("matches"):
-                return records["seasons"][season_key]["matches"]
+        
+        if season_key in records.get("seasons", {}):
+            last_updated_str = records.get("last_updated", "")
+            if last_updated_str:
+                try:
+                    # Soportar tanto formato ISO date como datetime
+                    last_updated = datetime.fromisoformat(last_updated_str).date()
+                    
+                    # Si la temporada ya terminó, o si se actualizó HOY, usar cache
+                    if is_completed or last_updated == datetime.now().date():
+                        self.logger.info(f"✓ Usando cache de Transfermarkt para {player_id} ({season_key}) - Actualizado: {last_updated}")
+                        return records["seasons"][season_key].get("matches", [])
+                except Exception as e:
+                    self.logger.debug(f"Error parseando timestamp de cache: {e}")
 
-        # Scraping detallado (vista ampliada plus/1)
+        # 2. Scraping detallado (vista ampliada plus/1) si no hay cache válido
         url = f"{self.base_url}/x/leistungsdatendetails/spieler/{player_id}/saison/{tm_season_id}/plus/1"
         soup = self._make_request(url)
-        if not soup: return []
+        if not soup:
+            # Fallback a cache aunque sea viejo si falla la red
+            return records.get("seasons", {}).get(season_key, {}).get("matches", []) if records else []
         
         result = self._parse_detailed_performance(soup)
         
-        if is_completed:
-            records = self._read_historical_records(player_id)
-            records.setdefault("seasons", {})[season_key] = result
-            records["last_updated"] = datetime.now().date().isoformat()
-            self._write_historical_records(player_id, records)
+        # 3. Persistir en registros históricos
+        records.setdefault("seasons", {})[season_key] = result
+        records["last_updated"] = datetime.now().isoformat()
+        self._write_historical_records(player_id, records)
             
         return result.get("matches", [])
 

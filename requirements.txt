@@ -48,6 +48,7 @@ sentence-transformers>=2.7
 rembg>=2.0
 langgraph>=0.1
 langchain-google-genai>=1.0
+langchain-google-vertexai>=1.0
 
 # == Servidor de Producción ==
 # Servidor WSGI para despliegue en entornos de producción.

@@ -46412,37 +46412,37 @@
   "umap_2d": {
     "versions": [
       {
-        "version": 569,
-        "path": "/Users/joseangel/Downloads/Projects/HongKong_PremierLeague/HK-PREMIER-LEAGUE-Stats/models/clustering/umap_2d_v569.pkl",
+        "version": 647,
+        "path": "/Users/joseangel/Downloads/Projects/HongKong_PremierLeague/HK-PREMIER-LEAGUE-Stats/models/clustering/umap_2d_v647.pkl",
         "model_type": "clustering",
         "metrics": {},
         "features": [],
-        "trained_at": "2026-03-28T03:28:29.491701+00:00"
+        "trained_at": "2026-03-28T16:39:42.901875+00:00"
       },
       {
-        "version": 570,
-        "path": "/Users/joseangel/Downloads/Projects/HongKong_PremierLeague/HK-PREMIER-LEAGUE-Stats/models/clustering/umap_2d_v570.pkl",
+        "version": 648,
+        "path": "/Users/joseangel/Downloads/Projects/HongKong_PremierLeague/HK-PREMIER-LEAGUE-Stats/models/clustering/umap_2d_v648.pkl",
         "model_type": "clustering",
         "metrics": {},
         "features": [],
-        "trained_at": "2026-03-28T03:28:38.644291+00:00"
+        "trained_at": "2026-03-28T16:40:05.235691+00:00"
       },
       {
-        "version": 571,
-        "path": "/Users/joseangel/Downloads/Projects/HongKong_PremierLeague/HK-PREMIER-LEAGUE-Stats/models/clustering/umap_2d_v571.pkl",
+        "version": 649,
+        "path": "/Users/joseangel/Downloads/Projects/HongKong_PremierLeague/HK-PREMIER-LEAGUE-Stats/models/clustering/umap_2d_v649.pkl",
         "model_type": "clustering",
         "metrics": {},
         "features": [],
-        "trained_at": "2026-03-28T03:28:46.228342+00:00"
+        "trained_at": "2026-03-28T16:40:05.676012+00:00"
       }
     ],
     "latest": {
-      "version": 571,
-      "path": "/Users/joseangel/Downloads/Projects/HongKong_PremierLeague/HK-PREMIER-LEAGUE-Stats/models/clustering/umap_2d_v571.pkl",
+      "version": 649,
+      "path": "/Users/joseangel/Downloads/Projects/HongKong_PremierLeague/HK-PREMIER-LEAGUE-Stats/models/clustering/umap_2d_v649.pkl",
       "model_type": "clustering",
       "metrics": {},
       "features": [],
-      "trained_at": "2026-03-28T03:28:46.228342+00:00"
+      "trained_at": "2026-03-28T16:40:05.676012+00:00"
     }
   },
   "player_embeddings": {

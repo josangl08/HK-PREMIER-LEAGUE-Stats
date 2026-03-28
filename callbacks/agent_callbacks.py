@@ -47,18 +47,9 @@ def _decision_nodes_post_match(payload: dict) -> list:
     perf = player_stats.get("performance_stats", {})
     xg = perf.get("xg", 0) or 0
 
-    buttons = [
-        dbc.Button(
-            [html.I(className="bi bi-image me-1"), "Generar Card"],
-            id="dn-generate-card",
-            color="primary", outline=True, size="sm", className="me-2", n_clicks=0,
-        ),
-        dbc.Button(
-            [html.I(className="bi bi-pencil me-1"), "Caption AI"],
-            id="dn-caption-ai",
-            color="secondary", outline=True, size="sm", className="me-2", n_clicks=0,
-        ),
-    ]
+    # dn-generate-card and dn-caption-ai removed: superseded by the Card Studio
+    # (action node pill on each match card now opens the full Card Studio)
+    buttons = []
     if float(xg) > 0.5:
         buttons.append(dbc.Button(
             [html.I(className="bi bi-search me-1"), "Deep Dive Stats"],

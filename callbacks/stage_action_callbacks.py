@@ -224,22 +224,8 @@ def register_stage_action_callbacks(app):
         prevent_initial_call=True,
     )(show_previa_card_callback)
 
-    # 4.4 — dn-generate-card
-    app.callback(
-        Output("stage-content", "children", allow_duplicate=True),
-        Output("gallery-close-btn", "style", allow_duplicate=True),
-        Input("dn-generate-card", "n_clicks"),
-        State("stage-context-snapshot", "data"),
-        prevent_initial_call=True,
-    )(generate_card_callback)
-
-    # 4.5 — dn-caption-ai
-    app.callback(
-        Output("stage-content", "children", allow_duplicate=True),
-        Input("dn-caption-ai", "n_clicks"),
-        State("stage-context-snapshot", "data"),
-        prevent_initial_call=True,
-    )(caption_ai_callback)
+    # 4.4 — dn-generate-card: removed (superseded by Card Studio via action-node-pill)
+    # 4.5 — dn-caption-ai: removed (superseded by Card Studio caption section)
 
     # 4.8 — dn-dossier-pdf
     app.callback(

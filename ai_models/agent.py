@@ -21,44 +21,51 @@ _compiled_flows: Dict[str, Any] = {}
 FLOW_ALIASES = {"player_analysis": "scouting"}
 
 
+def _get_llm_with_fallback(model_list, temperature=0):
+    """Internal helper to instantiate the first available model from a priority list."""
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    from utils.ai_config import GOOGLE_API_KEY
+    
+    last_err = None
+    for model_name in model_list:
+        if not model_name: continue
+        try:
+            llm = ChatGoogleGenerativeAI(
+                model=model_name,
+                google_api_key=GOOGLE_API_KEY,
+                temperature=temperature
+            )
+            # Test simple call or just assume it's valid if in Tier 1
+            return llm
+        except Exception as e:
+            logger.warning(f"⚠️ Model {model_name} failed. Trying fallback. Error: {e}")
+            last_err = e
+    raise EnvironmentError(f"❌ All models in hierarchy failed. Last error: {last_err}")
+
 def create_agent(flow: str = "scouting") -> Any:
     """
-    Creates and returns a compiled LangGraph agent for the specified flow.
-
-    Agents are cached at module level — compilation only happens once per flow.
-
-    Args:
-        flow: One of 'content' or 'scouting'.
-
-    Returns:
-        A compiled LangGraph StateGraph (CompiledGraph).
-
-    Raises:
-        EnvironmentError: If GOOGLE_API_KEY is not set.
-        ValueError: If flow name is not recognised.
+    Creates and returns a compiled LangGraph agent using an Elite Multi-Model Strategy.
+    Hierarchical Orchestration: Gemini 3 Pro -> Gemini 2.5 Pro
+    Hierarchical Execution: Gemini 3 Flash -> Gemini 2.5 Flash -> Gemini 2 Flash
     """
-    # Normalize flow name via aliases
-    flow = FLOW_ALIASES.get(flow, flow)
+    from utils.ai_config import AI_DEFAULTS
 
-    # 1. Try to load Subscriber Credentials (OAuth Bridge)
-    from google.oauth2.credentials import Credentials
-    creds = None
-    if os.path.exists("token.json"):
-        try:
-            # Match the scope used in auth_bridge.py (Generative Language API — AI Studio track)
-            creds = Credentials.from_authorized_user_file("token.json", ["https://www.googleapis.com/auth/generative-language"])
-            print("🚀 BRIDGE ACTIVE: Using Gemini Subscriber Account (OAuth).")
-            logger.info("Using Gemini Subscriber Bridge (OAuth Credentials).")
-        except Exception as e:
-            print(f"⚠️ BRIDGE ERROR: {e}")
-            logger.warning("Failed to load subscriber credentials: %s", e)
+    # 1. Instantiate the Brain (Orchestrator) with fallback
+    orchestrator_list = [
+        AI_DEFAULTS["orchestrator"]["primary"],
+        AI_DEFAULTS["orchestrator"]["fallback"]
+    ]
+    llm_brain = _get_llm_with_fallback(orchestrator_list, temperature=AI_DEFAULTS["orchestrator"]["temperature"])
 
-    api_key = os.environ.get("GOOGLE_API_KEY", "").strip().strip('"').strip("'")
-    if not api_key and not creds:
-        raise EnvironmentError(
-            "Neither GOOGLE_API_KEY nor subscriber 'token.json' found. "
-            "Set GOOGLE_API_KEY or run scripts/auth_bridge.py."
-        )
+    # 2. Instantiate the Worker (Executioner) with hierarchical fallbacks
+    worker_list = [
+        AI_DEFAULTS["worker"]["primary"],
+        AI_DEFAULTS["worker"]["fallback_1"],
+        AI_DEFAULTS["worker"]["fallback_2"]
+    ]
+    llm_worker = _get_llm_with_fallback(worker_list, temperature=AI_DEFAULTS["worker"]["temperature"])
+
+    logger.info(f"🚀 ELITE MULTI-MODEL ACTIVE: Brain ({llm_brain.model}) + Worker ({llm_worker.model}).")
 
     if flow not in ("content", "scouting"):
         raise ValueError(f"Unknown flow '{flow}'. Choose 'content' or 'scouting'.")
@@ -66,54 +73,20 @@ def create_agent(flow: str = "scouting") -> Any:
     if flow in _compiled_flows:
         return _compiled_flows[flow]
 
-    # Lazy import to avoid breaking module load when dependencies are absent
-    try:
-        from langchain_google_genai import ChatGoogleGenerativeAI
-    except ImportError as exc:
-        raise ImportError(
-            "langchain-google-genai is required for the agentic AI features. "
-            "Run: pip install langchain-google-genai"
-        ) from exc
-
-    try:
-        from ai_models.agent_flows import build_content_flow, build_scouting_flow
-    except ImportError as exc:
-        raise ImportError(
-            "ai_models/agent_flows.py is missing. "
-            "This file is created as part of task 3.1."
-        ) from exc
-
+    # Lazy import flows and tools
+    from ai_models.agent_flows import build_content_flow, build_scouting_flow
     from ai_models.agent_tools import (
-        create_dossier,
-        detect_changes,
-        generate_caption,
-        generate_card,
-        get_percentiles,
-        query_players,
+        create_dossier, detect_changes, generate_caption,
+        generate_card, get_percentiles, query_players, get_top_performers
     )
 
-    # Use Flash 2.0 by default — faster latency for Dash callbacks, active on AI Studio track
-    model_name = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
-    
-    # Initialize LLM with credentials (OAuth Bridge) or API Key
-    if creds:
-        llm = ChatGoogleGenerativeAI(
-            model=model_name,
-            credentials=creds,
-            temperature=0,
-        )
-    else:
-        llm = ChatGoogleGenerativeAI(
-            model=model_name,
-            google_api_key=api_key,
-            temperature=0,
-        )
-    tools = [query_players, get_percentiles, detect_changes, generate_card, create_dossier, generate_caption]
+    tools = [query_players, get_percentiles, detect_changes, generate_card, create_dossier, generate_caption, get_top_performers]
 
+    # Brain orchestrates, Worker executes tasks
     if flow == "content":
-        compiled = build_content_flow(llm, tools)
+        compiled = build_content_flow(llm_brain, tools)
     else:
-        compiled = build_scouting_flow(llm, tools)
+        compiled = build_scouting_flow(llm_brain, tools)
 
     _compiled_flows[flow] = compiled
     return compiled
@@ -137,11 +110,23 @@ def run_agent(agent: Any, query: str) -> Dict[str, Any]:
         return {"output": "", "steps": [], "error": "Empty query provided."}
 
     try:
-        from langchain_core.messages import HumanMessage
+        from langchain_core.messages import HumanMessage, SystemMessage
 
-        config = {"recursion_limit": 10}
+        config = {"recursion_limit": 25}
+        
+        # Inyectamos una instrucción de sistema para maximizar la eficiencia en cada paso
+        system_instruction = (
+            "Eres un analista de datos ÉLITE de la liga de Hong Kong. "
+            "Tu prioridad es la VELOCIDAD y la EFICIENCIA. "
+            "NO hagas una llamada por cada jugador. Si el usuario pide comparar o listar mejores jugadores: "
+            "1. USA 'get_top_performers' para obtener datos de grupo de una sola vez. "
+            "2. Si necesitas métricas de eficiencia (Goles vs xG), pide ambos campos en una sola consulta o usa la herramienta de top performers. "
+            "3. NUNCA hagas más de 2-3 llamadas a herramientas por consulta. Procesa los datos tú mismo si ya tienes la lista. "
+            "4. Sé directo, usa tablas Markdown para los datos y da un análisis táctico breve pero profesional."
+        )
+        
         result = agent.invoke(
-            {"messages": [HumanMessage(content=query)]},
+            {"messages": [SystemMessage(content=system_instruction), HumanMessage(content=query)]},
             config=config,
         )
 

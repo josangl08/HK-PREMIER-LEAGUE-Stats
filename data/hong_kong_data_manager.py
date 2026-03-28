@@ -642,9 +642,9 @@ class HongKongDataManager:
         }
     
     def _check_data_availability(self) -> bool:
-        """Verifica si hay datos disponibles."""
+        """Verifica si hay datos disponibles en memoria."""
         if self.processed_data is None or self.aggregator is None:
-            logger.warning(f"Datos no disponibles para temporada {self.current_season}")
+            logger.info(f"Buscando datos para temporada {self.current_season}...")
             return False
         return True
     

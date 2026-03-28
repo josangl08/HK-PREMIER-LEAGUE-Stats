@@ -44,14 +44,31 @@ def _get_current_season() -> str:
         return _CURRENT_SEASON_FALLBACK
 
 
-def get_cached_image_path(milestone_id: str) -> Optional[str]:
+_PLAYER_CARDS_ROOT = Path("data/player_cards")
+
+
+def get_cached_image_path(milestone_id: str, player_id: str = "") -> Optional[str]:
     """
-    Checks the card cache directory for a generated image matching the milestone ID.
-    Returns the path string if found, None otherwise.
+    Returns the path to a generated card PNG for the given milestone ID.
+    Checks data/player_cards/{player_id}/{milestone_id}/ first (new Card Studio path),
+    then falls back to data/cache/cards/ for backward compatibility.
     """
     if not milestone_id:
         return None
     try:
+        # New path: data/player_cards/{player_id}/{milestone_id}/card_*.png
+        if player_id:
+            new_dir = _PLAYER_CARDS_ROOT / player_id / milestone_id
+            if new_dir.exists():
+                for fmt in ("1_1", "9_16", "16_9"):
+                    candidate = new_dir / f"card_{fmt}.png"
+                    if candidate.exists():
+                        return str(candidate)
+        # Wildcard search across all player dirs for this milestone
+        for candidate in _PLAYER_CARDS_ROOT.glob(f"*/{milestone_id}/card_*.png"):
+            if candidate.exists():
+                return str(candidate)
+        # Legacy fallback: data/cache/cards/{milestone_id}.*
         for ext in (".png", ".jpg", ".jpeg", ".webp"):
             candidate = _CARD_CACHE_DIR / f"{milestone_id}{ext}"
             if candidate.exists():
