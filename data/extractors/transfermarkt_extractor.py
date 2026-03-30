@@ -119,7 +119,7 @@ class TransfermarktExtractor:
 
     def _parse_detailed_performance(self, soup: BeautifulSoup) -> Dict:
         matches = []
-        summary = {"goals": 0, "assists": 0, "yellow_cards": 0, "red_cards": 0, "minutes_played": 0, "total_matches": 0}
+        summary = {"goals": 0, "assists": 0, "yellow_cards": 0, "red_cards": 0, "minutes_played": 0, "total_matches": 0, "own_goals": 0}
 
         # En la vista detallada, los partidos están en 'boxes' por competición
         boxes = soup.find_all("div", {"class": "box"})
@@ -184,28 +184,35 @@ class TransfermarktExtractor:
                         "competition_logo": comp_logo_url,
                         "result": res,
                         "status": status_text if not is_played else "Jugado",
-                        "goals": 0, "assists": 0, "yellow_cards": 0, "red_cards": 0, "minutes_played": 0
+                        "goals": 0, "assists": 0, "yellow_cards": 0, "red_cards": 0, "minutes_played": 0,
+                        "own_goals": 0, "subbed_in": None, "subbed_out": None
                     }
 
                     if is_played:
-                        match_entry["position"] = cells[7].get_text(strip=True)
-                        match_entry["goals"] = self._parse_number(cells[8].get_text(strip=True))
-                        match_entry["assists"] = self._parse_number(cells[9].get_text(strip=True))
+                        # Vista 'plus/1' indices (0-based):
+                        # 7: Posición, 8: Goles, 9: Asistencias, 10: Propia puerta,
+                        # 11: TA, 12: TR Doble, 13: TR, 14: Entró, 15: Salió, 16: Minutos
+                        if len(cells) > 7: match_entry["position"] = cells[7].get_text(strip=True)
+                        if len(cells) > 8: match_entry["goals"] = self._parse_number(cells[8].get_text(strip=True))
+                        if len(cells) > 9: match_entry["assists"] = self._parse_number(cells[9].get_text(strip=True))
+                        if len(cells) > 10: match_entry["own_goals"] = self._parse_number(cells[10].get_text(strip=True))
                         
-                        # Tarjetas: 10 (Amarilla), 11 (Doble), 12 (Roja)
-                        match_entry["yellow_cards"] = 1 if cells[10].get_text(strip=True) else 0
-                        match_entry["red_cards"] = 1 if (cells[11].get_text(strip=True) or cells[12].get_text(strip=True)) else 0
+                        if len(cells) > 11: match_entry["yellow_cards"] = 1 if cells[11].get_text(strip=True) else 0
+                        if len(cells) > 13: 
+                            match_entry["red_cards"] = 1 if (cells[12].get_text(strip=True) or cells[13].get_text(strip=True)) else 0
                         
-                        # Minutos (última celda con comilla)
-                        for c in reversed(cells):
-                            txt = c.get_text(strip=True)
-                            if "'" in txt:
-                                match_entry["minutes_played"] = self._parse_number(txt.replace("'", ""))
-                                break
+                        if len(cells) > 14:
+                            match_entry["subbed_in"] = self._parse_number(cells[14].get_text(strip=True).replace("'", "")) or None
+                        if len(cells) > 15:
+                            match_entry["subbed_out"] = self._parse_number(cells[15].get_text(strip=True).replace("'", "")) or None
+
+                        # Minutos (última celda siempre es minutos en esta vista)
+                        match_entry["minutes_played"] = self._parse_number(cells[-1].get_text(strip=True).replace("'", ""))
                         
                         # Actualizar sumario solo si jugó
                         summary["goals"] += match_entry["goals"]
                         summary["assists"] += match_entry["assists"]
+                        summary["own_goals"] += match_entry["own_goals"]
                         summary["yellow_cards"] += match_entry["yellow_cards"]
                         summary["red_cards"] += match_entry["red_cards"]
                         summary["minutes_played"] += match_entry["minutes_played"]

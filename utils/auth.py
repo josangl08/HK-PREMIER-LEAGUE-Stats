@@ -1,169 +1,155 @@
-# ABOUTME: Repository for multi-user authentication with JSON persistence and hashing.
-# ABOUTME: Implements AuthRepository, User model, and Flask-Login integration.
+# ABOUTME: System for multi-user authentication using SQLAlchemy database.
+# ABOUTME: Integrates with Flask-Login and handles Users, Roles, and Player/Agent associations.
 
-import os
-import json
 import logging
-from datetime import datetime, timezone
-from typing import Optional, Dict, Any, List
-from flask_login import UserMixin
-from werkzeug.security import generate_password_hash, check_password_hash
-from dotenv import load_dotenv
+from typing import Optional, List, Dict, Any
+from werkzeug.security import check_password_hash, generate_password_hash
+from sqlalchemy import select
+from sqlalchemy.orm import joinedload
+from models.db_models import User, Role, UserPlayerLink, Player
+from utils.db_engine import Session
 
 # Configurar logging
 logger = logging.getLogger(__name__)
 
-# Cargar variables de entorno
-load_dotenv()
-
-# Ruta al archivo de persistencia
-USERS_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'users.json')
-
-class User(UserMixin):
-    """
-    Clase User para Flask-Login con soporte para roles.
-    """
-    
-    def __init__(self, username: str, role: str, player_name: Optional[str] = None,
-                 managed_players: Optional[List[str]] = None, player_id: Optional[str] = None,
-                 agent_profile: Optional[Dict[str, Any]] = None):
-        """
-        Inicializa un usuario.
-
-        Args:
-            username: Nombre de usuario (ID único)
-            role: Rol del usuario (admin, player, agent)
-            player_name: Nombre del jugador asociado (si aplica)
-            managed_players: Lista de jugadores gestionados (si aplica)
-            agent_profile: Datos del agente (si aplica)
-        """
-        self.id = username
-        self.username = username
-        self.role = role
-        self.player_name = player_name
-        self.player_id = player_id   # Wyscout ID, recovered ID, or generated slug
-        self.managed_players = managed_players or []
-        self.agent_profile = agent_profile or {}
-        
-    def get_id(self):
-        """Retorna el ID del usuario para Flask-Login."""
-        return self.id
-    
-    @property
-    def is_authenticated(self):
-        return True
-    
-    @property
-    def is_active(self):
-        return True
-    
-    @property
-    def is_anonymous(self):
-        return False
-
 class AuthRepository:
     """
-    Repositorio para la gestión de usuarios en data/users.json.
-    Sigue el patrón Repository para aislar el I/O.
+    Repositorio para la gestión de usuarios mediante SQLAlchemy.
+    Centraliza las consultas de autenticación y permisos.
     """
     
     @staticmethod
-    def _load_all_users() -> Dict[str, Any]:
-        """Carga todos los usuarios desde el archivo JSON."""
-        if not os.path.exists(USERS_FILE):
-            return {}
+    def get_user_by_id(user_id: str) -> Optional[User]:
+        """Obtiene un usuario por su ID único con carga ansiosa de relaciones."""
+        session = Session()
         try:
-            with open(USERS_FILE, 'r') as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError) as e:
-            logger.error(f"Error al cargar usuarios desde {USERS_FILE}: {e}")
-            return {}
+            stmt = (
+                select(User)
+                .options(joinedload(User.role_obj), joinedload(User.player_link))
+                .where(User.id == user_id)
+            )
+            user = session.execute(stmt).unique().scalar_one_or_none()
+            return user
+        except Exception as e:
+            logger.error(f"Error al obtener usuario {user_id}: {e}")
+            return None
+        finally:
+            session.close()
 
     @staticmethod
-    def _save_all_users(users: Dict[str, Any]) -> bool:
-        """Guarda todos los usuarios en el archivo JSON de forma atómica."""
-        temp_file = USERS_FILE + '.tmp'
+    def get_user_by_username(username: str) -> Optional[User]:
+        """Obtiene un usuario por su nombre de usuario con carga ansiosa de relaciones."""
+        session = Session()
         try:
-            # Asegurar que el directorio data existe
-            os.makedirs(os.path.dirname(USERS_FILE), exist_ok=True)
-            
-            with open(temp_file, 'w') as f:
-                json.dump(users, f, indent=4)
-            
-            # Escritura atómica (write-then-rename)
-            os.replace(temp_file, USERS_FILE)
-            return True
+            stmt = (
+                select(User)
+                .options(joinedload(User.role_obj), joinedload(User.player_link))
+                .where(User.username == username)
+            )
+            user = session.execute(stmt).unique().scalar_one_or_none()
+            return user
         except Exception as e:
-            logger.error(f"Error al guardar usuarios en {USERS_FILE}: {e}")
-            if os.path.exists(temp_file):
-                os.remove(temp_file)
-            return False
+            logger.error(f"Error al obtener usuario {username}: {e}")
+            return None
+        finally:
+            session.close()
 
     @classmethod
     def get_user(cls, username: str) -> Optional[User]:
-        """Obtiene un usuario por su username."""
-        users = cls._load_all_users()
-        user_data = users.get(username)
-        
-        if not user_data:
-            return None
-            
-        return User(
-            username=username,
-            role=user_data.get('role', 'player'),
-            player_name=user_data.get('player_name'),
-            managed_players=user_data.get('managed_players', []),
-            player_id=user_data.get('player_id'),
-            agent_profile=user_data.get('agent_profile', {}),
-        )
+        """Alias de compatibilidad para buscar por username."""
+        return cls.get_user_by_username(username)
 
     @classmethod
-    def create_user(cls, username: str, password: str, role: str,
+    def validate_credentials(cls, username: str, password: str) -> Optional[User]:
+        """
+        Valida las credenciales y retorna el objeto User si son correctas.
+        Actualiza el campo last_login en caso de éxito.
+        """
+        user = cls.get_user_by_username(username)
+        
+        if not user:
+            logger.warning(f"Intento de login: Usuario no encontrado: {username}")
+            return None
+            
+        if check_password_hash(user.password_hash, password):
+            logger.info(f"Login exitoso para: {username}")
+            
+            # Actualizar last_login
+            session = Session()
+            try:
+                db_user = session.get(User, user.id)
+                if db_user:
+                    db_user.last_login = datetime.utcnow()
+                    session.commit()
+            except Exception as e:
+                logger.error(f"Error al actualizar last_login para {username}: {e}")
+            finally:
+                session.close()
+                
+            return user
+            
+        logger.warning(f"Intento de login: Contraseña incorrecta para: {username}")
+        return None
+
+    @staticmethod
+    def create_user(username: str, password: str, role: str,
                     player_name: Optional[str] = None,
                     managed_players: Optional[List[str]] = None,
                     player_profile: Optional[Dict[str, Any]] = None,
                     player_id: Optional[str] = None,
                     agent_profile: Optional[Dict[str, Any]] = None) -> bool:
-        """Crea un nuevo usuario con contraseña hasheada."""
-        users = cls._load_all_users()
+        """
+        Crea un nuevo usuario en la base de datos (Compatible con callbacks antiguos).
+        """
+        session = Session()
+        try:
+            # 1. Obtener el rol
+            role_stmt = select(Role).where(Role.name == role.capitalize())
+            role_obj = session.execute(role_stmt).scalar_one_or_none()
+            if not role_obj:
+                logger.error(f"Rol no encontrado: {role}")
+                return False
 
-        if username in users:
-            logger.warning(f"Intento de crear usuario existente: {username}")
+            # 2. Crear el usuario
+            new_user = User(
+                id=username,
+                username=username,
+                email=f"{username}@example.com", # Email temporal
+                password_hash=generate_password_hash(password),
+                role_id=role_obj.id,
+                profile_data={
+                    "player_profile": player_profile or {},
+                    "agent_profile": agent_profile or {}
+                }
+            )
+            session.add(new_user)
+            
+            # 3. Si es un jugador, crear el vínculo
+            if player_id:
+                link = UserPlayerLink(user_id=username, player_id=player_id)
+                session.add(link)
+            
+            # 4. Si es un agente y tiene jugadores, vincularlos (Relacional)
+            if managed_players:
+                for pid in managed_players:
+                    player = session.get(Player, pid)
+                    if player:
+                        new_user.managed_players.append(player)
+            
+            session.commit()
+            logger.info(f"Usuario {username} creado exitosamente en SQL.")
+            return True
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error al crear usuario {username}: {e}")
             return False
-
-        users[username] = {
-            'role': role,
-            'password_hash': generate_password_hash(password),
-            'player_name': player_name,
-            'player_id': player_id,
-            'player_profile': player_profile or {},
-            'agent_profile': agent_profile or {},
-            'managed_players': managed_players or [],
-            'created_at': datetime.now(timezone.utc).isoformat()
-        }
-
-        return cls._save_all_users(users)
-
-    @classmethod
-    def validate_credentials(cls, username: str, password: str) -> Optional[User]:
-        """Valida las credenciales de un usuario contra el hash almacenado."""
-        users = cls._load_all_users()
-        user_data = users.get(username)
-        
-        if not user_data:
-            logger.warning(f"Usuario no encontrado: {username}")
-            return None
-            
-        if check_password_hash(user_data.get('password_hash', ''), password):
-            logger.info(f"Login exitoso para usuario: {username}")
-            return cls.get_user(username)
-            
-        logger.warning(f"Contraseña incorrecta para usuario: {username}")
-        return None
+        finally:
+            session.close()
 
     @classmethod
     def sync_admin_from_env(cls) -> bool:
-        """Sincroniza el usuario admin desde las variables de entorno."""
+        """Sincroniza el usuario admin desde las variables de entorno a SQL."""
+        import os
         admin_user = os.getenv("ADMIN_USER")
         admin_password = os.getenv("ADMIN_PASSWORD")
         
@@ -171,30 +157,54 @@ class AuthRepository:
             logger.error("ADMIN_USER o ADMIN_PASSWORD no configurados en .env")
             return False
             
-        users = cls._load_all_users()
-        
-        # Si el admin no existe o cambió, lo actualizamos/creamos
-        # Nota: Siempre generamos un nuevo hash si viene de .env para asegurar 
-        # que el .env sea el "root of trust"
-        users[admin_user] = {
-            'role': 'admin',
-            'password_hash': generate_password_hash(admin_password),
-            'player_name': None,
-            'player_id': None,
-            'player_profile': {},
-            'agent_profile': {},
-            'managed_players': [],
-            'created_at': users.get(admin_user, {}).get('created_at', datetime.now(timezone.utc).isoformat()),
-            'synced_at': datetime.now(timezone.utc).isoformat()
-        }
-        
-        logger.info(f"Admin '{admin_user}' sincronizado desde .env")
-        return cls._save_all_users(users)
+        session = Session()
+        try:
+            # 1. Asegurar que existe el rol Admin
+            role_stmt = select(Role).where(Role.name == "Admin")
+            role = session.execute(role_stmt).scalar_one_or_none()
+            if not role:
+                role = Role(name="Admin", description="Administrador del sistema")
+                session.add(role)
+                session.flush()
+
+            # 2. Buscar o crear el usuario admin
+            stmt = select(User).where(User.username == admin_user)
+            user = session.execute(stmt).scalar_one_or_none()
+            
+            if not user:
+                user = User(
+                    id=admin_user,
+                    username=admin_user,
+                    email=f"{admin_user}@hkpl.com",
+                    password_hash=generate_password_hash(admin_password),
+                    role_id=role.id
+                )
+                session.add(user)
+            else:
+                # Actualizar contraseña si cambió en el .env
+                user.password_hash = generate_password_hash(admin_password)
+                user.role_id = role.id
+            
+            session.commit()
+            logger.info(f"Admin '{admin_user}' sincronizado desde .env a la base de datos.")
+            return True
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error en sincronización de admin: {e}")
+            return False
+        finally:
+            session.close()
+
+# ── Flask-Login Integration ──────────────────────────────────────────────────
 
 def load_user(user_id: str) -> Optional[User]:
-    """Cargador de usuarios para Flask-Login delegado al repositorio."""
-    return AuthRepository.get_user(user_id)
+    """
+    Cargador de usuarios requerido por Flask-Login.
+    IMPORTANTE: Flask-Login necesita que el objeto User esté 'vivo'. 
+    En entornos con Scoped Session, esto funciona bien.
+    """
+    return AuthRepository.get_user_by_id(user_id)
 
 def validate_credentials(username: str, password: str) -> Optional[User]:
-    """Validador de credenciales delegado al repositorio."""
+    """Interfaz simplificada para los callbacks de login."""
     return AuthRepository.validate_credentials(username, password)

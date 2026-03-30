@@ -17,6 +17,7 @@ from utils.stage_helpers import (
 )
 from utils.performance_helpers import get_streaming_label
 from utils.app_context import get_hong_kong_data_manager
+from utils.competition_helpers import normalize_competition, get_competition_logo
 
 import html as _html_lib
 
@@ -51,14 +52,6 @@ def _get_team_colors(team_name: str) -> dict:
     return _TEAM_COLORS.get(key, {})
 
 
-_COMPETITION_LOGO_MAP = {
-    "HK Premier League": "/assets/competition_logos/hong_kong_premier_league.png",
-    "HKFA Cup": "/assets/competition_logos/hong_kong_fa_cup.png",
-    "Sapling Cup": "/assets/competition_logos/hong_kong_sapling_cup___15__25.png",
-    "Senior Shield": "/assets/competition_logos/hong_kong_senior_challenge_shield.png",
-    "AFC Champions League Two": "/assets/competition_logos/afc_champions_league_two.png",
-}
-
 # Badge color per competition — must be distinct from the TYPE accent colors:
 #   pre-match=primary (blue), post-match=success (green), career=warning (yellow).
 # Allowed: danger, info, secondary, dark, light.
@@ -71,42 +64,15 @@ _COMPETITION_COLOR_MAP = {
     "AFC Champions League Two": "secondary",  # grey
 }
 
-# Display-layer normalization for Chinese competition names already persisted in
-# fixtures.json (mirrors fixture_manager.COMPETITION_MAPPING + BOC alias).
-_COMP_DISPLAY_MAP = {
-    "中銀人壽香港超級聯賽": "HK Premier League",
-    "香港超級聯賽": "HK Premier League",
-    "BOC Life Hong Kong Premier League": "HK Premier League",
-    "Hong Kong Premier League": "HK Premier League",  # English alias in cached fixtures
-    "足總盃": "HKFA Cup",
-    "Hong Kong FA Cup": "HKFA Cup",
-    "HKFA Cup": "HKFA Cup",
-    "賽馬會菁英盃": "Sapling Cup",
-    "菁英盃": "Sapling Cup",
-    "Hong Kong Sapling Cup": "Sapling Cup",  # TM English name (with date suffix)
-    "聯賽盃": "League Cup",
-    "高級組銀牌": "Senior Shield",
-    "銀牌": "Senior Shield",
-    "Hong Kong Senior Challenge Shield": "Senior Shield",
-}
-
 
 def _normalize_comp(raw: str) -> str:
-    """Normalize a competition name to its English display form.
-    Handles exact matches first, then substring matching (longest key first)."""
-    if not raw:
-        return raw
-    if raw in _COMP_DISPLAY_MAP:
-        return _COMP_DISPLAY_MAP[raw]
-    for key in sorted(_COMP_DISPLAY_MAP, key=len, reverse=True):
-        if key in raw:
-            return _COMP_DISPLAY_MAP[key]
-    return raw
+    """Normalize a competition name using central helper."""
+    return normalize_competition(raw)
 
 
 def _competition_logo_url(competition: str):
     """Return local web path for competition logo, or None if not mapped."""
-    return _COMPETITION_LOGO_MAP.get(_normalize_comp(competition))
+    return get_competition_logo(competition)
 
 
 def _competition_color(competition: str) -> str:
@@ -123,23 +89,35 @@ def _comp_badge(competition: str) -> "dbc.Badge | None":
     return dbc.Badge(comp, color=color, className="small")
 
 
-def _competition_logo_img(competition: str):
+def _competition_logo_img(competition: str, logo_url: str = None):
     """Return a small competition logo img element, or text abbreviation if no asset available."""
     comp = _normalize_comp(competition)
-    logo = _COMPETITION_LOGO_MAP.get(comp)
+    # Prefer explicit logo_url if provided (e.g. from DB/TM), fallback to local mapping
+    logo = logo_url if logo_url else get_competition_logo(competition)
+
     if not logo:
         if comp:
             return html.Span(
                 comp[:4].upper(),
-                className="small fw-semibold portal-text-muted",
-                style={"fontSize": "0.55rem"},
+                id="image-overlay",
+                className="competition-logo-img small fw-semibold portal-text-muted",
+                style={
+                    "fontSize": "0.55rem",
+                    "display": "flex",
+                    "alignItems": "center",
+                    "justifyContent": "center",
+                    "width": "40px",
+                    "height": "40px",
+                },
                 title=comp,
             )
         return None
+
     return html.Img(
         src=logo,
+        id="image-overlay",
         className="competition-logo-img",
-        style={"width": "22px", "height": "22px", "objectFit": "contain"},
+        style={"width": "40px", "height": "40px", "objectFit": "contain"},
         title=comp,
     )
 
@@ -155,12 +133,14 @@ _ICON_MAP = {
     "pre-match": "calendar-plus",
     "post-match": "bar-chart-2",
     "career": "trophy",
+    "ai-insight": "zap",
 }
 
 _COLOR_MAP = {
     "pre-match": "primary",
     "post-match": "success",
     "career": "warning",
+    "ai-insight": "secondary",
 }
 
 _GLASS_CLASS_MAP = {
@@ -235,10 +215,18 @@ def _build_header_label(
     """
     if m_type == "career":
         season = payload.get("season", "")
-        pj = len(matches)
-        goals = sum(int(m.get("goals", 0) or 0) for m in matches)
-        assists = sum(int(m.get("assists", 0) or 0) for m in matches)
-        minutes = sum(int(m.get("minutes_played", 0) or 0) for m in matches)
+        stats = payload.get("stats", {})
+
+        # Use pre-calculated stats if available, otherwise fallback to counting matches
+        pj = stats.get("matches_played", len(matches))
+        goals = stats.get("goals", sum(int(m.get("goals", 0) or 0) for m in matches))
+        assists = stats.get(
+            "assists", sum(int(m.get("assists", 0) or 0) for m in matches)
+        )
+        minutes = stats.get(
+            "minutes_played", sum(int(m.get("minutes_played", 0) or 0) for m in matches)
+        )
+
         return [
             dbc.Badge(
                 f"Season {season}",
@@ -370,7 +358,7 @@ def _build_collapse_content(
                     [
                         _lucide("tv"),
                         html.A(
-                            platform_label,
+                            platform_label if platform_label else "Watch Stream",
                             href=_clean_url(streaming_url),
                             target="_blank",
                             rel="noopener noreferrer",
@@ -386,7 +374,7 @@ def _build_collapse_content(
                     [
                         _lucide("tv-off"),
                         html.Small(
-                            get_streaming_label(None, None),
+                            "No Streaming",
                             className="portal-text-muted",
                         ),
                     ],
@@ -442,68 +430,139 @@ def _build_collapse_content(
                     className="d-flex align-items-center gap-1 mb-1",
                 )
             )
-        # Prefer per-match TM stats; fall back to session player_stats
+
         minutes = int(payload.get("minutes_played", 0) or 0)
         goals = int(payload.get("goals", 0) or 0)
         assists = int(payload.get("assists", 0) or 0)
-        if minutes == 0:
-            player_stats = payload.get("player_stats") or {}
-            perf = player_stats.get("performance_stats", {})
-            minutes = int(perf.get("Minutes", 0) or 0)
-            goals = int(perf.get("Goals", 0) or 0)
-            assists = int(perf.get("Assists", 0) or 0)
+        own_goals = int(payload.get("own_goals", 0) or 0)
+        yellow = int(payload.get("yellow_cards", 0) or 0)
+        red = int(payload.get("red_cards", 0) or 0)
+        position = payload.get("position", "N/A")
+        sub_in = payload.get("subbed_in")
+        sub_out = payload.get("subbed_out")
+
         absence_reason = payload.get("absence_reason")
 
         if minutes > 0:
-            player_stats = payload.get("player_stats") or {}
-            perf = player_stats.get("performance_stats", {})
-            rating = perf.get("Rating") or perf.get("rating")
+            # Position Line
+            rows.append(
+                html.Div(
+                    [
+                        html.Small(
+                            [
+                                _lucide("user"),
+                                html.Span(
+                                    f"Pos: {position}", className="fw-bold text-white"
+                                ),
+                            ],
+                            className="portal-text-muted me-auto",
+                        ),
+                    ],
+                    className="d-flex align-items-center mb-2",
+                )
+            )
+
+            # Core Stats Row
             stat_parts = [
                 html.Small(
                     [_lucide("timer"), f"{minutes}'"],
-                    className="portal-text-muted me-2",
+                    className="portal-text-muted me-3",
                 ),
                 html.Small(
                     [_lucide("crosshair"), f"{goals}G"],
-                    className="portal-text-muted me-2",
+                    className="portal-text-muted me-3",
                 ),
                 html.Small(
                     [_lucide("trending-up"), f"{assists}A"],
                     className="portal-text-muted",
                 ),
             ]
-            if rating:
+            if own_goals > 0:
                 stat_parts.append(
-                    html.Small(f" ⭐ {rating}", className="portal-text-muted ms-2")
+                    html.Small(
+                        [_lucide("alert-triangle"), f"{own_goals} OG"],
+                        className="text-danger ms-3",
+                    )
                 )
+
             rows.append(
                 html.Div(
-                    stat_parts, className="d-flex flex-wrap align-items-center gap-1"
+                    stat_parts, className="d-flex flex-wrap align-items-center mb-2"
                 )
             )
+
+            # Cards and Substitution Line
+            detail_parts = []
+            if yellow > 0:
+                detail_parts.append(
+                    dbc.Badge(
+                        f"{yellow} Yellow",
+                        color="warning",
+                        className="me-2 small text-dark",
+                    )
+                )
+            if red > 0:
+                detail_parts.append(
+                    dbc.Badge(f"{red} Red", color="danger", className="me-2 small")
+                )
+
+            sub_info = []
+            if sub_in is not None:
+                sub_info.append(
+                    html.Small(
+                        [_lucide("log-in"), f"In: {sub_in}'"],
+                        className="text-success me-2",
+                    )
+                )
+            if sub_out is not None:
+                sub_info.append(
+                    html.Small(
+                        [_lucide("log-out"), f"Out: {sub_out}'"],
+                        className="text-warning",
+                    )
+                )
+
+            if detail_parts or sub_info:
+                rows.append(
+                    html.Div(
+                        [
+                            html.Div(
+                                detail_parts, className="d-flex align-items-center"
+                            ),
+                            html.Div(
+                                sub_info, className="ms-auto d-flex align-items-center"
+                            ),
+                        ],
+                        className="d-flex align-items-center",
+                    )
+                )
         else:
-            # Keys cover both raw slugs (from old data) and mapped strings (current pipeline)
+            # Absence visualization
             _ABSENCE_LABELS = {
+                "No convocado": ("secondary", "Not Summoned"),
                 "not_summoned": ("secondary", "Not Summoned"),
-                "Not Summoned": ("secondary", "Not Summoned"),
+                "Lesionado": ("warning", "Injury"),
                 "injured": ("warning", "Injury"),
-                "Absence: Injury": ("warning", "Injury"),
+                "Suspendido": ("danger", "Suspension"),
                 "suspended": ("danger", "Suspension"),
-                "Absence: Suspension": ("danger", "Suspension"),
-                "unknown": ("light", "Unknown absence"),
-                "Absence: Unknown": ("light", "Unknown absence"),
+                "Banquillo": ("info", "Bench (Unused)"),
+                "bench": ("info", "Bench (Unused)"),
             }
-            reason = absence_reason or "unknown"
-            badge_color, label = _ABSENCE_LABELS.get(reason, ("secondary", reason or "Not Played"))
+            reason_raw = absence_reason or "No jugado"
+            badge_info = _ABSENCE_LABELS.get(reason_raw, ("light", reason_raw))
+
             rows.append(
                 html.Div(
                     [
                         _lucide("user-x"),
-                        dbc.Badge(label, color=badge_color, className="small"),
+                        dbc.Badge(
+                            badge_info[1], color=badge_info[0], className="small"
+                        ),
                     ],
                     className="d-flex align-items-center gap-2",
                 )
             )
+
         return html.Div(
             rows
             or [html.Small("Sin detalles.", className="portal-text-muted fst-italic")],
@@ -603,36 +662,24 @@ def _render_action_node_pill(
 
 
 def _render_milestone_item(
-    milestone: dict, initial_open: bool = False, generated_set: set = None, hidden: bool = False
+    milestone: dict,
+    initial_open: bool = False,
+    generated_set: set = None,
+    hidden: bool = False,
 ) -> html.Div:
     """Renders a single timeline milestone as a Lucide-icon circle + connector + glass card.
 
-    Structure: .timeline-event > [.event-node | .event-connector-h | .event-card.glass-card]
+    Structure: .timeline-event > [.event-node | .event-card-column]
     The event-circle (inside event-node) carries the Lucide icon and doubles as the
-    Action Node trigger for the image gallery (id=action-node kept for callback compat).
+    Action Node trigger for the image gallery.
     """
     milestone_id = milestone.get("id", "unknown")
     m_type = milestone.get("type", "career")
 
-    # AI-Insight milestones use a distinct card layout
-    if m_type == "ai-insight":
-        from layouts.components.ai_insight_card import render_ai_insight_card
-
-        payload = milestone.get("payload", {})
-        year_cls_val = milestone.get("group_year", "")
-        year_cls = f" year-{year_cls_val}" if year_cls_val else ""
-        hidden_cls = " timeline-item-hidden" if hidden else ""
-        hidden_style = {"display": "none"} if hidden else {}
-        return html.Div(
-            render_ai_insight_card(payload, milestone_id),
-            className=f"timeline-event mb-2{year_cls}{hidden_cls}",
-            style=hidden_style,
-        )
     lucide_icon = _ICON_MAP.get(m_type, "circle")
     payload = milestone.get("payload", {})
     matches = payload.get("matches", [])
     # Timeline accent color is TYPE-based (circle, line, button border).
-    # Competition color is only for the badge text — set in _comp_badge / _comp_badge.
     color = _COLOR_MAP.get(m_type, "secondary")
     glass_cls = _get_glass_class(milestone)
 
@@ -664,100 +711,6 @@ def _render_milestone_item(
         n_clicks=0,
     )
 
-    # ── Header: type-specific collapsed state ─────────────────────────────
-    header_label_content = _build_header_label(
-        m_type, milestone, payload, matches, date_str
-    )
-
-    if m_type in ("pre-match", "post-match"):
-        # ── CSS Grid: 2 columns × 2 rows ──────────────────────────────────
-        # | label_content (col 1, rows 1-2) | comp_logo (col 2, row 1) |
-        # |                                 | arrow btn (col 2, row 2) |
-        # No right/bottom padding on container → arrow is flush to corner.
-        comp_logo_el = _competition_logo_img(payload.get("competition", ""))
-        logo_cell = (
-            html.Div(
-                comp_logo_el,
-                className="competition-logo-container",
-                style={
-                    "display": "flex",
-                    "alignItems": "flex-start",
-                    "justifyContent": "flex-end",
-                    "padding": "4px 4px 0 0",
-                    "gridColumn": "2",
-                    "gridRow": "1",
-                },
-            )
-            if comp_logo_el
-            else html.Div(style={"gridColumn": "2", "gridRow": "1"})
-        )  # explicit placement avoids grid auto-placement ambiguity
-
-        detail_btn = html.Div(
-            html.I(
-                **{
-                    "data-lucide": "arrow-right-circle",
-                    "className": "lucide-detail-icon",
-                }
-            ),
-            id={"type": "milestone-detail-btn", "index": milestone_id},
-            className=f"event-detail-btn event-detail-btn-{color}",
-            n_clicks=0,
-            title="Ver Detalle",
-            style={"cursor": "pointer", "gridColumn": "2", "gridRow": "2"},
-        )
-        header_row = html.Div(
-            [
-                html.Div(
-                    header_label_content,
-                    id={"type": "timeline-milestone-text", "index": milestone_id},
-                    style={"cursor": "pointer", "gridRow": "1 / 3"},  # spans both rows
-                ),
-                logo_cell,  # col 2, row 1 → top-right
-                detail_btn,  # col 2, row 2 → bottom-right, flush to corner
-            ],
-            id={"type": "milestone-header", "index": milestone_id},
-            className="milestone-header",
-            style={
-                "display": "grid",
-                "gridTemplateColumns": "1fr auto",
-                "gridTemplateRows": "1fr auto",
-                "minHeight": "76px",
-                "padding": "8px 0 0 8px",  # no right/bottom → arrow flush to corner
-                "cursor": "pointer",
-            },
-            n_clicks=0,
-        )
-    else:
-        # Career card: arrow sits inline at the right
-        detail_btn = html.Div(
-            html.I(
-                **{
-                    "data-lucide": "arrow-right-circle",
-                    "className": "lucide-detail-icon",
-                }
-            ),
-            id={"type": "milestone-detail-btn", "index": milestone_id},
-            className=f"event-detail-btn event-detail-btn-{color} flex-shrink-0",
-            n_clicks=0,
-            title="Ver Detalle",
-            style={"cursor": "pointer"},
-        )
-        header_row = html.Div(
-            [
-                html.Div(
-                    header_label_content,
-                    className="flex-grow-1",
-                    id={"type": "timeline-milestone-text", "index": milestone_id},
-                    style={"cursor": "pointer"},
-                ),
-                detail_btn,
-            ],
-            id={"type": "milestone-header", "index": milestone_id},
-            className="d-flex align-items-center gap-2 py-2 px-2",
-            n_clicks=0,
-            style={"cursor": "pointer"},
-        )
-
     # Hidden span for select_milestone callback compat
     milestone_trigger = html.Span(
         id={"type": "timeline-milestone", "index": milestone_id},
@@ -765,41 +718,143 @@ def _render_milestone_item(
         style={"display": "none"},
     )
 
-    # ── Body: expanded detail, toggled by clientside expand-store ─────────
-    body_style = {"display": "block"} if initial_open else {"display": "none"}
-    milestone_body = html.Div(
-        _build_collapse_content(m_type, payload, matches, milestone_id=milestone_id),
-        id={"type": "milestone-body", "index": milestone_id},
-        style=body_style,
-    )
+    # ── Body: Expanded detail or custom AI card ─────────────────────────
+    if m_type == "ai-insight":
+        from layouts.components.ai_insight_card import render_ai_insight_card
+
+        right_col = render_ai_insight_card(payload, milestone_id)
+    else:
+        # ── Header: type-specific collapsed state ─────────────────────────────
+        header_label_content = _build_header_label(
+            m_type, milestone, payload, matches, date_str
+        )
+
+        if m_type in ("pre-match", "post-match"):
+            # ── Right Action Stack: Logo (top) + Arrow (bottom) ──────────────
+            comp_logo_el = _competition_logo_img(
+                payload.get("competition", ""), payload.get("competition_logo")
+            )
+
+            # We wrap both in a flex-column anchored to the bottom-right
+            right_action_stack = html.Div(
+                [
+                    html.Div(
+                        comp_logo_el,
+                        className="competition-logo-container",
+                        style={"marginTop": "2px"} if comp_logo_el else {},
+                    ),
+                    html.Div(
+                        html.I(
+                            **{
+                                "data-lucide": "arrow-right-circle",
+                                "className": "lucide-detail-icon",
+                            }
+                        ),
+                        id={"type": "milestone-detail-btn", "index": milestone_id},
+                        className=f"event-detail-btn event-detail-btn-{color}",
+                        n_clicks=0,
+                        title="Ver Detalle",
+                        style={"cursor": "pointer"},
+                    ),
+                ],
+                style={
+                    "display": "flex",
+                    "flexDirection": "column",
+                    "alignItems": "flex-end",
+                    "justifyContent": "space-between",  # Push logo to top, arrow to bottom
+                    "padding": "0 0 0 0",
+                    "gridColumn": "2",
+                    "gridRow": "1 / 3",  # span full height to allow vertical distribution
+                },
+            )
+
+            header_row = html.Div(
+                [
+                    html.Div(
+                        header_label_content,
+                        id={"type": "timeline-milestone-text", "index": milestone_id},
+                        style={"cursor": "pointer", "gridRow": "1 / 3"},  # spans both rows
+                    ),
+                    right_action_stack,
+                ],
+                id={"type": "milestone-header", "index": milestone_id},
+                className="milestone-header",
+                style={
+                    "display": "grid",
+                    "gridTemplateColumns": "1fr auto",
+                    "gridTemplateRows": "1fr auto",
+                    "minHeight": "80px",
+                    "padding": "5px 0 0 0",
+                    "cursor": "pointer",
+                },
+                n_clicks=0,
+            )
+        else:
+            # Career card: arrow sits inline at the right
+            detail_btn = html.Div(
+                html.I(
+                    **{
+                        "data-lucide": "arrow-right-circle",
+                        "className": "lucide-detail-icon",
+                    }
+                ),
+                id={"type": "milestone-detail-btn", "index": milestone_id},
+                className=f"event-detail-btn event-detail-btn-{color} flex-shrink-0",
+                n_clicks=0,
+                title="Ver Detalle",
+                style={"cursor": "pointer"},
+            )
+            header_row = html.Div(
+                [
+                    html.Div(
+                        header_label_content,
+                        className="flex-grow-1",
+                        id={"type": "timeline-milestone-text", "index": milestone_id},
+                        style={"cursor": "pointer"},
+                    ),
+                    detail_btn,
+                ],
+                id={"type": "milestone-header", "index": milestone_id},
+                className="d-flex align-items-center gap-2 py-1 px-0",
+                n_clicks=0,
+                style={"cursor": "pointer"},
+            )
+
+        milestone_body = html.Div(
+            _build_collapse_content(m_type, payload, matches, milestone_id=milestone_id),
+            id={"type": "milestone-body", "index": milestone_id},
+            className="milestone-body",
+        )
+
+        event_card = html.Div(
+            [header_row, milestone_body],
+            className=f"event-card event-card-{color} glass-card {glass_cls}",
+        )
+
+        # Action Node pill for pre/post-match only
+        action_node_pill = None
+        if m_type in ("pre-match", "post-match"):
+            is_generated = bool(generated_set and milestone_id in generated_set)
+            action_node_pill = _render_action_node_pill(
+                m_type, milestone_id, is_generated
+            )
+
+        if action_node_pill:
+            right_col = html.Div(
+                [event_card, action_node_pill],
+                className="event-card-column",
+            )
+        else:
+            right_col = event_card
 
     year_cls_val = milestone.get("group_year") or year_str
     year_cls = f" year-{year_cls_val}" if year_cls_val else ""
-    # Action Node pill for pre/post-match only
-    action_node_pill = None
-    if m_type in ("pre-match", "post-match"):
-        is_generated = bool(generated_set and milestone_id in generated_set)
-        action_node_pill = _render_action_node_pill(m_type, milestone_id, is_generated)
-
-    event_card = html.Div(
-        [header_row, milestone_body],
-        className=f"event-card event-card-{color} glass-card {glass_cls}",
-    )
-
-    # Wrap card + action node pill in a vertical column so the pill sits
-    # below the card (not lateral/to-the-right).
-    if action_node_pill:
-        right_col = html.Div(
-            [event_card, action_node_pill],
-            className="event-card-column",
-        )
-    else:
-        right_col = event_card
-
     hidden_cls = " timeline-item-hidden" if hidden else ""
+    expanded_cls = " is-expanded" if initial_open else ""
     hidden_style = {"display": "none"} if hidden else {}
+
     return html.Div(
-        className=f"timeline-event mb-2{year_cls}{hidden_cls}",
+        className=f"timeline-event{year_cls}{hidden_cls}{expanded_cls}",
         style=hidden_style,
         children=[
             html.Div(
@@ -963,11 +1018,9 @@ def register_player_portal_callbacks(app):
     )
     def render_timeline_milestones(milestones_data):
         """
-        Renders milestone items grouped by year in .season-section divs.
-        Career milestones act as season headers; pre/post-match cards are wrapped
-        in a season-matches-group div whose visibility mirrors the career card state.
-        Pre-expands the most recent season's career milestone.
-        Supports 5+10 pagination per season via timeline-pagination-store.
+        Renders milestone items grouped by season in .season-section divs.
+        Career milestones act as season headers; match groups visibility
+        is controlled by the is-expanded class on the season-group-container.
         """
         if not milestones_data:
             return no_update, no_update
@@ -976,6 +1029,7 @@ def register_player_portal_callbacks(app):
 
         groups = defaultdict(list)
         for m in milestones_data:
+            # group_year now contains season strings like "2025-26"
             year = m.get("group_year") or str(m.get("date", ""))[:4] or "unknown"
             groups[year].append(m)
 
@@ -994,7 +1048,7 @@ def register_player_portal_callbacks(app):
             is_recent = year == most_recent_year
             year_milestones = groups[year]
 
-            # Separate career anchor from match milestones (ai-insight included in match group)
+            # Separate career anchor from match milestones
             career_m = next(
                 (m for m in year_milestones if m.get("type") == "career"), None
             )
@@ -1002,17 +1056,15 @@ def register_player_portal_callbacks(app):
 
             items = []
 
-            # Career milestone as season header (body pre-open for most recent year)
+            # Career milestone as season header
             if career_m:
-                items.append(
-                    _render_milestone_item(career_m, initial_open=is_recent)
-                )
+                career_item = _render_milestone_item(career_m, initial_open=is_recent)
                 career_id = career_m.get("id")
             else:
+                career_item = None
                 career_id = None
 
             # Render ALL match milestones; first 5 visible, rest hidden.
-            # A clientside Load More callback reveals 10 more on click (no server roundtrip).
             if match_milestones:
                 match_items = [
                     _render_milestone_item(m, initial_open=False, hidden=(i >= 5))
@@ -1022,16 +1074,11 @@ def register_player_portal_callbacks(app):
                     match_items.append(
                         html.Div(
                             [
-                                html.Div(className="load-more-axis-spacer"),  # aligns with event-node
+                                html.Div(className="load-more-axis-spacer"),
                                 html.Div(
                                     html.Button(
                                         [
-                                            html.I(
-                                                **{
-                                                    "data-lucide": "chevrons-down",
-                                                    "className": "lucide-inline-icon me-1",
-                                                }
-                                            ),
+                                            html.I(**{"data-lucide": "chevrons-down", "className": "lucide-inline-icon me-1"}),
                                             "Load More",
                                         ],
                                         id={"type": "load-more-btn", "year": year},
@@ -1045,13 +1092,20 @@ def register_player_portal_callbacks(app):
                         )
                     )
 
-                group_style = {"display": "block"} if is_recent else {"display": "none"}
-                if career_id:
+                matches_group = html.Div(
+                    match_items,
+                    id={"type": "season-matches-group", "index": career_id} if career_id else None,
+                    className="season-matches-group",
+                )
+                
+                if career_item:
+                    # Wrap career + matches in a container that controls match visibility via is-expanded class
+                    expanded_cls = " is-expanded" if is_recent else ""
                     items.append(
                         html.Div(
-                            match_items,
-                            id={"type": "season-matches-group", "index": career_id},
-                            style=group_style,
+                            [career_item, matches_group],
+                            className=f"season-group-container{expanded_cls}",
+                            **{"data-career-id": career_id}
                         )
                     )
                 else:
@@ -1100,7 +1154,7 @@ def register_player_portal_callbacks(app):
             return window.dash_clientside.no_update;
         }
         """,
-        Output("timeline-pagination-store", "data"),
+        Output("timeline-pagination-store", "data", allow_duplicate=True),
         Input({"type": "load-more-btn", "year": ALL}, "n_clicks"),
         prevent_initial_call=True,
     )
@@ -1185,90 +1239,90 @@ def register_player_portal_callbacks(app):
             return dbc.Alert("Error al renderizar el escenario.", color="danger")
 
     # ------------------------------------------------------------------ #
-    # Phase 3: Clientside expand/collapse (task 3.1)                      #
-    # Toggles milestone-body display; syncs with timeline-expand-store.   #
+    # Phase 3: Clientside expand/collapse (Optimized for instant feel)   #
+    # Toggles is-expanded class on .timeline-event and .season-group-container.
     # ------------------------------------------------------------------ #
     app.clientside_callback(
         """
         function(n_clicks_list, expand_store) {
             var triggered_id = dash_clientside.callback_context.triggered_id;
             if (!triggered_id || triggered_id.type !== 'milestone-header') {
-                return [
-                    window.dash_clientside.no_update,
-                    window.dash_clientside.no_update,
-                    window.dash_clientside.no_update,
-                    window.dash_clientside.no_update
-                ];
+                return window.dash_clientside.no_update;
             }
             var mid = triggered_id.index;
             var open_ids = new Set(expand_store || []);
 
-            // Accordion: when opening a career milestone (one that has a season-matches-group),
-            // close all other career milestones first so only one season is open at a time.
-            var group_outputs = dash_clientside.callback_context.outputs_list[2];
-            var career_ids = new Set();
-            if (group_outputs && group_outputs.length > 0) {
-                group_outputs.forEach(function(out) { career_ids.add(out.id.index); });
-            }
-            if (career_ids.has(mid) && !open_ids.has(mid)) {
-                career_ids.forEach(function(cid) { if (cid !== mid) open_ids.delete(cid); });
-            }
+            // Flexible selector for dictionary IDs
+            var selector = '[id*="index"][id*="' + mid + '"][id*="type"][id*="milestone-header"]';
+            var headerEl = document.querySelector(selector);
+            if (!headerEl) return window.dash_clientside.no_update;
+            
+            var eventContainer = headerEl.closest('.timeline-event');
+            if (!eventContainer) return window.dash_clientside.no_update;
 
-            if (open_ids.has(mid)) {
-                open_ids.delete(mid);
+            var willOpen = !eventContainer.classList.contains('is-expanded');
+            
+            // Handle Accordion for Season Groups
+            var seasonContainer = eventContainer.closest('.season-group-container');
+            if (seasonContainer && seasonContainer.getAttribute('data-career-id') === mid) {
+                if (willOpen) {
+                    document.querySelectorAll('.season-group-container.is-expanded').forEach(function(el) {
+                        el.classList.remove('is-expanded');
+                        var cid = el.getAttribute('data-career-id');
+                        if (cid) open_ids.delete(cid);
+                        el.querySelectorAll('.timeline-event.is-expanded').forEach(function(e) { e.classList.remove('is-expanded'); });
+                    });
+                    seasonContainer.classList.add('is-expanded');
+                    eventContainer.classList.add('is-expanded');
+                    open_ids.add(mid);
+                } else {
+                    seasonContainer.classList.remove('is-expanded');
+                    eventContainer.classList.remove('is-expanded');
+                    open_ids.delete(mid);
+                }
             } else {
-                open_ids.add(mid);
-            }
-            var open_ids_array = Array.from(open_ids);
-
-            // milestone-body styles (all milestone types)
-            var header_inputs = dash_clientside.callback_context.inputs_list[0];
-            var body_styles = header_inputs.map(function(inp) {
-                return open_ids.has(inp.id.index) ? {display: 'block'} : {display: 'none'};
-            });
-
-            // season-matches-group styles (career milestone IDs control group visibility)
-            var group_styles = [];
-            if (group_outputs && group_outputs.length > 0) {
-                group_styles = group_outputs.map(function(out) {
-                    return open_ids.has(out.id.index) ? {display: 'block'} : {display: 'none'};
-                });
+                if (willOpen) {
+                    eventContainer.classList.add('is-expanded');
+                    open_ids.add(mid);
+                } else {
+                    eventContainer.classList.remove('is-expanded');
+                    open_ids.delete(mid);
+                }
             }
 
-            // detail-btn rotation: rotate 90deg when expanded, back to 0deg when collapsed
-            var btn_styles = header_inputs.map(function(inp) {
-                var isOpen = open_ids.has(inp.id.index);
-                return {transform: isOpen ? 'rotate(90deg)' : 'rotate(0deg)',
-                        transition: 'transform 0.3s ease'};
-            });
-
-            return [open_ids_array, body_styles, group_styles, btn_styles];
+            // Background store sync
+            window.dash_clientside.set_props('timeline-expand-store', {data: Array.from(open_ids)});
+            
+            return window.dash_clientside.no_update;
         }
         """,
-        Output("timeline-expand-store", "data", allow_duplicate=True),
-        Output({"type": "milestone-body", "index": ALL}, "style"),
-        Output({"type": "season-matches-group", "index": ALL}, "style"),
-        Output({"type": "milestone-detail-btn", "index": ALL}, "style"),
+        Output("timeline-pagination-store", "data", allow_duplicate=True),
         Input({"type": "milestone-header", "index": ALL}, "n_clicks"),
         State("timeline-expand-store", "data"),
         prevent_initial_call=True,
     )
 
     # ------------------------------------------------------------------ #
-    # Phase 3: Intersection Observer scroll sync (tasks 3.2 + 3.3 + 4.2) #
+    # Phase 3: Consolidates Intersection Observer & Lucide Init          #
     # Registers an IntersectionObserver on .season-section divs.          #
     # Updates active-year-store, pill active class, and scrolls pill.     #
     # ------------------------------------------------------------------ #
     app.clientside_callback(
         """
         function(children) {
+            // 1. Re-init Lucide icons
+            setTimeout(function() {
+                if (window.lucide) { lucide.createIcons(); }
+            }, 150);
+
+            // 2. Setup IntersectionObserver for scroll sync
             setTimeout(function() {
                 if (window._seasonObserver) {
                     window._seasonObserver.disconnect();
                 }
                 var container = document.querySelector('.milestone-list-container');
                 var sections = document.querySelectorAll('.season-section');
-                if (!sections.length) return;
+                if (!sections || !sections.length) return;
 
                 window._seasonObserver = new IntersectionObserver(function(entries) {
                     var topYear = null;
@@ -1283,15 +1337,14 @@ def register_player_portal_callbacks(app):
                         }
                     });
                     if (!topYear) return;
-                    // Update Dash store (task 3.2)
+                    
                     window.dash_clientside.set_props('active-year-store', {data: topYear});
-                    // Toggle active class on pills (task 3.3)
+                    
                     var pills = document.querySelectorAll('#year-navigator-pills button');
                     pills.forEach(function(pill) {
                         var pillYear = pill.textContent.trim();
                         if (pillYear === topYear) {
                             pill.classList.add('active');
-                            // Scroll pill into center view (task 4.2)
                             pill.scrollIntoView({behavior: 'smooth', inline: 'center', block: 'nearest'});
                         } else {
                             pill.classList.remove('active');
@@ -1311,22 +1364,6 @@ def register_player_portal_callbacks(app):
         prevent_initial_call=True,
     )
 
-    # ------------------------------------------------------------------ #
-    # Phase 3: Init Lucide icons after timeline renders                   #
-    # ------------------------------------------------------------------ #
-    app.clientside_callback(
-        """
-        function(children) {
-            setTimeout(function() {
-                if (window.lucide) { lucide.createIcons(); }
-            }, 150);
-            return window.dash_clientside.no_update;
-        }
-        """,
-        Output("active-year-store", "data", allow_duplicate=True),
-        Input("timeline-milestones", "children"),
-        prevent_initial_call=True,
-    )
 
     # ------------------------------------------------------------------ #
     # Phase 3: Action Node click → Stage gallery (task 6.1)               #
@@ -1498,13 +1535,17 @@ def register_player_portal_callbacks(app):
         # Load saved draft if it exists
         try:
             from flask_login import current_user as _cu
+
             player_id = str(_cu.id) if _cu and _cu.is_authenticated else "unknown"
         except Exception:
             player_id = "unknown"
 
         from pathlib import Path as _Path
         import json as _json
-        draft_path = _Path("data/player_cards") / player_id / milestone_id / "card_editor.json"
+
+        draft_path = (
+            _Path("data/player_cards") / player_id / milestone_id / "card_editor.json"
+        )
         saved_draft = None
         if draft_path.exists():
             try:
@@ -1530,12 +1571,15 @@ def register_player_portal_callbacks(app):
         except Exception as exc:
             logger.error(f"handle_action_node_pill agent error: {exc}")
             from utils.card_design_agent import _deterministic_fallback
-            proposals = _deterministic_fallback({
-                "match_payload": payload,
-                "team_colors": _get_team_colors(payload.get("home_team", "")),
-                "has_player_photo": False,
-                "card_type": card_type,
-            })
+
+            proposals = _deterministic_fallback(
+                {
+                    "match_payload": payload,
+                    "team_colors": _get_team_colors(payload.get("home_team", "")),
+                    "has_player_photo": False,
+                    "card_type": card_type,
+                }
+            )
             ai_notice = "IA no disponible — propuesta básica cargada."
 
         # Build initial editor state (draft overrides AI proposal if exists)
@@ -1570,22 +1614,37 @@ def register_player_portal_callbacks(app):
             }
 
             from callbacks.card_editor_callbacks import _build_preview_layout
+
             initial_preview = _build_preview_layout(editor_state, {})
 
             if card_type == "pre-match":
-                studio = create_pre_game_card_studio(milestone_id, match_context, proposals,
-                                                     initial_preview=initial_preview)
+                studio = create_pre_game_card_studio(
+                    milestone_id,
+                    match_context,
+                    proposals,
+                    initial_preview=initial_preview,
+                )
             else:
-                studio = create_performance_card_studio(milestone_id, match_context, proposals,
-                                                        initial_preview=initial_preview)
+                studio = create_performance_card_studio(
+                    milestone_id,
+                    match_context,
+                    proposals,
+                    initial_preview=initial_preview,
+                )
 
             children = [studio]
             if ai_notice:
-                children.insert(0, dbc.Alert(ai_notice, color="warning", className="small mb-2"))
+                children.insert(
+                    0, dbc.Alert(ai_notice, color="warning", className="small mb-2")
+                )
             result = html.Div(children)
         except Exception as exc:
             logger.error(f"handle_action_node_pill studio render error: {exc}")
-            return dbc.Alert("Error abriendo el Card Studio.", color="danger"), no_update, no_update
+            return (
+                dbc.Alert("Error abriendo el Card Studio.", color="danger"),
+                no_update,
+                no_update,
+            )
 
         return result, no_update, editor_state
 
@@ -1671,6 +1730,17 @@ def _serialize_milestones(milestones: list) -> list:
         payload = dict(entry.get("payload", {}))
         if hasattr(payload.get("date"), "isoformat"):
             payload["date"] = payload["date"].isoformat()
+
+        # Handle nested matches serialization
+        if "matches" in payload:
+            serialized_matches = []
+            for match in payload["matches"]:
+                m_copy = dict(match)
+                if hasattr(m_copy.get("date"), "isoformat"):
+                    m_copy["date"] = m_copy["date"].isoformat()
+                serialized_matches.append(m_copy)
+            payload["matches"] = serialized_matches
+
         entry["payload"] = payload
         result.append(entry)
     return result

@@ -1,511 +1,328 @@
-"""
-Gestor simplificado de datos de lesiones desde Transfermarkt.
-Actualización automática solo los lunes por la mañana.
-"""
+# ABOUTME: Refactored TransfermarktDataManager using SQLAlchemy for injuries and match history.
+# ABOUTME: Maintains compatibility with existing dashboard components by providing required data formats.
 
 import pandas as pd
-from typing import Dict, List, Optional
-from datetime import datetime, timedelta
 import logging
 import json
+from typing import Dict, List, Optional
+from datetime import datetime, timezone
 from pathlib import Path
+from sqlalchemy import select, and_, delete
+from sqlalchemy.orm import joinedload
 
-# Importar componentes
+# Importar componentes de base de datos
+from models.db_models import Injury, MatchHistory, Player, Team, SystemSyncLog
+from utils.db_engine import SessionFactory
+from utils.common import get_current_season
+
+# Importar componentes ETL
 from data.extractors.transfermarkt_extractor import TransfermarktExtractor
 from data.processors.transfermarkt_processor import TransfermarktProcessor
 from data.aggregators.transfermarkt_aggregator import TransfermarktStatsAggregator
 
-# Configurar logging básico
+# Configurar logging
 logger = logging.getLogger(__name__)
 
 class TransfermarktDataManager:
     """
-    Gestor simplificado para datos de lesiones de Transfermarkt.
-    Actualización automática solo los lunes por la mañana.
+    Gestor de datos de Transfermarkt (lesiones e historial) basado en SQL.
+    Sustituye la dependencia de archivos JSON por consultas a la base de datos.
     """
     
-    def __init__(self, cache_dir: str = "data/cache", auto_load: bool = False):
-        """
-        Inicializa el gestor de datos.
-        
-        Args:
-            cache_dir: Directorio para cache de datos
-            auto_load: Si debe cargar automáticamente al inicializar
-        """
+    def __init__(self, cache_dir: str = "data/cache", auto_load: bool = True):
         self.extractor = TransfermarktExtractor(cache_dir)
         self.processor = TransfermarktProcessor()
         
-        # Estado interno
-        self.raw_injuries = None
+        # Estado interno (mantener por compatibilidad si es necesario, pero priorizar SQL)
         self.processed_injuries = None
         self.aggregator = None
-        self.last_update = None
-        
-        # Cache simple
-        self.cache_dir = Path(cache_dir)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-       
-        
-        # Cargar timestamp de última actualización
-        self._load_last_update()
         
         if auto_load:
             self.refresh_data()
-    
-    def _save_manual_update_timestamp(self, update_time: datetime):
-        """
-        Guarda timestamp de actualización manual en update_timestamps.json.
-        Mantiene el timestamp original y crea uno manual separado.
-        
-        Args:
-            update_time: Tiempo de la actualización manual
-        """
-        timestamp_file = self.cache_dir / "update_timestamps.json"
-        try:
-            # PASO 1: Cargar timestamps existentes (incluyendo Hong Kong)
-            existing_timestamps = {}
-            if timestamp_file.exists():
-                with open(timestamp_file, 'r', encoding='utf-8') as f:
-                    existing_timestamps = json.load(f)
-            
-            # PASO 2: Crear timestamp manual separado
-            existing_timestamps['transfermarkt_manual'] = update_time.isoformat()
-            
-            # PASO 3: Crear timestamp principal solo si no existe
-            if 'transfermarkt' not in existing_timestamps:
-                existing_timestamps['transfermarkt'] = update_time.isoformat()
-                logger.info("Creando timestamp principal de transfermarkt")
-            else:
-                logger.info("Manteniendo timestamp principal de transfermarkt existente")
-            
-            # PASO 4: Guardar archivo completo (preservando Hong Kong)
-            with open(timestamp_file, 'w', encoding='utf-8') as f:
-                json.dump(existing_timestamps, f, indent=2)
-                
-            logger.info(f"Timestamp manual de Transfermarkt guardado (preservando otros sistemas)")
-            
-        except Exception as e:
-            logger.warning(f"Error guardando timestamp manual de Transfermarkt: {e}")
 
-    def _load_last_update(self):
-        """Carga el timestamp de la última actualización desde update_timestamps.json."""
-        timestamp_file = self.cache_dir / "update_timestamps.json"
-        try:
-            if timestamp_file.exists():
-                with open(timestamp_file, 'r', encoding='utf-8') as f:
-                    timestamps_data = json.load(f)
-                    
-                    # Buscar timestamp de transfermarkt
-                    if 'transfermarkt' in timestamps_data:
-                        self.last_update = datetime.fromisoformat(timestamps_data['transfermarkt'])
-                        logger.info(f"Transfermarkt - Última actualización: {self.last_update}")
-                    else:
-                        logger.info("Transfermarkt - No hay timestamp previo")
-            else:
-                logger.info("Archivo update_timestamps.json no existe")
-        except Exception as e:
-            logger.warning(f"Error cargando timestamp de Transfermarkt: {e}")
-            self.last_update = None
-
-    def _save_last_update(self):
-        """Guarda el timestamp de la última actualización en update_timestamps.json compartido."""
-        timestamp_file = self.cache_dir / "update_timestamps.json"
-        try:
-            # PASO 1: Cargar timestamps existentes (incluyendo Hong Kong)
-            existing_timestamps = {}
-            if timestamp_file.exists():
-                with open(timestamp_file, 'r', encoding='utf-8') as f:
-                    existing_timestamps = json.load(f)
-            
-            # PASO 2: Actualizar solo el timestamp principal de transfermarkt
-            if self.last_update:
-                existing_timestamps['transfermarkt'] = self.last_update.isoformat()
-                
-                # PASO 3: Guardar archivo completo (preservando Hong Kong)
-                with open(timestamp_file, 'w', encoding='utf-8') as f:
-                    json.dump(existing_timestamps, f, indent=2)
-                    
-                logger.info(f"Transfermarkt timestamp guardado (preservando otros sistemas)")
-            
-        except Exception as e:
-            logger.warning(f"Error guardando timestamp de Transfermarkt: {e}")
-    
-    def _should_update_data(self) -> bool:
-        """
-        Determina si los datos deben actualizarse.
-        Solo los lunes por la mañana y si no se ha actualizado hoy.
-        Versión optimizada con cache temporal para evitar verificaciones duplicadas.
-        
-        Returns:
-            True si se debe realizar una actualización
-        """
-        # Cache temporal para evitar verificaciones duplicadas en la misma sesión
-        cache_key = '_should_update_cache'
-        cache_timestamp_key = '_should_update_cache_time'
-        
-        # Si tenemos un resultado cacheado de los últimos 30 segundos, usarlo
-        if hasattr(self, cache_key) and hasattr(self, cache_timestamp_key):
-            cache_age = (datetime.now() - getattr(self, cache_timestamp_key)).total_seconds()
-            if cache_age < 30:  # Cache válido por 30 segundos
-                cached_result = getattr(self, cache_key)
-                logger.debug(f"📋 Usando resultado cacheado de _should_update_data: {cached_result}")
-                return cached_result
-        
-        # Si no hay última actualización, siempre actualizar
-        if self.last_update is None:
-            logger.info("🔄 No hay actualización previa, programando actualización...")
-            result = True
-        else:
-            now = datetime.now()
-            
-            # Verificar si es lunes (0 = lunes)
-            is_monday = now.weekday() == 0
-            
-            # Verificar si es por la mañana (antes de las 12:00)
-            is_morning = now.hour < 12
-            
-            # Verificar si ya se actualizó hoy
-            last_update_date = self.last_update.date()
-            is_different_day = last_update_date < now.date()
-            
-            # Actualizar solo si es lunes por la mañana y no se ha actualizado hoy
-            result = is_monday and is_morning and is_different_day
-            
-            if result:
-                logger.info("📅 Es lunes por la mañana, programando actualización automática...")
-            else:
-                logger.debug("⏸️ No es momento de actualización automática (solo lunes por la mañana)")
-        
-        # Guardar resultado en cache temporal
-        setattr(self, cache_key, result)
-        setattr(self, cache_timestamp_key, datetime.now())
-        
-        return result
-    
     def refresh_data(self, force_scraping: bool = False) -> bool:
         """
-        Actualiza los datos (extrae, procesa y cachea).
-        Versión optimizada sin verificaciones duplicadas.
-        
-        Args:
-            force_scraping: Forzar scraping ignorando la lógica de lunes
-            
-        Returns:
-            True si la operación fue exitosa
+        Refresca los datos de lesiones e historial. 
+        Si force_scraping es True, realiza el proceso ETL y guarda en SQL.
+        Si es False, carga los datos directamente de SQL al agregador.
         """
         try:
-            # Si es forzado, saltar verificaciones automáticas
             if force_scraping:
-                logger.info("🔄 Actualización forzada de lesiones desde Transfermarkt...")
+                logger.info("Iniciando proceso ETL forzado para Transfermarkt...")
+                self._perform_full_etl()
+            
+            # Cargar datos desde SQL al agregador para asegurar que siempre estén frescos
+            self.processed_injuries = self.get_injuries_data()
+            
+            if self.processed_injuries:
+                self.aggregator = TransfermarktStatsAggregator(self.processed_injuries)
+                logger.info(f"✓ Agregador de lesiones listo ({len(self.processed_injuries)} registros)")
+                return True
             else:
-                # Solo verificar si debe actualizar cuando NO es forzado
-                if not self._should_update_data():
-                    # Intentar cargar desde cache del extractor
-                    if self._load_from_cache():
-                        logger.info("📖 Usando datos desde cache existente")
-                        return True
-                    else:
-                        logger.debug("⏸️ No hay cache válido, pero no es momento de actualizar")
-                        return False
-                else:
-                    logger.info("🤖 Actualización automática programada de lesiones...")
-            
-            # 1. Extraer datos
-            self.raw_injuries = self.extractor.extract_all_injuries(force_refresh=force_scraping)
-            
-            if not self.raw_injuries:
-                logger.warning("⚠️ No se pudieron extraer datos de lesiones")
+                logger.warning("No hay datos de lesiones disponibles en SQL.")
                 return False
-            
-            # 2. Procesar datos
-            df_processed = self.processor.process_injuries_data(self.raw_injuries)
-            
-            if df_processed.empty:
-                logger.warning("⚠️ No se pudieron procesar los datos")
-                return False
-            
-            # 3. Convertir a formato dashboard
-            self.processed_injuries = self._convert_to_dashboard_format(df_processed)
-            
-            if not self.processed_injuries:
-                logger.warning("⚠️ Error convirtiendo a formato dashboard")
-                return False
-            
-            # 4. Inicializar agregador
-            self.aggregator = TransfermarktStatsAggregator(self.processed_injuries)
-            
-            # 5. Actualizar timestamp según el tipo de actualización
-            if force_scraping:
-                # Actualización MANUAL - crear timestamp separado
-                self._save_manual_update_timestamp(datetime.now())
-                logger.info("💾 Timestamp de actualización MANUAL guardado")
-            else:
-                # Actualización AUTOMÁTICA - timestamp regular
-                self.last_update = datetime.now()
-                self._save_last_update()
-                logger.info("💾 Timestamp de actualización AUTOMÁTICA guardado")
-            
-            logger.info(f"✅ Datos de lesiones actualizados: {len(self.processed_injuries)} lesiones")
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ Error actualizando datos de lesiones: {e}")
-            # Intentar cargar desde cache como fallback
-            return self._load_from_cache()
-    
-    def _load_from_cache(self) -> bool:
-        """
-        Intenta cargar datos desde el cache del extractor.
-        
-        Returns:
-            True si se cargaron datos válidos desde cache
-        """
-        try:
-            # Intentar usar el cache del extractor
-            cache_info = self.extractor.get_cache_info()
-            
-            if cache_info.get('injuries_cache_exists', False):
-                logger.info("Intentando cargar desde cache del extractor...")
-                self.raw_injuries = self.extractor.extract_all_injuries(force_refresh=False)
                 
-                if self.raw_injuries:
-                    # Procesar datos del cache
-                    df_processed = self.processor.process_injuries_data(self.raw_injuries)
-                    self.processed_injuries = self._convert_to_dashboard_format(df_processed)
-                    
-                    if self.processed_injuries:
-                        self.aggregator = TransfermarktStatsAggregator(self.processed_injuries)
-                        logger.info(f"✅ Datos cargados desde cache: {len(self.processed_injuries)} lesiones")
-                        return True
-            
-            return False
-            
         except Exception as e:
-            logger.warning(f"Error cargando desde cache: {e}")
+            logger.error(f"Error al refrescar datos de Transfermarkt: {e}")
+            import traceback; traceback.print_exc()
             return False
-    
-    def get_injuries_data(self) -> List[Dict]:
-        """
-        Obtiene los datos de lesiones en formato compatible con el dashboard.
-        
-        Returns:
-            Lista de diccionarios con datos de lesiones
-        """
-        if self.processed_injuries is None:
-            logger.info("No hay datos disponibles, intentando cargar...")
-            if not self.refresh_data():
-                logger.warning("No se pudieron cargar datos")
-                return []
-        
-        return self.processed_injuries or []
-    
-    def get_teams_with_injuries(self) -> List[str]:
-        """Obtiene lista de equipos que tienen lesiones."""
-        injuries = self.get_injuries_data()
-        if not injuries:
-            return []
-        
-        teams = list(set(injury['team'] for injury in injuries))
-        return sorted(teams)
-    
-    def get_injuries_by_team(self, team_name: str) -> List[Dict]:
-        """
-        Obtiene lesiones filtradas por equipo.
-        
-        Args:
-            team_name: Nombre del equipo
-            
-        Returns:
-            Lista de lesiones del equipo
-        """
-        injuries = self.get_injuries_data()
-        return [injury for injury in injuries if injury['team'] == team_name]
-    
-    def get_injuries_by_status(self, status: str = 'En tratamiento') -> List[Dict]:
-        """
-        Obtiene lesiones filtradas por estado.
-        
-        Args:
-            status: Estado de la lesión
-            
-        Returns:
-            Lista de lesiones con el estado especificado
-        """
-        injuries = self.get_injuries_data()
-        return [injury for injury in injuries if injury['status'] == status]
-    
-    def get_statistics_summary(self) -> Dict:
-        """
-        Obtiene resumen estadístico de las lesiones.
-        
-        Returns:
-            Diccionario con estadísticas resumidas
-        """
-        injuries = self.get_injuries_data()
-        
-        if not injuries:
-            return {
-                'total_injuries': 0,
-                'active_injuries': 0,
-                'avg_recovery_days': 0,
-                'most_common_injury': 'N/A',
-                'most_affected_part': 'N/A'
-            }
-        
-        # Calcular estadísticas básicas
-        df = pd.DataFrame(injuries)
-        
-        stats = {
-            'total_injuries': len(injuries),
-            'active_injuries': len(df[df['status'] == 'En tratamiento']),
-            'recovered_injuries': len(df[df['status'] == 'Recuperado']),
-            'chronic_injuries': len(df[df['status'] == 'Crónico']),
-            'avg_recovery_days': float(df['recovery_days'].mean()) if 'recovery_days' in df.columns else 0,
-            'most_common_injury': df['injury_type'].mode().iloc[0] if len(df) > 0 and 'injury_type' in df.columns else 'N/A',
-            'most_affected_part': df['body_part'].mode().iloc[0] if len(df) > 0 and 'body_part' in df.columns else 'N/A',
-            'teams_with_injuries': df['team'].nunique() if 'team' in df.columns else 0,
-            'last_update': self.last_update.isoformat() if self.last_update else None
-        }
-        
-        return stats
-    
-    def check_for_updates(self) -> Dict:
-        """
-        Verifica si hay actualizaciones disponibles.
-        Versión de producción.
-        
-        Returns:
-            Diccionario con información de actualizaciones
-        """
-        # Verificar si hay actualización manual reciente (últimos 5 minutos)
-        if self.last_update:
-            time_since_update = datetime.now() - self.last_update
-            
-            # Si la última actualización fue hace menos de 5 minutos, considerar actualizado
-            if time_since_update.total_seconds() < 300:  # 5 minutos
-                logger.info(f"Transfermarkt actualización manual reciente ({time_since_update.total_seconds():.0f}s)")
-                return {
-                    'needs_update': False,
-                    'message': "Datos actualizados recientemente (manual)",
-                    'last_update': self.last_update.isoformat(),
-                    'next_auto_update': "Próximo lunes antes de las 12:00"
-                }
-        
-        # Verificar si debe actualizar según la lógica de lunes por la mañana
-        needs_update = self._should_update_data()
-        
-        if needs_update:
-            message = "Actualización programada disponible (lunes por la mañana)"
-        else:
-            message = "Próxima actualización automática: próximo lunes por la mañana"
-        
-        return {
-            'needs_update': needs_update,
-            'message': message,
-            'last_update': self.last_update.isoformat() if self.last_update else None,
-            'next_auto_update': "Próximo lunes antes de las 12:00"
-        }
-    
-    def clear_all_cache(self):
-        """Limpia todos los caches."""
-        self.extractor.clear_cache()
-        
-        # Limpiar solo el timestamp de transfermarkt del archivo compartido
-        timestamp_file = self.cache_dir / "update_timestamps.json"
+
+    def _perform_full_etl(self):
+        """Ejecuta el ciclo de extracción, procesamiento y carga en DB."""
+        # Obtener todos los jugadores representados o vinculados para sincronizar su historial
+        session = SessionFactory()
         try:
-            if timestamp_file.exists():
-                with open(timestamp_file, 'r', encoding='utf-8') as f:
-                    timestamps_data = json.load(f)
-                
-                # Eliminar solo el timestamp de transfermarkt
-                if 'transfermarkt' in timestamps_data:
-                    del timestamps_data['transfermarkt']
-                    
-                    # Guardar archivo actualizado
-                    with open(timestamp_file, 'w', encoding='utf-8') as f:
-                        json.dump(timestamps_data, f, indent=2)
-                        
-                    logger.info("Timestamp de Transfermarkt eliminado de update_timestamps.json")
-        except Exception as e:
-            logger.warning(f"Error eliminando timestamp de Transfermarkt: {e}")
-        
-        self.raw_injuries = None
-        self.processed_injuries = None
-        self.aggregator = None
-        self.last_update = None
-        logger.info("Cache de Transfermarkt eliminado")
-    
-    def _convert_to_dashboard_format(self, df: pd.DataFrame) -> List[Dict]:
-        """
-        Convierte DataFrame procesado al formato esperado por el dashboard.
-        Versión simplificada.
-        
-        Args:
-            df: DataFrame procesado
+            # Sincronizar historial para todos los jugadores con tm_id
+            players = session.execute(select(Player).where(Player.tm_id.is_not(None))).scalars().all()
             
-        Returns:
-            Lista de diccionarios compatible con el dashboard
-        """
-        injuries = []
-        
-        for i, row in df.iterrows():
+            # Obtener temporadas disponibles
+            from models.db_models import Season
+            seasons = session.execute(select(Season.id)).scalars().all()
+            
+            for player in players:
+                logger.info(f"Sincronizando historial TM para: {player.name}...")
+                for season_id in seasons:
+                    try:
+                        raw_matches = self.extractor.get_match_history(str(player.tm_id), season_id)
+                        if raw_matches:
+                            self._upsert_history_to_sql(player.id, raw_matches)
+                    except Exception as e:
+                        logger.error(f"Error sincronizando historial para {player.name} en {season_id}: {e}")
+        finally:
+            session.close()
+
+        # Sincronizar lesiones (proceso existente - silenciado si no hay método en extractor)
+        if hasattr(self.extractor, 'extract_all_injuries'):
             try:
-                injury = {
-                    'id': str(i),
-                    'player_name': str(row.get('player_name', 'Desconocido')),
-                    'team': str(row.get('team', 'Desconocido')),
-                    'position': str(row.get('position', 'Desconocida')),
-                    'age': int(row.get('age', 0)) if pd.notna(row.get('age')) else 0,
-                    'injury_type': str(row.get('injury_type', 'Desconocida')),
-                    'body_part': str(row.get('body_part', 'Otros')),
-                    'severity': str(row.get('severity', 'Moderada')),
-                    'status': str(row.get('status', 'En tratamiento')),
-                    'recovery_days': int(row.get('recovery_days', 0)) if pd.notna(row.get('recovery_days')) else 0,
-                    'market_value': int(row.get('market_value', 0)) if pd.notna(row.get('market_value')) else 0,
-                    'matches_missed': int(row.get('matches_missed', 0)) if pd.notna(row.get('matches_missed')) else 0
-                }
-                
-                # Procesar fechas de forma simple
-                injury_date = row.get('injury_date')
-                if pd.notna(injury_date):
-                    try:
-                        if hasattr(injury_date, 'strftime'):
-                            injury['injury_date'] = injury_date.strftime('%Y-%m-%d')
-                        else:
-                            injury['injury_date'] = pd.to_datetime(injury_date).strftime('%Y-%m-%d')
-                    except:
-                        injury['injury_date'] = None
-                else:
-                    injury['injury_date'] = None
-                
-                return_date = row.get('return_date')
-                if pd.notna(return_date):
-                    try:
-                        if hasattr(return_date, 'strftime'):
-                            injury['return_date'] = return_date.strftime('%Y-%m-%d')
-                        else:
-                            injury['return_date'] = pd.to_datetime(return_date).strftime('%Y-%m-%d')
-                    except:
-                        injury['return_date'] = None
-                else:
-                    injury['return_date'] = None
-                
-                injuries.append(injury)
-                
+                raw_injuries = self.extractor.extract_all_injuries(force_refresh=True)
+                if raw_injuries:
+                    df_processed = self.processor.process_injuries_data(raw_injuries)
+                    if not df_processed.empty:
+                        self._upsert_injuries_to_sql(df_processed)
             except Exception as e:
-                logger.debug(f"Error procesando lesión {i}: {e}")
-                continue
+                logger.warning(f"No se pudieron sincronizar lesiones: {e}")
         
-        logger.info(f"Convertidas {len(injuries)} lesiones al formato dashboard")
-        return injuries
-    
-    def get_status_info(self) -> Dict:
-        """Obtiene información del estado actual del gestor."""
-        return {
-            'raw_injuries_count': len(self.raw_injuries) if self.raw_injuries else 0,
-            'processed_injuries_count': len(self.processed_injuries) if self.processed_injuries else 0,
-            'last_update': self.last_update.isoformat() if self.last_update else None,
-            'has_data': self.processed_injuries is not None,
-            'cache_info': self.extractor.get_cache_info(),
-            'next_auto_update': "Próximo lunes antes de las 12:00"
-        }
+        # 4. Registrar éxito
+        self._update_sync_log("transfermarkt_full_sync")
+
+    def _upsert_history_to_sql(self, player_id: str, matches: List[Dict]):
+        """Inserta o desarrolla el historial de partidos en SQL."""
+        session = SessionFactory()
+        try:
+            for m in matches:
+                # Intentar parsear fecha
+                match_date = self._parse_date(m.get('date'))
+                if not match_date: continue
+
+                # Buscar duplicado por jugador, fecha y oponente
+                existing = session.execute(
+                    select(MatchHistory).where(
+                        MatchHistory.player_id == player_id,
+                        MatchHistory.date == match_date,
+                        MatchHistory.opponent == m.get('opponent')
+                    )
+                ).scalar_one_or_none()
+
+                if not existing:
+                    history = MatchHistory(
+                        player_id=player_id,
+                        date=match_date,
+                        competition_name=m.get('competition'),
+                        competition_logo=m.get('competition_logo'),
+                        opponent=m.get('opponent'),
+                        result=m.get('result'),
+                        minutes_played=m.get('minutes_played', 0),
+                        goals=m.get('goals', 0),
+                        assists=m.get('assists', 0),
+                        yellow_cards=m.get('yellow_cards', 0),
+                        red_cards=m.get('red_cards', 0),
+                        position=m.get('position'),
+                        status=m.get('status', 'Jugado'),
+                        raw_data=m
+                    )
+                    session.add(history)
+                else:
+                    # Actualizar datos existentes
+                    existing.minutes_played = m.get('minutes_played', 0)
+                    existing.goals = m.get('goals', 0)
+                    existing.assists = m.get('assists', 0)
+                    existing.yellow_cards = m.get('yellow_cards', 0)
+                    existing.red_cards = m.get('red_cards', 0)
+                    existing.position = m.get('position')
+                    existing.status = m.get('status', 'Jugado')
+                    existing.raw_data = m
+            
+            session.commit()
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error upserting match history for {player_id}: {e}")
+        finally:
+            session.close()
+
+    def _upsert_injuries_to_sql(self, df: pd.DataFrame):
+        """Inserta o actualiza lesiones en la base de datos."""
+        session = SessionFactory()
+        try:
+            count = 0
+            for _, row in df.iterrows():
+                # Buscar jugador por nombre o TM ID si estuviera disponible
+                player_name = row.get('player_name')
+                player = session.execute(select(Player).where(Player.name == player_name)).scalar_one_or_none()
+                
+                if not player:
+                    logger.debug(f"Jugador no encontrado para lesión: {player_name}")
+                    continue
+
+                # Intentar parsear fechas
+                start_date = self._parse_date(row.get('injury_date'))
+                return_date = self._parse_date(row.get('return_date'))
+
+                # UPSERT logic (borrar antiguas del mismo jugador/tipo si son recientes o duplicadas es complejo, 
+                # así que por ahora añadimos si no existe una idéntica activa)
+                existing = session.execute(
+                    select(Injury).where(
+                        Injury.player_id == player.id,
+                        Injury.injury_type == row.get('injury_type'),
+                        Injury.start_date == start_date
+                    )
+                ).scalar_one_or_none()
+
+                if not existing:
+                    injury = Injury(
+                        player_id=player.id,
+                        injury_type=row.get('injury_type', 'Desconocida'),
+                        body_part=row.get('body_part', 'Otros'),
+                        severity=row.get('severity', 'Moderada'),
+                        start_date=start_date,
+                        return_date=return_date,
+                        days_out=int(row.get('recovery_days', 0)) if pd.notna(row.get('recovery_days')) else 0,
+                        status=row.get('status', 'En tratamiento')
+                    )
+                    session.add(injury)
+                    count += 1
+            
+            session.commit()
+            logger.info(f"✓ {count} lesiones nuevas insertadas en SQL.")
+        finally:
+            session.close()
+
+    def get_injuries_data(self) -> List[Dict]:
+        """Consulta SQL para obtener lesiones con datos de jugador y equipo para el agregador."""
+        session = SessionFactory()
+        try:
+            stmt = (
+                select(Injury, Player, Team)
+                .join(Player, Injury.player_id == Player.id)
+                .outerjoin(Team, Player.current_team_id == Team.id)
+            )
+            results = session.execute(stmt).all()
+            
+            injuries_list = []
+            for injury_obj, player_obj, team_obj in results:
+                injuries_list.append({
+                    'id': str(injury_obj.id),
+                    'player_name': player_obj.name,
+                    'team': team_obj.name if team_obj else "Desconocido",
+                    'position': player_obj.position_main or "N/A",
+                    'age': player_obj.age or 0,
+                    'injury_type': injury_obj.injury_type,
+                    'body_part': injury_obj.body_part,
+                    'severity': injury_obj.severity,
+                    'status': injury_obj.status,
+                    'recovery_days': injury_obj.days_out or 0,
+                    'injury_date': injury_obj.start_date.strftime('%Y-%m-%d') if injury_obj.start_date else None,
+                    'return_date': injury_obj.return_date.strftime('%Y-%m-%d') if injury_obj.return_date else None,
+                    'market_value': 0, # Campo pendiente si se añade a la DB
+                    'matches_missed': 0 # Calculado dinámicamente si fuera necesario
+                })
+            return injuries_list
+        finally:
+            session.close()
+
+    def get_player_match_history(self, player_id: str) -> List[Dict]:
+        """Obtiene el historial detallado de partidos de un jugador desde SQL."""
+        session = SessionFactory()
+        try:
+            stmt = (
+                select(MatchHistory)
+                .where(MatchHistory.player_id == player_id)
+                .order_by(MatchHistory.date.desc())
+            )
+            results = session.execute(stmt).scalars().all()
+            
+            return [{
+                'date': m.date.strftime('%d/%m/%Y'),
+                'competition': m.competition_name,
+                'competition_logo': m.competition_logo,
+                'opponent': m.opponent,
+                'result': m.result,
+                'minutes_played': m.minutes_played,
+                'goals': m.goals,
+                'assists': m.assists,
+                'yellow_cards': m.yellow_cards,
+                'red_cards': m.red_cards,
+                'position': m.position,
+                'status': m.status
+            } for m in results]
+        finally:
+            session.close()
+
+    # ── Métodos de Compatibilidad Dashboard ──────────────────────────────────────
+
+    def get_teams_with_injuries(self) -> List[str]:
+        if not self.aggregator: return []
+        return self.aggregator.get_available_teams()
+
+    def get_statistics_summary(self) -> Dict:
+        if not self.aggregator: return {}
+        return self.aggregator.get_statistics_summary()
+
+    def get_injuries_by_team(self, team_name: str) -> List[Dict]:
+        if not self.aggregator: return []
+        return self.aggregator.get_filtered_injuries(team=team_name)
+
+    def check_for_updates(self) -> Dict:
+        """Verifica el estado de sincronización en la DB."""
+        session = SessionFactory()
+        try:
+            stmt = select(SystemSyncLog).where(SystemSyncLog.task_name == "transfermarkt_injuries")
+            log = session.execute(stmt).scalar_one_or_none()
+            
+            if not log:
+                return {'needs_update': True, 'message': 'Nunca sincronizado'}
+            
+            # Actualizar si han pasado más de 7 días
+            needs_update = (datetime.now() - log.last_run).days >= 7
+            return {
+                'needs_update': needs_update,
+                'message': 'Al día' if not needs_update else 'Requiere actualización semanal',
+                'last_update': log.last_run.isoformat()
+            }
+        finally:
+            session.close()
+
+    # ── Helpers ──────────────────────────────────────────────────────────────────
+
+    def _parse_date(self, date_val) -> Optional[datetime]:
+        if pd.isna(date_val) or not date_val:
+            return None
+        if isinstance(date_val, datetime):
+            return date_val
+        try:
+            return pd.to_datetime(date_val).to_pydatetime()
+        except:
+            return None
+
+    def _update_sync_log(self, task: str):
+        session = SessionFactory()
+        try:
+            log = session.get(SystemSyncLog, task)
+            if not log:
+                log = SystemSyncLog(task_name=task, last_run=datetime.now(), status="SUCCESS")
+                session.add(log)
+            else:
+                log.last_run = datetime.now()
+                log.status = "SUCCESS"
+            session.commit()
+        finally:
+            session.close()

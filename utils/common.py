@@ -62,7 +62,7 @@ def get_current_season():
     Returns:
         str: Temporada actual
     """
-    return "2024-25"
+    return "2025-26"
 
 def validate_filters(filters, default_analysis_level='league'):
     """Valida y normaliza los filtros de performance."""

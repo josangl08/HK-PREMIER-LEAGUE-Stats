@@ -131,6 +131,7 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
     max-height: calc(100vh - var(--navbar-height) - 90px); /* header + year nav */
     position: relative;
     padding-top: 20px;
+    padding-bottom: 10px;
     /* Hide scrollbar on all browsers */
     scrollbar-width: none;
     -ms-overflow-style: none;
@@ -227,25 +228,24 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
     display: flex;
     align-items: flex-start;
     position: relative;
-    margin-top: 12px;
-    margin-bottom: 12px;
+    margin: 0;   /* no margins between events ensures they touch for a continuous line */
 }
 
 /* ── Left axis column ─────────────────────────────────────────── */
 .event-node {
     flex-shrink: 0;
     width: 44px;
-    align-self: stretch;   /* stretches to full event height for vertical line */
+    align-self: stretch;   /* stretches to full event height (card + margins) */
     display: flex;
     align-items: flex-start;
     justify-content: center;
     position: relative;
-    padding-top: 18px;     /* positions circle center at ~38px = card midpoint */
+    padding-top: 32px;     /* 12px card-margin-top + 20px offset to align circle center with card */
 }
 
 /*
  * Full-height vertical timeline line — solid color per event type.
- * Extends 12px below the event to bridge the margin-bottom gap.
+ * Stretches exactly to top:0 and bottom:0 of the .timeline-event.
  */
 .event-node::before {
     content: '';
@@ -253,7 +253,7 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
     left: 50%;
     transform: translateX(-50%);
     top: 0;
-    bottom: -12px;
+    bottom: 0;
     width: 2px;
     background: var(--accent-cyan, #00bcd4);
     z-index: 0;
@@ -314,6 +314,8 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
     flex: 1;
     min-width: 0;
     margin-left: 16px;
+    margin-top: 16px;
+    margin-bottom: 12px;
     display: flex;
     flex-direction: column;
     align-items: stretch;
@@ -321,12 +323,16 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
 
 .event-card-column > .event-card {
     margin-left: 0;
+    margin-top: 0;
+    margin-bottom: 4px;
 }
 
 .event-card {
     flex: 1;
     min-width: 0;
     margin-left: 16px;   /* gap between axis right edge and card left edge */
+    margin-top: 16px;
+    margin-bottom: 4px;
     position: relative;
 }
 
@@ -334,12 +340,12 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
  * Horizontal connector drawn on event-node so it is never clipped.
  * Starts at the circle center (left: 50%) and extends right by 16px
  * (the margin-left gap) to touch the card left edge.
- * top: 50% of the stretched event-node = exact circle vertical center.
+ * top: 52px = 32px padding-top + 20px (half circle) = card midpoint.
  */
 .event-node::after {
     content: '';
     position: absolute;
-    top: 38px;                /* 18px padding-top + 20px (half circle) = card midpoint */
+    top: 52px;
     transform: none;
     left: calc(50% + 20px);   /* circle right edge: center(22px) + radius(20px) */
     width: 18px;              /* 2px remaining node + 16px margin gap to card */
@@ -429,25 +435,42 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
 }
 
 /* ── Task 4.3: Expandable Card Transitions ───────────────────── */
-.next-game-card__detail,
-.past-game-card__detail {
+.milestone-body,
+.season-matches-group {
     max-height: 0;
     overflow: hidden;
     transition: max-height 0.4s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease-in-out, padding 0.3s ease;
     opacity: 0;
     padding-top: 0 !important;
     padding-bottom: 0 !important;
-    border-top: none !important;
+    display: block; /* always block, but height 0 when collapsed */
 }
 
-/* Smooth transitions for elements that are NOT display: none. */
-.next-game-card__detail:not([style*="display: none"]),
-.past-game-card__detail:not([style*="display: none"]) {
-    max-height: 1000px;
+/* is-expanded class on .timeline-event controls its .milestone-body */
+.timeline-event.is-expanded .event-card > .milestone-body {
+    max-height: 2000px;
     opacity: 1;
     padding-top: 0.75rem !important;
     padding-bottom: 0.75rem !important;
-    border-top: 1px solid rgba(255, 255, 255, 0.1) !important;
+}
+
+/* AI-Insight card exception (they don't use the standard event-card structure exactly) */
+.timeline-event.is-expanded .ai-insight-card .milestone-body {
+    max-height: 2000px;
+    opacity: 1;
+}
+
+/* is-expanded class on .season-group-container controls its .season-matches-group */
+.season-group-container.is-expanded > .season-matches-group {
+    max-height: 25000px;
+    opacity: 1;
+    padding-top: 0 !important;
+    padding-bottom: 0 !important;
+}
+
+/* Sync detail button rotation with expansion state declaratively */
+.timeline-event.is-expanded .event-detail-btn {
+    transform: rotate(90deg) !important;
 }
 
 /* ── Season Card Styles ──────────────────────────────────────── */
@@ -468,6 +491,9 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
     border: none !important;
     position: relative;
     overflow: hidden;
+    margin-top: 12px;
+    margin-bottom: 12px;
+    margin-left: 16px;
     transition: transform 0.2s ease, box-shadow 0.2s ease;
 }
 
@@ -597,14 +623,14 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
 
 /* ── Timeline hidden items (revealed by clientside Load More) ── */
 .timeline-item-hidden {
-    display: none;
+    display: none !important;
 }
 
 /* ── Competition logo: subtle contrast on dark cards ──────────── */
 .competition-logo-img {
     background: rgba(255, 255, 255, 0.08);
-    border-radius: 4px;
-    padding: 2px;
+    border-radius: 50%;
+    padding: 4px;
 }
 
 /* ── Load More row: two-column flex matching timeline-event layout ─ */

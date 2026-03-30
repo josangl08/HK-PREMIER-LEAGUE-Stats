@@ -9,6 +9,11 @@ plotly==6.6.0
 Flask==3.0.3
 werkzeug==3.0.3
 
+# == Persistencia de Datos (SQLAlchemy) ==
+# Para el nuevo motor de base de datos (SQLite/PostgreSQL).
+SQLAlchemy==2.0.29
+psycopg2-binary==2.9.9 # Driver para PostgreSQL (Supabase)
+
 # == Autenticación y Sesiones ==
 # Manejo de logins y sesiones de usuario.
 Flask-Login==0.6.3
