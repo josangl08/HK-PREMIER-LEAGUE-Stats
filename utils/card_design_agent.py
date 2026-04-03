@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+from pathlib import Path
 from typing import TypedDict
 
 # Third-party
@@ -13,7 +14,7 @@ from langgraph.graph import StateGraph, END
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MODEL = "gemini-2.0-flash"
+_DEFAULT_MODEL = "gemini-2.5-flash"
 _DEFAULT_DARK_COLOR = "#1a1a2e"
 
 # ---------------------------------------------------------------------------
@@ -21,71 +22,31 @@ _DEFAULT_DARK_COLOR = "#1a1a2e"
 # ---------------------------------------------------------------------------
 
 class DesignBrief(TypedDict):
-    narrative: dict   # archetype, emotion, headline, key_moment, supporting_story,
-                      # caption, hashtags, reasoning
+    narrative: dict   # archetype, emotion, headline, match_insights, supporting_story, caption, hashtags
     design: dict      # template, format, layers, typography, elements
+    layout_modifiers: dict # NEW: AI decisions on positioning (e.g. logos: "top", headline_y: 0.2)
+    nanobana_background_prompt: str
+    selected_photo_idx: int | None
 
 
 # ---------------------------------------------------------------------------
-# Prompt
+# Prompt Loader
 # ---------------------------------------------------------------------------
 
-CARD_DESIGNER_PROMPT = """
-Eres un director creativo de tarjetas deportivas para la Hong Kong Premier League.
-Tu tarea es generar exactamente 3 propuestas de diseño (DesignBrief) para una {card_type} card
-de un jugador basándote en el contexto del partido.
+def _load_designer_prompt() -> str:
+    """Loads the Senior Art Director prompt from an external text file."""
+    prompt_path = Path(__file__).parent.parent / "ai_models" / "prompts" / "card_designer.txt"
+    if not prompt_path.exists():
+        logger.error(f"Prompt file not found at {prompt_path}. Using minimal fallback.")
+        return "Design a matchday card for {card_type}. Context: {context_json}"
+    
+    try:
+        return prompt_path.read_text("utf-8")
+    except Exception as e:
+        logger.error(f"Error reading prompt file: {e}")
+        return "Design a matchday card for {card_type}. Context: {context_json}"
 
-## Contexto del partido
-{context_json}
-
-## Reglas
-1. Cada propuesta debe tener un arquetipo narrativo diferente o un ángulo diferente de momento clave.
-2. Usa los colores reales del equipo cuando sea posible.
-3. Todos los valores hexadecimales DEBEN ser válidos (#RRGGBB).
-4. Solo incluye stats que existan en player_stats.performance_stats del contexto.
-5. El campo reasoning debe explicar en 3-5 frases naturales la elección de diseño.
-6. Template A = centrado con foto del jugador, B = split horizontal con stats destacados, C = minimalista sin foto.
-7. Si has_player_photo=false, usa template C para todas las propuestas que requieran foto.
-
-## Output — responde ÚNICAMENTE con JSON válido, sin markdown, sin texto adicional:
-{{
-  "proposals": [
-    {{
-      "narrative": {{
-        "archetype": "<GOAL_SCORER|ASSIST_KING|CLEAN_SHEET|ELITE_PERFORMER|WORKHORSE|COMEBACK|REDEMPTION|UNLUCKY|SOLID_PRESENCE|cup_final|title_race|return|standard>",
-        "emotion": "<celebración|determinación|orgullo|resiliencia>",
-        "headline": "<texto impactante en español o inglés ≤ 30 chars>",
-        "key_moment": "<momento clave del partido>",
-        "supporting_story": "<narrativa de apoyo 1-2 frases>",
-        "caption": "<caption para redes sociales>",
-        "hashtags": ["#HKFootball"],
-        "reasoning": "<3-5 frases explicando las decisiones de diseño>"
-      }},
-      "design": {{
-        "template": "<A|B|C>",
-        "format": "1:1",
-        "layers": {{
-          "base_color": "#1a1a2e",
-          "gradient": {{"color1": "#hex", "color2": "#hex", "direction": "135deg", "opacity": 0.75}},
-          "pattern": "hexagonal",
-          "glow_color": "#hex"
-        }},
-        "typography": {{
-          "hero_stat": {{"value": "0", "label": "STAT", "size": "96pt", "color": "#ffffff"}},
-          "secondary_stats": []
-        }},
-        "elements": {{
-          "team_logo": true,
-          "player_photo": true,
-          "radar_chart": false,
-          "match_score": true,
-          "competition_badge": true
-        }}
-      }}
-    }}
-  ]
-}}
-"""
+CARD_DESIGNER_PROMPT = _load_designer_prompt()
 
 
 # ---------------------------------------------------------------------------
@@ -213,10 +174,13 @@ class AgentState(TypedDict):
 # ---------------------------------------------------------------------------
 
 def retrieve_context(state: AgentState) -> AgentState:
-    """Node 1: Classifies match archetype and assembles context for the LLM."""
+    """Node 1: Classifies match archetype and assembles context for the LLM including photo album."""
     match_payload = state["match_payload"]
     card_type = state.get("card_type", "post-match")
     player_history = state.get("player_history") or []
+    
+    # Correctly identify player_id from payload or state
+    player_id = match_payload.get("player_id") or state.get("player_preferences", {}).get("player_id") or "unknown"
 
     if card_type == "pre-match":
         archetype = _detect_pregame_archetype(match_payload, player_history)
@@ -225,20 +189,34 @@ def retrieve_context(state: AgentState) -> AgentState:
 
     perf = (match_payload.get("player_stats") or {}).get("performance_stats", {})
 
+    # 1. Fetch Photo Album from disk
+    from utils.image_processing import get_player_album
+    album = get_player_album(player_id)
+    
+    # 2. Add Match Insights (H2H context)
+    home, away = match_payload.get("home_team"), match_payload.get("away_team")
+    match_insight = f"Historical H2H battle between {home} and {away}."
+    if match_payload.get("is_derby"):
+        match_insight = f"DERBY DAY: Maximum intensity rivalry. The city is divided between {home} and {away}."
+
     context = {
+        "player_id": player_id,
         "archetype": archetype,
         "card_type": card_type,
         "match": {
             "competition": match_payload.get("competition"),
-            "home_team": match_payload.get("home_team"),
-            "away_team": match_payload.get("away_team"),
+            "home_team": home,
+            "away_team": away,
             "score": match_payload.get("score"),
-            "date": match_payload.get("date"),
+            "date": str(match_payload.get("date")),
             "round": match_payload.get("round"),
+            "stadium": match_payload.get("stadium"),
+            "insight": match_insight,
         },
         "player_stats": perf,
         "team_colors": state.get("team_colors") or {},
         "has_player_photo": state.get("has_player_photo", False),
+        "available_photos": album, # List of {idx, original, bg_removed}
         "player_preferences": state.get("player_preferences") or {},
         "tone": state.get("tone", "pro"),
     }
@@ -259,13 +237,24 @@ def generate_proposals(state: AgentState) -> AgentState:
 
         context = state["context"]
         card_type = state.get("card_type", "post-match")
+        team_colors = context.get("team_colors") or {}
         prompt = CARD_DESIGNER_PROMPT.format(
             card_type=card_type,
             context_json=json.dumps(context, ensure_ascii=False, indent=2),
+            team_colors=json.dumps(team_colors, ensure_ascii=False)
         )
+
+        logger.info("--- CARD AGENT PROMPT DEBUG ---")
+        logger.info(f"Context: {json.dumps(context, indent=2)}")
+        logger.info(f"Team Colors: {json.dumps(team_colors)}")
+        logger.info("-------------------------------")
 
         response = llm.invoke(prompt)
         content = response.content if hasattr(response, "content") else str(response)
+        
+        logger.info("--- CARD AGENT RESPONSE DEBUG ---")
+        logger.info(content)
+        logger.info("---------------------------------")
 
         # Strip markdown fences if present
         content = re.sub(r"^```(?:json)?\s*", "", content.strip(), flags=re.IGNORECASE)
@@ -276,7 +265,7 @@ def generate_proposals(state: AgentState) -> AgentState:
         return {**state, "raw_proposals": raw_proposals, "error": None}
 
     except Exception as exc:
-        logger.error(f"generate_proposals Gemini error: {exc}")
+        logger.error(f"generate_proposals error: {exc}")
         return {**state, "raw_proposals": [], "error": str(exc)}
 
 
@@ -351,7 +340,16 @@ def validate_proposals(state_or_proposals, has_player_photo: bool = False) -> "A
                 ]
                 design["typography"] = typography
                 design["layers"] = layers
+                
+                # Preserve new fields
                 proposal["design"] = design
+                proposal["nanobana_background_prompt"] = proposal.get("nanobana_background_prompt") or ""
+                proposal["selected_photo_idx"] = proposal.get("selected_photo_idx")
+                proposal["layout_modifiers"] = proposal.get("layout_modifiers") or {}
+                
+                narrative = dict(proposal.get("narrative") or {})
+                narrative["match_insights"] = narrative.get("match_insights") or []
+                proposal["narrative"] = narrative
             else:
                 # Flat format: template/base_color/accent_color/stats at top level
                 proposal["base_color"] = fix_hex(proposal.get("base_color", _DEFAULT_DARK_COLOR))
@@ -393,14 +391,7 @@ def _deterministic_fallback(
 ):
     """
     Returns deterministic DesignBrief(s) when the LLM is unavailable.
-
-    Two call signatures:
-      _deterministic_fallback(state: dict) -> DesignBrief           [LangGraph internal use]
-      _deterministic_fallback(payload, profile, colors, card_type,
-                              has_player_photo) -> list[dict]         [test / direct use]
-
-    When called with a plain payload (not an AgentState), returns a list of 3 flat briefs.
-    When called with an AgentState dict, returns a single DesignBrief for LangGraph.
+    Now supports English output and nested team colors.
     """
     _langgraph_mode = (
         isinstance(state_or_payload, dict)
@@ -421,15 +412,21 @@ def _deterministic_fallback(
         has_photo = bool(has_player_photo)
         _card_type = card_type or "post-match"
 
-    color1 = (_team_colors.get("colour1") or _team_colors.get("primary") or "#1a6b3c")
-    color2 = (_team_colors.get("colour2") or _DEFAULT_DARK_COLOR)
+    # Support nested team colors structure
+    if "player_team" in _team_colors:
+        p_colors = _team_colors["player_team"]
+    else:
+        p_colors = _team_colors
+
+    color1 = (p_colors.get("colour1") or p_colors.get("primary") or "#1a6b3c")
+    color2 = (p_colors.get("colour2") or _DEFAULT_DARK_COLOR)
     template = "A" if has_photo else "C"
 
     perf = (match_payload.get("player_stats") or {}).get("performance_stats", {})
     flat_stats = match_payload.get("stats") or {}
     goals = int(flat_stats.get("goals") or perf.get("goals", 0) or 0)
     hero_value = str(goals)
-    hero_label = "GOL" if _card_type == "post-match" else "PARTIDO"
+    hero_label = "GOAL" if _card_type == "post-match" else "MATCH"
 
     archetype = (
         _detect_postgame_archetype(match_payload)
@@ -438,21 +435,9 @@ def _deterministic_fallback(
     )
 
     reasoning = (
-        "Esta es la propuesta de respaldo determinista. El modelo de IA no estaba disponible. "
-        f"Se usó la plantilla {template} basada en la disponibilidad de foto del jugador. "
-        f"Los colores provienen de la paleta del equipo ({color1}, {color2}). "
-        "El stat principal refleja el resultado más básico del partido."
+        "Deterministic fallback brief. IA model was unavailable. "
+        f"Used template {template} and team colors ({color1}, {color2})."
     )
-
-    # Flat brief format (for test interface and direct use)
-    _flat_brief = {
-        "template": template,
-        "base_color": _DEFAULT_DARK_COLOR,
-        "accent_color": color1,
-        "stats": [{"label": hero_label, "value": hero_value, "highlight": True}],
-        "archetype": archetype,
-        "reasoning": reasoning,
-    }
 
     home_team = match_payload.get("home_team") or "HK"
     hashtag = f"#{home_team.replace(' ', '')} #HKFootball"
@@ -461,19 +446,20 @@ def _deterministic_fallback(
         return {
             "narrative": {
                 "archetype": archetype,
-                "emotion": "determinación",
+                "emotion": "pride",
                 "headline": headline_text,
-                "key_moment": "—",
-                "supporting_story": "Propuesta básica generada de forma determinista.",
+                "match_insights": [
+                    "Match scheduled in Hong Kong Premier League.",
+                    f"Featuring {match_payload.get('home_team')} vs {match_payload.get('away_team')}.",
+                    "Stay tuned for live action!"
+                ],
+                "supporting_story": "Deterministic backup proposal.",
                 "caption": hashtag,
-                "hashtags": ["#HKFootball"],
-                "reasoning": (
-                    "Esta es la propuesta de respaldo determinista. El modelo de IA no estaba disponible. "
-                    f"Se usó la plantilla {tmpl}. "
-                    f"Los colores provienen de la paleta del equipo ({color1}, {color2}). "
-                    "El stat principal refleja el resultado más básico del partido."
-                ),
+                "hashtags": ["#HKFootball", "#Matchday"],
+                "reasoning": reasoning,
             },
+            "selected_photo_idx": 0 if has_photo else None,
+            "nanobana_background_prompt": f"Professional sports background, team colors {color1} and {color2}, cinematic stadium lights, 8k.",
             "design": {
                 "template": tmpl,
                 "format": "1:1",
@@ -500,7 +486,6 @@ def _deterministic_fallback(
                 "elements": {
                     "team_logo": True,
                     "player_photo": True,
-                    "radar_chart": False,
                     "match_score": True,
                     "competition_badge": True,
                 },
@@ -508,11 +493,10 @@ def _deterministic_fallback(
         }
 
     if not _langgraph_mode:
-        # Return 3 variants (A/B/C) for the test interface (flat format)
+        # Return 3 flat briefs for direct use
         variants = []
         for tmpl in ("A", "B", "C"):
-            v = dict(_flat_brief)
-            v["template"] = tmpl
+            v = _make_brief(tmpl, "135deg", color1, "READY TO PLAY")
             variants.append(v)
         return variants
 

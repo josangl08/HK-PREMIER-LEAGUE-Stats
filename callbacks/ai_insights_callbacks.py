@@ -16,7 +16,7 @@ from flask_login import current_user
 # Project
 from ai_models.model_registry import ModelRegistry, ModelNotFoundError
 from utils.app_context import get_hong_kong_data_manager
-from utils.ai_helpers import shap_bar_chart, umap_scatter_chart, similarity_table
+from utils.ai_helpers import shap_bar_chart, umap_scatter_chart, constellation_chart, _build_knn_edges, similarity_table, trend_chart
 from utils.chart_helpers import HKFATheme
 
 logger = logging.getLogger(__name__)
@@ -115,13 +115,18 @@ def update_clustering_panel(n_clicks, feature_lens, k):
 
     try:
         from sklearn.preprocessing import StandardScaler
-        from ai_models.clustering import fit_kmeans, fit_umap, label_archetypes, FEATURE_LENSES
+        from ai_models.clustering import fit_kmeans, fit_umap, label_archetypes, FEATURE_LENSES, apply_quality_filters
+
+        # Apply quality filters: min minutes and Bayesian smoothing for rates
+        df_filtered = apply_quality_filters(df, min_minutes=180, smooth_rates=True)
+        if df_filtered.empty:
+            return {}, _error_card("No players match the quality filters (min 180 mins).")
 
         # Select numeric features
         meta_cols = {"Player", "Season", "Team", "Position", "player_name"}
         feature_cols = [
-            c for c in df.columns
-            if c not in meta_cols and pd.api.types.is_numeric_dtype(df[c])
+            c for c in df_filtered.columns
+            if c not in meta_cols and pd.api.types.is_numeric_dtype(df_filtered[c])
         ]
 
         # Apply feature lens filter
@@ -132,24 +137,25 @@ def update_clustering_panel(n_clicks, feature_lens, k):
                 if any(kw in c.lower() for kw in lens_keywords)
             ] or feature_cols  # fallback to all if no match
 
-        X_raw = df[feature_cols].fillna(0).values
+        X_raw = df_filtered[feature_cols].fillna(0).values
         scaler = StandardScaler()
         X = scaler.fit_transform(X_raw)
 
-        player_names = df["Player"].values if "Player" in df.columns else [str(i) for i in range(len(df))]
+        player_names = df_filtered["Player"].values if "Player" in df_filtered.columns else [str(i) for i in range(len(df_filtered))]
 
         labels, kmeans_model = fit_kmeans(X, k=int(k), feature_lens=feature_lens, feature_names=feature_cols)
         umap_df, _ = fit_umap(X, player_names=list(player_names))
 
         # Add extra columns for hover
         for col in ["team", "Team", "season", "Season"]:
-            if col in df.columns:
-                umap_df[col.lower()] = df[col].values
+            if col in df_filtered.columns:
+                umap_df[col.lower()] = df_filtered[col].values
 
         archetype_labels = label_archetypes(kmeans_model, feature_cols)
-        fig = umap_scatter_chart(umap_df, cluster_labels=labels, archetype_labels=archetype_labels)
+        knn_edges = _build_knn_edges(umap_df, k=4)
+        fig = constellation_chart(umap_df, cluster_labels=labels, archetype_labels=archetype_labels, knn_edges=knn_edges)
 
-        status = f"Clustered {len(df)} players into {k} archetypes using '{feature_lens}' lens."
+        status = f"Clustered {len(df_filtered)} players into {k} archetypes using '{feature_lens}' lens (Min 180 mins + Smoothed Rates)."
         return fig, html.Span(status, style={"color": HKFATheme.TEXT_SECONDARY})
 
     except Exception as e:
@@ -163,6 +169,7 @@ def update_clustering_panel(n_clicks, feature_lens, k):
 
 @callback(
     Output("ai-predictor-result", "children"),
+    Output("ai-predictor-trend-graph", "figure"),
     Output("ai-predictor-shap-graph", "figure"),
     Input("ai-predictor-btn", "n_clicks"),
     State("ai-predictor-player-dropdown", "value"),
@@ -173,21 +180,21 @@ def update_clustering_panel(n_clicks, feature_lens, k):
 def update_predictor_panel(n_clicks, player_name, target_metric, model_type):
     """
     Runs inference for the selected player using a pre-trained model and renders
-    the predicted value and SHAP feature importance bar chart.
+    the predicted value, career trend chart, and SHAP feature importance bar chart.
     """
     if not n_clicks:
         raise PreventUpdate
 
     if not player_name or not target_metric:
-        return _info_card("Select a player and target metric."), {}
+        return _info_card("Select a player and target metric."), {}, {}
 
     df = _get_player_df()
     if df is None or df.empty:
-        return _error_card("No player data available."), {}
+        return _error_card("No player data available."), {}, {}
 
     try:
         from data.processors.ml_preprocessor import MLPreprocessor
-        from ai_models.predictor import predict, compute_shap
+        from ai_models.predictor import predict, compute_shap, predict_with_interval
 
         # Load pre-trained model + scaler from registry
         registry = ModelRegistry()
@@ -199,7 +206,7 @@ def update_predictor_panel(n_clicks, player_name, target_metric, model_type):
         except ModelNotFoundError:
             return _error_card(
                 f"Model '{model_id}' not found. Run: python scripts/train_models.py"
-            ), {}
+            ), {}, {}
 
         # Retrieve saved feature names from registry metadata
         reg_data = registry._load_registry()
@@ -209,12 +216,10 @@ def update_predictor_panel(n_clicks, player_name, target_metric, model_type):
         if not feature_cols or not isinstance(feature_cols[0], str):
             return _error_card(
                 "Feature metadata missing. Re-run: python scripts/train_models.py"
-            ), {}
+            ), {}, {}
 
         # Apply the same feature engineering pipeline that was used during training
         pp = MLPreprocessor()
-        numeric_raw = [c for c in df.columns if c in feature_cols or
-                       pd.api.types.is_numeric_dtype(df.get(c, pd.Series(dtype=float)))]
         df_eng = pp.compute_temporal_features(df, [c for c in df.columns
                                                     if pd.api.types.is_numeric_dtype(df[c])])
         df_eng = pp.compute_positional_zscores(df_eng, [c for c in df.columns
@@ -232,7 +237,7 @@ def update_predictor_panel(n_clicks, player_name, target_metric, model_type):
         # Filter to player's latest row
         player_df = df_eng[df_eng["Player"] == player_name].sort_values("Season").tail(1)
         if player_df.empty:
-            return _error_card(f"No data found for player '{player_name}'."), {}
+            return _error_card(f"No data found for player '{player_name}'."), {}, {}
 
         # Load persisted scaler or fit a fresh one
         try:
@@ -245,35 +250,128 @@ def update_predictor_panel(n_clicks, player_name, target_metric, model_type):
         X_player = player_df[available_cols].fillna(0).values
         X_player_scaled = scaler.transform(X_player)
 
-        # Predict
-        prediction = predict(model, X_player_scaled)[0]
+        # Predict with confidence interval
+        interval = predict_with_interval(model, X_player_scaled, model_id)
+        prediction = interval["prediction"]
+        lower = interval["lower"]
+        upper = interval["upper"]
+        rmse = interval["rmse"]
+
         shap_vals = compute_shap(model, X_player_scaled)
 
+        # ── Archetype context (best-effort, silent on failure) ────────────────
+        archetype_line = None
+        try:
+            from ai_models.clustering import label_archetypes, FEATURE_LENSES
+            from sklearn.preprocessing import StandardScaler as _SS
+
+            kmeans_model = registry.load("kmeans_overall_k5")
+            lens_keywords = FEATURE_LENSES.get("overall", [])
+            meta_cols_set = {"Player", "Season", "Team", "Position", "player_name"}
+            all_num_cols = [
+                c for c in df_eng.columns
+                if c not in meta_cols_set and pd.api.types.is_numeric_dtype(df_eng[c])
+            ]
+            cluster_cols = (
+                [c for c in all_num_cols if any(kw in c.lower() for kw in lens_keywords)]
+                or all_num_cols
+            )
+            X_all = df_eng[cluster_cols].fillna(0).values
+            X_all_scaled = _SS().fit_transform(X_all)
+            all_clusters = kmeans_model.predict(X_all_scaled)
+
+            player_pos_in_df = df_eng[df_eng["Player"] == player_name].index
+            if len(player_pos_in_df):
+                player_cluster = all_clusters[df_eng.index.get_loc(player_pos_in_df[-1])]
+            else:
+                player_cluster = all_clusters[df_eng.reset_index(drop=True)[df_eng["Player"] == player_name].index[-1]]
+
+            arch_labels = label_archetypes(kmeans_model, cluster_cols)
+            arch_name = arch_labels[player_cluster] if player_cluster < len(arch_labels) else f"Cluster {player_cluster}"
+
+            cluster_mask = all_clusters == player_cluster
+            cluster_df = df_eng[cluster_mask]
+            if target_metric in cluster_df.columns:
+                cluster_avg = cluster_df[target_metric].dropna().mean()
+                archetype_line = f"Plays like a '{arch_name}' — avg {target_metric} for this archetype: {cluster_avg:.1f}"
+        except Exception:
+            pass  # Silently skip if kmeans model not in registry
+
+        # ── Build result card ─────────────────────────────────────────────────
+        confidence_pct = max(0, min(100, round(100 - (rmse / max(prediction, 1)) * 100))) if prediction else 0
+        result_card_children = [
+            html.H5(f"Predicted {target_metric}", className="card-title text-muted"),
+            html.H2(
+                f"{prediction:.2f}",
+                style={"color": HKFATheme.ACCENT_GOLD, "fontWeight": "700"},
+            ),
+            html.P(
+                f"Range: {lower:.1f} – {upper:.1f}",
+                className="text-muted mb-1",
+                style={"fontSize": "0.9rem"},
+            ),
+        ]
+        if rmse > 0:
+            result_card_children.append(
+                dbc.Progress(
+                    value=confidence_pct,
+                    label=f"Confidence {confidence_pct}%",
+                    color="warning",
+                    style={"height": "16px", "marginBottom": "8px"},
+                )
+            )
+        result_card_children.append(
+            html.Small(f"{player_name} — {model_type.upper()} model", className="text-muted")
+        )
+        if archetype_line:
+            result_card_children.append(
+                html.P(archetype_line, className="text-muted mt-2 mb-0", style={"fontSize": "0.85rem"})
+            )
+
         result_card = dbc.Card(
-            dbc.CardBody([
-                html.H5(f"Predicted {target_metric}", className="card-title text-muted"),
-                html.H2(
-                    f"{prediction:.2f}",
-                    style={"color": HKFATheme.ACCENT_GOLD, "fontWeight": "700"},
-                ),
-                html.Small(
-                    f"{player_name} — {model_type.upper()} model",
-                    className="text-muted",
-                ),
-            ]),
+            dbc.CardBody(result_card_children),
             style={
                 "backgroundColor": HKFATheme.BG_TERTIARY,
                 "border": f"1px solid {HKFATheme.BORDER_COLOR}",
-                "maxWidth": "300px",
+                "maxWidth": "360px",
             },
         )
 
-        fig = shap_bar_chart(shap_vals, feature_names=available_cols, top_k=10)
-        return result_card, fig
+        # ── Trend chart ───────────────────────────────────────────────────────
+        trend_fig = {}
+        try:
+            player_history = df[df["Player"] == player_name].copy()
+            if "Season" in player_history.columns and target_metric in player_history.columns:
+                player_history = player_history.sort_values("Season")
+                seasons_hist = player_history["Season"].tolist()
+                actuals_hist = player_history[target_metric].fillna(0).tolist()
+
+                # Infer next season label
+                last_season = seasons_hist[-1] if seasons_hist else ""
+                try:
+                    parts = last_season.split("-")
+                    next_season = f"{int(parts[0]) + 1}-{int(parts[1]) + 1:02d}" if len(parts) == 2 else "Next"
+                except Exception:
+                    next_season = "Next"
+
+                trend_fig = trend_chart(
+                    seasons=seasons_hist,
+                    actuals=actuals_hist,
+                    predicted_next_season=next_season,
+                    predicted_value=prediction,
+                    lower=lower,
+                    upper=upper,
+                    metric_name=target_metric,
+                )
+        except Exception as e:
+            logger.warning(f"Could not build trend chart: {e}")
+
+        shap_fig = shap_bar_chart(shap_vals, feature_names=available_cols, top_k=10)
+        return result_card, trend_fig, shap_fig
 
     except Exception as e:
         logger.error(f"Predictor error: {e}", exc_info=True)
-        return _error_card(f"Prediction failed: {str(e)}"), {}
+        return _error_card(f"Prediction failed: {str(e)}"), {}, {}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -322,6 +420,14 @@ def update_similarity_panel(n_clicks, player_name, seasons):
         meta_cols = [c for c in ["Player", "Season", "Team"] if c in df_reset.columns]
         player_meta = df_reset[meta_cols].copy()
 
+        # Derive query player's position for position-aware filtering
+        query_position = None
+        pos_col = next((c for c in ["Position_Group", "Position"] if c in df_reset.columns), None)
+        if pos_col:
+            pos_rows = df_reset[df_reset["Player"] == player_name]
+            if not pos_rows.empty:
+                query_position = str(pos_rows.iloc[-1][pos_col])
+
         season_filter = list(seasons) if seasons else None
         results = find_similar(
             query_embedding=query_embedding,
@@ -330,12 +436,20 @@ def update_similarity_panel(n_clicks, player_name, seasons):
             k=10,
             seasons=season_filter,
             query_index=query_pos,
+            position=query_position,
         )
 
         if results.empty:
             return _info_card("No similar players found with current filters.")
 
-        return similarity_table(results)
+        position_tag = (
+            html.P(
+                [html.I(className="bi bi-funnel me-1"), f"Searching within: {query_position}"],
+                className="text-muted small mb-2",
+            )
+            if query_position else None
+        )
+        return html.Div([position_tag, similarity_table(results)] if position_tag else [similarity_table(results)])
 
     except Exception as e:
         logger.error(f"Similarity error: {e}", exc_info=True)

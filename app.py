@@ -6,9 +6,9 @@ warnings.filterwarnings("ignore", message=".*n_jobs value 1 overridden.*")
 warnings.filterwarnings("ignore", message=".*TBB failed to initialize.*")
 
 # Configure Numba threading before any import that triggers numba/umap.
-# The default 'workqueue' layer crashes under concurrent Flask threads.
-# 'omp' or 'tbb' are thread-safe alternatives; fall back to single-threaded workqueue.
-os.environ.setdefault("NUMBA_THREADING_LAYER", "omp")
+# On macOS Silicon, 'omp' and 'tbb' often fail to load. 
+# 'workqueue' is the most reliable built-in layer.
+os.environ["NUMBA_THREADING_LAYER"] = "workqueue"
 os.environ.setdefault("NUMBA_NUM_THREADS", "1")
 
 import dash

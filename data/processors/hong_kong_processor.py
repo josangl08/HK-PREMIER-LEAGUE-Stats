@@ -2,8 +2,30 @@ import pandas as pd
 import numpy as np
 from typing import Dict, Any
 import logging
+import re
+
+from data.processors.ml_preprocessor import MLPreprocessor
 
 logger = logging.getLogger(__name__)
+
+# Maps Wyscout/internal position abbreviations to human-readable full names.
+POSITION_FULL_NAMES: Dict[str, str] = {
+    'GK':   'Goalkeeper',
+    'CB':   'Centre-Back',     'RCB':  'Right Centre-Back',  'LCB':  'Left Centre-Back',
+    'RCB3': 'Right Centre-Back (3)',                          'LCB3': 'Left Centre-Back (3)',
+    'RB':   'Right Back',      'LB':   'Left Back',
+    'RWB':  'Right Wing-Back',                                'LWB':  'Left Wing-Back',
+    'DM':   'Defensive Midfielder',                           'CM':   'Central Midfielder',
+    'AM':   'Attacking Midfielder',                           'AMF':  'Attacking Midfielder',
+    'RAMF': 'Right Attacking Midfielder',                     'LAMF': 'Left Attacking Midfielder',
+    'RM':   'Right Midfielder',                               'LM':   'Left Midfielder',
+    'RW':   'Right Winger',                                   'LW':   'Left Winger',
+    'RWF':  'Right Wing-Forward',                             'LWF':  'Left Wing-Forward',
+    'CF':   'Centre Forward',
+    'ST':   'Striker',
+    'SS':   'Second Striker',
+}
+
 class HongKongDataProcessor:
     """
     Procesador específico para datos de jugadores de la Liga de Hong Kong.
@@ -94,33 +116,44 @@ class HongKongDataProcessor:
         if 'Player' not in df.columns:
             return df
         
-        # Limpiar nombres de jugadores manualmente
-        df['Player'] = df['Player'].apply(lambda x: str(x).strip() if pd.notna(x) else 'Unknown')
+        def clean_name(name):
+            if pd.isna(name): return 'Unknown'
+            n = str(name).strip()
+            # Eliminar múltiples espacios y convertir a Title Case
+            n = re.sub(r'\s+', ' ', n)
+            return n.title() if n else 'Unknown'
+            
+        df['Player'] = df['Player'].apply(clean_name)
         
         # Eliminar jugadores sin nombre válido
-        mask = (df['Player'] != 'Unknown') & (df['Player'] != '') & (df['Player'] != 'nan')
+        mask = (df['Player'] != 'Unknown') & (df['Player'] != 'Nan')
         df = df[mask].copy()
         
         return df
     
     def _process_teams(self, df: pd.DataFrame) -> pd.DataFrame:
         """Procesa información de equipos."""
-        # Buscar columna de equipo principal
+        # Buscar columna de equipo principal - Priorizamos 'Team' que viene resuelta de la DB
         team_column = None
-        if 'Team within selected timeframe' in df.columns:
-            team_column = 'Team within selected timeframe'
-        elif 'Team' in df.columns:
+        if 'Team' in df.columns:
             team_column = 'Team'
+        elif 'Team within selected timeframe' in df.columns:
+            team_column = 'Team within selected timeframe'
         
         if team_column is None:
             df['Team'] = 'Unknown Team'
             return df
         
-        # Limpiar nombres de equipos manualmente
-        df['Team'] = df[team_column].apply(lambda x: str(x).strip() if pd.notna(x) else 'Unknown Team')
+        def clean_team(name):
+            if pd.isna(name): return 'Unknown Team'
+            n = str(name).strip()
+            n = re.sub(r'\s+', ' ', n)
+            return n.title() if n else 'Unknown Team'
+            
+        df['Team'] = df[team_column].apply(clean_team)
         
-        # Eliminar equipos inválidos
-        invalid_teams = ['Unknown Team', 'nan', 'None', '']
+        # Eliminar equipos inválidos (ahora permitimos Unknown Team)
+        invalid_teams = ['Nan', 'None', '0.0', '0']
         df = df[~df['Team'].isin(invalid_teams)].copy()
         
         return df
@@ -136,88 +169,125 @@ class HongKongDataProcessor:
         # Encontrar la primera columna disponible
         position_column = next((col for col in position_columns if col in df.columns), None)
         
-        # Si no se encuentra, buscar cualquier columna con "position" en el nombre
-        if position_column is None:
-            position_column = next((col for col in df.columns if 'position' in col.lower()), None)
+        # Determinar Position_Clean inicial
+        if position_column:
+            df['Position_Clean'] = df[position_column].apply(lambda x: str(x).strip() if pd.notna(x) else 'Unknown')
+        else:
+            # Si no hay columna de posición, intentar usar la confirmada si existe
+            if 'Position_Confirmed' in df.columns:
+                df['Position_Clean'] = df['Position_Confirmed'].fillna('Unknown')
+            else:
+                df['Position_Clean'] = 'Unknown'
+
+        # Determinar Position_Group prioritariamente desde Position_Confirmed (DB/TM)
+        def _resolve_group(row) -> str:
+            # 1. Prioridad Máxima: Posición confirmada en DB (Transfermarkt/Manual)
+            confirmed = str(row.get('Position_Confirmed', '') or '').strip()
+            if confirmed and confirmed not in ('Unknown', 'nan', '0.0', ''):
+                # Si la confirmada es una lista, usamos la lógica multi-posición
+                if ',' in confirmed:
+                    return self._get_position_group(confirmed)
+                return self._get_position_group_single(confirmed)
+            
+            # 2. Segunda opción: Valor crudo del CSV de la temporada
+            raw = row.get('Position_Clean', 'Unknown')
+            return self._get_position_group(raw)
+
+        df['Position_Group'] = df.apply(_resolve_group, axis=1)
         
-        # Si no se encuentra ninguna columna de posición
-        if position_column is None:
-            df['Position_Clean'] = 'Unknown'
-            df['Position_Group'] = 'Unknown'
-            return df
-        
-        # Limpiar posiciones
-        df['Position_Clean'] = df[position_column].apply(lambda x: str(x).strip() if pd.notna(x) else 'Unknown')
-        
-        # Asignar grupo de posición
-        df['Position_Group'] = df['Position_Clean'].apply(self._get_position_group)
-        
-        # Manejar Unknown con posiciones secundarias
-        unknown_mask = df['Position_Group'] == 'Unknown'
+        # Manejar Unknown con posiciones secundarias (solo para los que siguen como Unknown)
+        unknown_mask = (df['Position_Group'] == 'Unknown') | (df['Position_Group'].isna())
         unknown_count = unknown_mask.sum()
         
-        if unknown_count > 0.3 * len(df):  # Si más del 30% son desconocidas
-            # Buscar columnas de posición secundaria por orden de prioridad
+        if unknown_count > 0:
+            # Buscar columnas de posición secundaria
             secondary_columns = ['Secondary position', 'Position_Secondary', 'Second Position']
             
             for col in secondary_columns:
                 if col in df.columns:
-                    # Actualizar solo las filas con posición desconocida
-                    df.loc[unknown_mask, 'Position_Clean'] = df.loc[unknown_mask, col].apply(
-                        lambda x: str(x).strip() if pd.notna(x) else 'Unknown'
+                    # Actualizar solo las filas que siguen siendo Unknown
+                    df.loc[unknown_mask, 'Position_Group'] = df.loc[unknown_mask, col].apply(
+                        lambda x: self._get_position_group(str(x)) if pd.notna(x) else 'Unknown'
                     )
-                    df.loc[unknown_mask, 'Position_Group'] = df.loc[unknown_mask, 'Position_Clean'].apply(
-                        self._get_position_group
-                    )
-                    break
+                    # Actualizar mask para el siguiente intento
+                    unknown_mask = (df['Position_Group'] == 'Unknown') | (df['Position_Group'].isna())
+                    if unknown_mask.sum() == 0: break
         
         return df
 
-    def _get_position_group(self, position):
-        """Determina el grupo de posición con mejor manejo de variaciones."""
+    # Priority order when a player has multiple positions: attack roles take precedence.
+    _POSITION_GROUP_PRIORITY = ['Forward', 'Winger', 'Defender', 'Midfielder', 'Goalkeeper']
+
+    # Full position-to-group mapping used by _get_position_group_single.
+    _POSITION_MAPPING = {
+        'Goalkeeper': ['GK', 'Goalkeeper', 'Goalie', 'Keeper', 'Portero', 'Porter'],
+        'Defender': ['CB', 'RCB', 'LCB', 'RCB3', 'LCB3', 'RB', 'LB', 'RWB', 'LWB',
+                     'Defender', 'Defense', 'Centre-Back', 'Right-Back', 'Left-Back',
+                     'Centre Back', 'Right Back', 'Left Back', 'Wing Back',
+                     'Central Defender', 'Lateral', 'Stopper'],
+        'Midfielder': ['DM', 'CM', 'AM', 'AMF', 'RAMF', 'LAMF', 'RM', 'LM',
+                       'Midfielder', 'Midfield', 'Central Midfielder',
+                       'Defensive Midfielder', 'Attacking Midfielder',
+                       'Central Medio', 'Medio', 'Medio Campo', 'Pivot', 'Pivote'],
+        'Winger': ['RW', 'LW', 'RWF', 'LWF',
+                   'Winger', 'Wing', 'Wide Midfielder', 'Wide Man',
+                   'Outside Midfielder', 'Extremo', 'Interior'],
+        'Forward': ['CF', 'ST', 'SS',
+                    'Forward', 'Striker', 'Centre-Forward', 'Center Forward',
+                    'Attacker', 'Second Striker', 'False 9', 'Delantero', 'Punta'],
+    }
+
+    def _get_position_group_single(self, position: str) -> str:
+        """Maps a single position token (no commas) to a position group."""
         if not position or position == 'Unknown':
             return 'Unknown'
-        
         position = str(position).strip()
-        
-        # Si hay múltiples posiciones separadas por comas, usar la primera
-        if ',' in position:
-            positions = [pos.strip() for pos in position.split(',')]
-            position = positions[0]
-        
-        # Mapeo completo de posiciones a grupos
-        position_mapping = {
-            'Goalkeeper': ['GK', 'Goalkeeper', 'Goalie', 'Keeper', 'Portero', 'Porter'],
-            'Defender': ['CB', 'RCB', 'LCB', 'RCB3', 'LCB3', 'RB', 'LB', 'RWB', 'LWB', 
-                        'Defender', 'Defense', 'Centre-Back', 'Right-Back', 'Left-Back',
-                        'Centre Back', 'Right Back', 'Left Back', 'Wing Back',
-                        'Central Defender', 'Lateral', 'Stopper'],
-            'Midfielder': ['DM', 'CM', 'AM', 'RM', 'LM', 
-                            'Midfielder', 'Midfield', 'Central Midfielder',
-                            'Defensive Midfielder', 'Attacking Midfielder',
-                            'Central Medio', 'Medio', 'Medio Campo', 'Pivot', 'Pivote'],
-            'Winger': ['RW', 'LW', 'RWF', 'LWF', 
-                    'Winger', 'Wing', 'Wide Midfielder', 'Wide Man',
-                    'Outside Midfielder', 'Extremo', 'Interior'],
-            'Forward': ['CF', 'ST', 'SS', 
-                        'Forward', 'Striker', 'Centre-Forward', 'Center Forward',
-                        'Attacker', 'Second Striker', 'False 9', 'Delantero', 'Punta']
-        }
-        
-        # Verificar en cuál grupo encaja la posición (case-insensitive)
         position_lower = position.lower()
-        for group, variations in position_mapping.items():
-            if any(variation.lower() == position_lower or 
-                variation.lower() in position_lower 
-                for variation in variations):
+
+        # CF / ST have absolute forward priority (guards against substring false-matches)
+        if position_lower in ('cf', 'st'):
+            return 'Forward'
+
+        for group, variations in self._POSITION_MAPPING.items():
+            if any(v.lower() == position_lower for v in variations):
                 return group
-        
-        # Si no hay coincidencia, verificar con el mapeo original
+
+        # Substring fallback (last resort — exact match preferred above)
+        for group, variations in self._POSITION_MAPPING.items():
+            if any(v.lower() in position_lower for v in variations):
+                return group
+
         for group, positions in self.position_groups.items():
             if position in positions:
                 return group
-        
+
         return 'Unknown'
+
+    def _get_position_group(self, position):
+        """Determina el grupo de posición con mejor manejo de variaciones.
+
+        When a player has multiple comma-separated positions, evaluates all of them
+        and returns the highest-priority group (Forward > Winger > Defender > Midfielder).
+        """
+        if not position or position == 'Unknown':
+            return 'Unknown'
+
+        position = str(position).strip()
+
+        if ',' in position:
+            tokens = [p.strip() for p in position.split(',')]
+            # Forward priority: if any token is CF or ST, player is a Forward
+            for tok in tokens:
+                if tok.upper() in ('CF', 'ST'):
+                    return 'Forward'
+            # Evaluate all tokens and return the highest-priority group found
+            found_groups = {self._get_position_group_single(tok) for tok in tokens} - {'Unknown'}
+            for group in self._POSITION_GROUP_PRIORITY:
+                if group in found_groups:
+                    return group
+            return 'Unknown'
+
+        return self._get_position_group_single(position)
     
     def _process_numbers(self, df: pd.DataFrame) -> pd.DataFrame:
         """Procesa columnas numéricas importantes."""
@@ -297,30 +367,46 @@ class HongKongDataProcessor:
         Realiza preprocesamiento específico para métricas tácticas y de eficiencia.
         Asegura que las columnas existan y tengan el tipo de dato correcto.
         """
-        logger.info("Realizando preprocesamiento táctico...")
+        logger.info("Realizando preprocesamiento táctico profesional...")
 
-        # Definir columnas esperadas y su tratamiento de nulos/tipo
-        tactical_columns = {
-            'Passes per 90': 0, 'Accurate passes, %': 0,
-            'Forward passes per 90': 0, 'Backward passes per 90': 0,
-            'Long passes per 90': 0, 'Through passes per 90': 0,
-            'Tackles per 90': 0, 'Interceptions per 90': 0,
-            'Defensive duels won, %': 0, 'Duels won, %': 0,
-            'Crosses per 90': 0, 'Shots': 0, 'xG': 0,
-            'Assists': 0, 'xA': 0, 'Shots on target, %': 0
-        }
+        # Inject composite metrics (efficiency_index, defensive_wall)
+        try:
+            ml_pre = MLPreprocessor()
+            df = ml_pre.inject_composite_metrics(df)
+            logger.info("✓ Métricas compuestas inyectadas correctamente")
+        except Exception as e:
+            logger.error(f"Error inyectando métricas compuestas: {e}")
 
-        for col, default_value in tactical_columns.items():
-            if col not in df.columns:
-                df[col] = default_value
-            else:
-                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(default_value)
-                # Asegurar que los porcentajes estén en rango 0-100
-                if '%' in col:
-                    df[col] = self._validate_metric_range(df[col])
+        # Convertir a numérico TODAS las columnas excepto las de texto conocidas
+        text_columns = ['Player', 'Team', 'Position', 'Position_Clean', 'Position_Group', 
+                        'Season', 'Age_Category', 'Birth country', 'Passport country', 
+                        'Foot', 'On loan']
+        
+        for col in df.columns:
+            if col not in text_columns and df[col].dtype == 'object':
+                df[col] = pd.to_numeric(df[col], errors='coerce')
 
-        # Columnas que pueden tener NaN y que necesitan un tratamiento específico o son de texto
-        text_columns = ['Position_Group', 'Team', 'Player']
+        # Control de rangos: Limitar TODAS las columnas que sean porcentajes a un máximo de 100
+        for col in df.columns:
+            if '%' in col or 'rate' in col.lower():
+                df[col] = self._validate_metric_range(df[col], 0, 100)
+            elif pd.api.types.is_numeric_dtype(df[col]) and col not in ['Age', 'Height', 'Weight', 'Matches played', 'Minutes played']:
+                # Ninguna métrica deportiva (pases, xg, etc) puede ser negativa
+                df[col] = self._validate_metric_range(df[col], 0, float('inf'))
+
+        # Lógica de relleno de Nulos (Inteligente)
+        # Si tiene 0 minutos jugados, NO rellenamos con ceros las métricas avanzadas, 
+        # dejamos NaN para que los modelos estadísticos y de IA no se contaminen.
+        if 'Minutes played' in df.columns:
+            played_mask = df['Minutes played'] > 0
+            
+            # Solo rellenamos con 0 a los que sí han jugado (es decir, tuvieron la oportunidad 
+            # de hacer una acción y no la hicieron)
+            for col in df.columns:
+                if pd.api.types.is_numeric_dtype(df[col]) and col not in ['Age', 'Height', 'Weight', 'Matches played', 'Minutes played']:
+                    df.loc[played_mask, col] = df.loc[played_mask, col].fillna(0)
+
+        # Tratar nulos en columnas de texto
         for col in text_columns:
             if col in df.columns:
                 df[col] = df[col].fillna('Unknown')

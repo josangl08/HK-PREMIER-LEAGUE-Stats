@@ -3,7 +3,7 @@
 
 from datetime import datetime
 from typing import Optional, List, Dict, Any
-from sqlalchemy import String, Integer, Float, Boolean, DateTime, ForeignKey, Text, JSON, Table, Column
+from sqlalchemy import String, Integer, Float, Boolean, DateTime, ForeignKey, Text, JSON, Table, Column, LargeBinary
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from flask_login import UserMixin
 
@@ -292,9 +292,10 @@ class PlayerPhoto(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     player_id: Mapped[str] = mapped_column(ForeignKey("players.id"), nullable=False)
     
-    original_path: Mapped[str] = mapped_column(String(255), nullable=False)
+    original_path: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     cutout_path: Mapped[Optional[str]] = mapped_column(String(255)) # Background removed version
-    
+    photo_data: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True) # Binary blob, served as data URI
+
     is_primary: Mapped[bool] = mapped_column(Boolean, default=False)
     upload_date: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     

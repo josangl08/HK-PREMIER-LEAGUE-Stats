@@ -5,6 +5,7 @@
 # Librerías centrales para la aplicación web y visualizaciones.
 dash[testing]==4.0.0
 dash-bootstrap-components==2.0.4
+dash-cytoscape>=1.0.0
 plotly==6.6.0
 Flask==3.0.3
 werkzeug==3.0.3

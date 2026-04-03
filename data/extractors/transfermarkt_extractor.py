@@ -1,11 +1,13 @@
-# ABOUTME: Extractor for Transfermarkt data (team injuries and player match history).
-# ABOUTME: Provides get_match_history() with competition logo download and detailed match events.
+# ABOUTME: Extractor for Transfermarkt data (team injuries, player match history, and player photos).
+# ABOUTME: Provides get_match_history(), get_player_photo_url(), fetch_and_store_player_photo() with blob storage in DB.
 
 import requests
 from bs4 import BeautifulSoup, Tag
 import pandas as pd
 import time
 import re
+import difflib
+import urllib.parse
 from datetime import datetime, timedelta
 import logging
 from typing import Dict, List, Optional, Tuple, Union, Sequence
@@ -255,3 +257,384 @@ class TransfermarktExtractor:
         else:
             s = int(season_id)
             return f"{s}-{str(s+1)[-2:]}", str(s)
+
+    def get_player_photo_url(self, tm_player_id: str) -> Optional[str]:
+        """
+        Scrapes the profile photo URL for a player from Transfermarkt.
+        Returns the image URL or None if not found.
+        """
+        url = f"{self.base_url}/player/profil/spieler/{tm_player_id}"
+        soup = self._make_request(url)
+        if soup is None:
+            return None
+        try:
+            # 1. og:image meta tag — most reliable, layout-change-proof
+            og = soup.select_one('meta[property="og:image"]')
+            if og and og.get("content"):
+                return og["content"]
+
+            # 2. Fallback: any img whose src contains the portrait CDN path
+            for img in soup.find_all("img"):
+                src = img.get("src") or img.get("data-src") or ""
+                if "portrait" in src and "transfermarkt" in src:
+                    return src
+
+            # 3. Legacy selector (kept in case TM reverts to old markup)
+            img = soup.select_one(".data-header__profile-image img")
+            if img:
+                return img.get("src") or img.get("data-src")
+        except Exception as e:
+            self.logger.debug(f"get_player_photo_url error for {tm_player_id}: {e}")
+        return None
+
+    def get_player_full_profile(self, tm_player_id: str) -> Dict:
+        """
+        Scrapes a complete player profile from Transfermarkt in a single request.
+        Returns a dictionary with keys: height, foot, birth_country, position, age, birth_date.
+        """
+        url = f"{self.base_url}/player/profil/spieler/{tm_player_id}"
+        soup = self._make_request(url)
+        if soup is None:
+            return {}
+
+        details = {
+            "height": None,
+            "foot": None,
+            "birth_country": None,
+            "position": None,
+            "age": None,
+            "birth_date": None
+        }
+
+        try:
+            # Strategy A — og:description meta tag (layout-independent).
+            # TM typically includes: "... | Position: Centre-Forward | ..."
+            og_desc = soup.find("meta", property="og:description")
+            if og_desc and og_desc.get("content"):
+                desc = og_desc["content"]
+                m = re.search(
+                    r'(?:Posici[oó]n|Position)\s*[:\|]\s*([^|\n,]+)',
+                    desc, re.IGNORECASE
+                )
+                if m:
+                    details["position"] = m.group(1).strip()
+
+            # Strategy B — info-table spans (classic TM layout, may still appear)
+            if not details["position"]:
+                for row in soup.select("span.info-table__content--label"):
+                    label = row.get_text(strip=True).lower()
+                    value_el = row.find_next_sibling("span", class_="info-table__content--bold")
+                    if not value_el:
+                        continue
+                    value = value_el.get_text(strip=True)
+
+                    if "altura" in label or "height" in label:
+                        m = re.search(r"(\d)[,.](\d{2})", value)
+                        if m:
+                            details["height"] = int(m.group(1)) * 100 + int(m.group(2))
+                    elif "pie" in label or "foot" in label:
+                        details["foot"] = value.lower()
+                    elif "nacionalidad" in label or "citizenship" in label:
+                        img = value_el.find("img")
+                        details["birth_country"] = img.get("title") if img and img.get("title") else value
+                    elif "edad" in label or "age" in label:
+                        m = re.search(r"(\d+)", value)
+                        if m:
+                            details["age"] = int(m.group(1))
+                    elif "nacimiento" in label or "date of birth" in label:
+                        details["birth_date"] = value
+                    elif "posici" in label or "position" in label:
+                        details["position"] = value
+
+            # Strategy C — data-header label/value pairs (newer TM layout)
+            if not details["position"]:
+                _bad_sibling = re.compile(
+                    r'\b(selecci[oó]n|exjugador|internac|goles|agente|altura|pie:|nacimiento|fecha)\b',
+                    re.I,
+                )
+                for label_el in soup.find_all(
+                    True,
+                    class_=re.compile(r"data-header__(label|item)", re.I)
+                ):
+                    label_text = label_el.get_text(strip=True).lower()
+                    if "posici" in label_text or "position" in label_text:
+                        # Try extracting position directly from the label (e.g. "posición:centre-forward")
+                        m_label = re.search(
+                            r'm?posici[oó]n\s*:\s*'
+                            r'([A-Za-záéíóúüñÁÉÍÓÚÜÑ][A-Za-záéíóúüñÁÉÍÓÚÜÑ\s\-]{1,30}?)'
+                            r'(?=agente|altura|pie|nacimiento|ciudad|equipo|fecha|\s*$)',
+                            label_text, re.IGNORECASE
+                        )
+                        if m_label:
+                            details["position"] = m_label.group(1).strip().title()
+                            break
+                        # Fall back to next sibling, rejecting non-position values
+                        nxt = label_el.find_next_sibling()
+                        if nxt:
+                            val = nxt.get_text(strip=True)
+                            if not _bad_sibling.search(val) and ":" not in val:
+                                details["position"] = val
+                                break
+
+            # Strategy D — search page text for "Posición: <value>" pattern.
+            # The value must end before a newline, colon, pipe, or digit.
+            # This avoids grabbing national-team or other adjacent fields.
+            if not details["position"]:
+                page_text = soup.get_text("\n")
+                m = re.search(
+                    r'(?:Posici[oó]n|Main\s+position|Position)\s*:\s*'
+                    r'([A-Za-záéíóúüñÁÉÍÓÚÜÑ][A-Za-záéíóúüñÁÉÍÓÚÜÑ\s\-]{1,30}?)'
+                    r'(?=\s*[\n\|\:\d]|$)',
+                    page_text, re.IGNORECASE
+                )
+                if m:
+                    val = m.group(1).strip()
+                    # Reject if it looks like a section header or contains suspicious words
+                    if val and not re.search(r'\b(selecci[oó]n|exjugador|internac|goles)\b', val, re.I):
+                        details["position"] = val
+
+            # Strategy E — table th/td fallback
+            if not details["position"]:
+                for th in soup.find_all(["th", "dt"]):
+                    if re.search(r'posici[oó]n|position', th.get_text(), re.I):
+                        sib = th.find_next_sibling(["td", "dd"])
+                        if sib:
+                            details["position"] = sib.get_text(strip=True)
+                            break
+
+        except Exception as e:
+            self.logger.debug(f"get_player_full_profile error for tm_id={tm_player_id}: {e}")
+
+        return details
+
+    def get_player_main_position(self, tm_player_id: str) -> Optional[str]:
+        """Legacy wrapper for backward compatibility."""
+        profile = self.get_player_full_profile(tm_player_id)
+        return profile.get("position")
+
+    def search_player_by_name(
+        self,
+        name: str,
+        team: str = "",
+        nationality: str = "",
+        birth_year: Optional[int] = None,
+        position: str = "",
+    ) -> Optional[int]:
+        """
+        Searches Transfermarkt by player name and confirms the match using a
+        composite confidence score built from up to 4 signals:
+
+          name         (weight 0.40) — SequenceMatcher ratio on player name
+          club/team    (weight 0.35) — SequenceMatcher ratio on club name
+          nationality  (weight 0.15) — exact country substring match (0 or 1)
+          birth_year   (weight 0.10) — exact year match (0 or 1)
+
+        Only signals that can actually be extracted from TM's search results
+        contribute to the score — missing signals are not penalised.
+        Returns the tm_id (int) of the best candidate with score ≥ 0.65, or None.
+
+        Abbreviated names (e.g. "A. Agbodzie") are automatically searched by
+        last name only, since TM cannot match a single initial.
+        """
+        # Handle abbreviated names: "A. Agbodzie" → search "Agbodzie"
+        search_name = name
+        abbrev_match = re.match(r'^[A-Z]\.\s+(.+)$', name)
+        if abbrev_match:
+            search_name = abbrev_match.group(1)
+            self.logger.debug(f"search_player_by_name: abbreviated name '{name}' → searching '{search_name}'")
+
+        encoded = urllib.parse.quote(search_name)
+        url = f"{self.base_url}/schnellsuche/ergebnis/schnellsuche?query={encoded}"
+        soup = self._make_request(url)
+        if soup is None:
+            return None
+
+        # Handle TM redirect to a single player profile page
+        og_url = soup.find("meta", property="og:url")
+        if og_url and og_url.get("content"):
+            m_redirect = re.search(r"/spieler/(\d+)", og_url["content"])
+            if m_redirect:
+                tm_id = int(m_redirect.group(1))
+                self.logger.info(
+                    f"search_player_by_name: '{name}' → tm_id={tm_id} (TM redirect to profile)"
+                )
+                return tm_id
+
+        # Each candidate: tm_id, player_name_text, club_text, nationality_text, birth_year_int
+        candidates: list[tuple] = []
+        seen_ids: set[int] = set()
+
+        for a_tag in soup.find_all("a", href=re.compile(r"/profil/spieler/\d+")):
+            href = a_tag.get("href", "")
+            m = re.search(r"/spieler/(\d+)", href)
+            if not m:
+                continue
+            tm_id = int(m.group(1))
+            if tm_id in seen_ids:
+                continue
+            seen_ids.add(tm_id)
+
+            player_text = a_tag.get_text(strip=True)
+            row = a_tag.find_parent("tr")
+            if not row:
+                continue
+
+            tds = row.find_all("td")
+
+            # Club: td that contains a team link <a href="/(verein|club)/...">
+            club_text = ""
+            for td in tds:
+                club_link = td.find("a", href=re.compile(r"/(verein|club)/"))
+                if club_link:
+                    club_text = club_link.get_text(strip=True)
+                    break
+                club_img = td.find("img", attrs={"class": re.compile(r"(club|vereins|logo)")})
+                if club_img and club_img.get("alt"):
+                    club_text = club_img["alt"]
+                    break
+
+            # Nationality: flag images on TM have "flagge" in their src URL.
+            # Avoid picking up player portrait imgs whose title is the player name.
+            nat_text = ""
+            for img in row.find_all("img"):
+                src = img.get("src", "") or img.get("data-src", "")
+                if "flagge" not in src:
+                    continue
+                title = img.get("title", "")
+                alt   = img.get("alt", "")
+                if title and len(title) > 1:
+                    nat_text = title
+                    break
+                if alt and len(alt) >= 2:
+                    nat_text = alt
+                    break
+
+            # Birth year: 4-digit year in the row text
+            row_text = row.get_text(" ", strip=True)
+            by_match = re.search(r"\b(19[5-9]\d|200[0-9]|201[0-9]|202[0-4])\b", row_text)
+            cand_birth_year = int(by_match.group(1)) if by_match else None
+
+            candidates.append((tm_id, player_text, club_text, nat_text, cand_birth_year))
+
+        if not candidates:
+            self.logger.info(f"search_player_by_name: no results for '{name}'")
+            return None
+
+        name_lower = name.lower().strip()
+        team_lower = team.lower().strip()
+        nat_lower  = nationality.lower().strip()
+
+        best_id: Optional[int] = None
+        best_score = 0.0
+
+        for tm_id, p_name, club, nat, by in candidates:
+            # Name score — always computed, against original name and search_name
+            p_name_lower = p_name.lower()
+            name_score = max(
+                difflib.SequenceMatcher(None, name_lower, p_name_lower).ratio(),
+                difflib.SequenceMatcher(None, search_name.lower(), p_name_lower).ratio(),
+            )
+            # If we searched by last name (abbreviated), treat a full last-name substring
+            # match as a strong hit — the first name we don't have so we can't compare it.
+            if abbrev_match:
+                last_name_lower = search_name.lower()
+                # Check exact last-name word boundary match in TM candidate
+                if re.search(r'\b' + re.escape(last_name_lower) + r'\b', p_name_lower):
+                    name_score = max(name_score, 0.85)
+
+            # Fixed weights
+            w_name = 0.40
+            w_club = 0.35
+            w_nat  = 0.15
+            w_by   = 0.10
+
+            # Only include a signal in the denominator if we could actually verify it.
+            # A hint we provided but couldn't extract from TM is NOT counted as a miss.
+            active_w     = w_name
+            active_score = w_name * name_score
+
+            if team_lower and club:        # hint provided AND extractable from TM
+                club_score = difflib.SequenceMatcher(None, team_lower, club.lower()).ratio()
+                active_w     += w_club
+                active_score += w_club * club_score
+
+            if nat_lower and nat:          # hint provided AND extractable from TM
+                nat_cand  = nat.lower()
+                nat_score = 1.0 if (nat_lower in nat_cand or nat_cand in nat_lower) else 0.0
+                active_w     += w_nat
+                active_score += w_nat * nat_score
+
+            if birth_year and by is not None:  # hint provided AND extractable from TM
+                by_score  = 1.0 if birth_year == by else 0.0
+                active_w     += w_by
+                active_score += w_by * by_score
+
+            score = active_score / active_w
+
+            self.logger.debug(
+                f"  candidate tm_id={tm_id} name='{p_name}' club='{club}' nat='{nat}' by={by} "
+                f"→ score={score:.3f} (name={name_score:.2f} active_w={active_w:.2f})"
+            )
+
+            if score > best_score:
+                best_score = score
+                best_id = tm_id
+
+        CONFIDENCE_THRESHOLD = 0.65
+        if best_id and best_score >= CONFIDENCE_THRESHOLD:
+            self.logger.info(
+                f"search_player_by_name: '{name}' → tm_id={best_id} (score={best_score:.3f})"
+            )
+            return best_id
+
+        self.logger.info(
+            f"search_player_by_name: no confident match for '{name}' "
+            f"(best score={best_score:.3f} < {CONFIDENCE_THRESHOLD})"
+        )
+        return None
+
+    def fetch_and_store_player_photo(self, player_id: str, tm_player_id: str, session) -> bool:
+        """
+        Descarga la foto de perfil de Transfermarkt y la almacena como BLOB en la BD.
+        Crea o actualiza el registro PlayerPhoto con is_primary=True.
+        No escribe ningún archivo en disco.
+        Devuelve True si la foto se guardó correctamente, False en caso contrario.
+        """
+        from sqlalchemy import select
+        from models.db_models import PlayerPhoto
+
+        photo_url = self.get_player_photo_url(tm_player_id)
+        if not photo_url:
+            self.logger.warning(f"fetch_and_store_player_photo: no URL for tm_id={tm_player_id}")
+            return False
+
+        try:
+            resp = requests.get(photo_url, headers=self.headers, timeout=15)
+            resp.raise_for_status()
+            photo_bytes = resp.content
+        except Exception as e:
+            self.logger.warning(f"fetch_and_store_player_photo: download failed for {player_id}: {e}")
+            return False
+
+        try:
+            stmt = select(PlayerPhoto).where(
+                PlayerPhoto.player_id == player_id,
+                PlayerPhoto.is_primary == True,
+            )
+            record = session.execute(stmt).scalars().first()
+            if record:
+                record.photo_data = photo_bytes
+            else:
+                record = PlayerPhoto(
+                    player_id=player_id,
+                    photo_data=photo_bytes,
+                    is_primary=True,
+                )
+                session.add(record)
+            session.commit()
+            self.logger.info(f"fetch_and_store_player_photo: blob guardado para {player_id}")
+            return True
+        except Exception as e:
+            session.rollback()
+            self.logger.error(f"fetch_and_store_player_photo: DB error for {player_id}: {e}")
+            return False

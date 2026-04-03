@@ -1,5 +1,5 @@
 # ABOUTME: Helper functions for rendering Stage scenarios, AI widgets, and image gallery (Feature G).
-# ABOUTME: Dispatches rendering for post-match, pre-match, career-insights, and Action Node gallery views.
+# ABOUTME: Renders player dashboard (default), post-match, pre-match, career-insights, and Action Node gallery views.
 
 import logging
 import os
@@ -8,19 +8,70 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+import plotly.express as px
 from dash import html, dcc
 import dash_bootstrap_components as dbc
 from typing import Dict, List, Any, Optional
 
 from utils.app_context import get_hong_kong_data_manager
 from utils.chart_helpers import apply_hkfa_theme, glass_figure_layout, HKFATheme
-from utils.ai_helpers import umap_scatter_chart
+import dash_cytoscape as cyto
+from utils.ai_helpers import umap_scatter_chart, constellation_chart, _build_knn_edges
+from data.processors.hong_kong_processor import POSITION_FULL_NAMES
+from utils.competition_helpers import get_competition_logo, normalize_competition
 
 # Numba/UMAP is not thread-safe with the default workqueue layer.
 # This lock serializes concurrent calls to fit_umap across Flask threads.
 _umap_lock = threading.Lock()
 
 logger = logging.getLogger(__name__)
+
+# Hex color palettes per competition — sourced from official branding
+# Sync with player_portal_callbacks.py
+_COMPETITION_COLOR_MAP = {
+    "HK Premier League": ["#ac0c34", "#1c1c1c", "#b40c34"],
+    "Sapling Cup": ["#153465", "#c1cf31", "#78ac46"],
+    "Senior Shield": ["#050505", "#b8b8b8", "#444444"],
+    "HKFA Cup": ["#bb9d5e", "#bcbcbc", "#bcbcc4"],
+    "AFC Cup": ["#c6bcb6", "#318cd6", "#191c1a", "#61af69", "#eb8b3e"],
+    "AFC Champions League Two": ["#111112", "#cec9c1", "#218ec2", "#f7a240", "#959b9e"],
+    "AFC Champions League": ["#111112", "#cec9c1", "#218ec2", "#f7a240", "#959b9e"],
+}
+
+def _normalize_comp(raw: str) -> str:
+    """Normalize a competition name using central helper."""
+    return normalize_competition(raw)
+
+def _competition_color(competition: str) -> str:
+    """Return primary hex color for a competition name."""
+    palette = _COMPETITION_COLOR_MAP.get(_normalize_comp(competition), ["#0d6efd"])
+    return palette[0]
+
+def _comp_badge(competition: str) -> "html.Span | None":
+    """Return a styled Span badge with the competition name."""
+    comp = _normalize_comp(competition)
+    if not comp:
+        return None
+    bg_color = _competition_color(comp)
+    text_color = "#ffffff"
+    light_bgs = [
+        "#cec9c1", "#bcbcbc", "#d1dee6", "#ededec", "#e1e3e5", 
+        "#c6bcb6", "#bb9d5e", "#d0d0d5", "#f7e4e7"
+    ]
+    if bg_color.lower() in [c.lower() for c in light_bgs]:
+        text_color = "#18181a"
+
+    return html.Span(
+        comp,
+        className="small px-2 py-0 rounded-1 fw-semibold",
+        style={
+            "backgroundColor": bg_color,
+            "color": text_color,
+            "fontSize": "0.7rem",
+            "display": "inline-block",
+            "lineHeight": "1.4",
+        }
+    )
 
 # Metrics displayed in the projector per position group.
 # Keys match the Position_Group values from the processed DataFrame.
@@ -32,8 +83,63 @@ POSITION_METRICS: Dict[str, List[str]] = {
     "Goalkeeper": ["Save rate, %", "Clean sheets", "Prevented goals per 90", "xG against per 90"],
 }
 
+# Extra composite metrics to show as a 5th bar when available.
+COMPOSITE_METRICS: Dict[str, str] = {
+    "Forward": "efficiency_index",
+    "Winger": "efficiency_index",
+    "Midfielder": "efficiency_index",
+    "Defender": "defensive_wall"
+}
+
+# General metrics added to the radar on top of POSITION_METRICS for a fuller player picture.
+# These must be present in PercentileRankingSystem.key_metrics to have percentile data.
+SUPPLEMENTAL_RADAR_METRICS: Dict[str, List[str]] = {
+    "Forward":    ["Passes per 90", "Duels won, %"],
+    "Winger":     ["Defensive duels won, %", "Passes per 90"],
+    "Midfielder": ["Interceptions per 90", "Defensive duels won, %"],
+    "Defender":   ["Passes per 90", "xG"],
+    "Goalkeeper": [],
+}
+
+# Top-3 metrics shown as active lines in the multi-metric Career Arc chart.
+# All other metrics in CAREER_ARC_ALL_METRICS are rendered as "legendonly".
+TOP3_CAREER_METRICS: Dict[str, List[str]] = {
+    "Forward":    ["Goals", "xG", "Assists"],
+    "Winger":     ["Goals", "Assists", "Successful dribbles, %"],
+    "Midfielder": ["Assists", "xA", "Accurate passes, %"],
+    "Defender":   ["PAdj interceptions per 90", "Defensive duels won, %", "Aerial duels won, %"],
+    "Goalkeeper": ["Prevented goals", "Save rate, %", "Clean sheets"],
+}
+
+# Full ordered metric list for the Career Arc multi-line chart (5-10 metrics).
+CAREER_ARC_ALL_METRICS: Dict[str, List[str]] = {
+    "Forward":    ["Goals", "xG", "Assists", "xA", "Shots on target, %", "Goal conversion, %", "Minutes played"],
+    "Winger":     ["Goals", "Assists", "xA", "Successful dribbles, %", "Crosses per 90", "Minutes played"],
+    "Midfielder": ["Assists", "xA", "Accurate passes, %", "Key passes per 90", "Goals", "Minutes played"],
+    "Defender":   ["PAdj interceptions per 90", "Defensive duels won, %", "Aerial duels won, %", "Shots blocked per 90", "Minutes played"],
+    "Goalkeeper": ["Prevented goals", "Save rate, %", "Clean sheets", "xG against per 90", "Minutes played"],
+}
+
+
+def get_career_arc_visibility(metric_name: str, pos_group: str) -> Any:
+    """
+    Returns Plotly visibility value for a Career Arc trace.
+    Top-3 positional metrics → True (visible); all others → 'legendonly'.
+    Used by _build_career_arc to set trace visibility without manual toggling.
+    """
+    top3 = TOP3_CAREER_METRICS.get(pos_group, [])
+    return True if metric_name in top3 else "legendonly"
+
+
 _CURRENT_SEASON_FALLBACK = "2025-26"
 _CARD_CACHE_DIR = Path("data/cache/cards")
+
+
+def _hex_to_rgb(hex_color: str) -> str:
+    """Converts '#RRGGBB' to 'R, G, B' string for rgba() CSS usage."""
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"{r}, {g}, {b}"
 
 
 def _get_current_season() -> str:
@@ -45,6 +151,18 @@ def _get_current_season() -> str:
 
 
 _PLAYER_CARDS_ROOT = Path("data/player_cards")
+
+
+def _resolve_team_logo(team_name: str) -> Optional[str]:
+    """Busca logo en assets/team_logos/ por nombre normalizado."""
+    if not team_name:
+        return None
+    normalized = team_name.lower().replace(" ", "_").replace("-", "_")
+    for ext in ("png", "svg"):
+        candidate = Path(f"assets/team_logos/{normalized}.{ext}")
+        if candidate.exists():
+            return str(candidate)
+    return None
 
 
 def get_cached_image_path(milestone_id: str, player_id: str = "") -> Optional[str]:
@@ -123,13 +241,634 @@ def _infer_position_group(position: str) -> str:
     p = position.upper()
     if "GK" in p:
         return "Goalkeeper"
-    if any(x in p for x in ("CF", "RWF", "LWF")):
+    # CF (Center Forward) has absolute priority
+    if "CF" in p:
         return "Forward"
-    if any(x in p for x in ("RW", "LW", "RWF", "LWF", "RAMF", "LAMF")):
+    if any(x in p for x in ("RWF", "LWF")):
+        return "Forward"
+    if any(x in p for x in ("RW", "LW", "RAMF", "LAMF", "SS")):
         return "Winger"
     if any(x in p for x in ("CB", "RCB", "LCB", "RB", "LB", "RWB", "LWB")):
         return "Defender"
     return "Midfielder"
+
+_METRIC_TO_ARCHETYPE: Dict[str, str] = {
+    "Goals": "Lethal Finisher",
+    "xG": "Clinical Striker",
+    "Goal conversion, %": "Efficient Finisher",
+    "Shots on target, %": "Precise Shooter",
+    "Assists": "Creative Force",
+    "Key passes per 90": "Playmaker",
+    "Accurate passes, %": "Metronome",
+    "xA": "Chance Creator",
+    "Dribbles per 90": "Tricky Dribbler",
+    "Crosses per 90": "Wide Threat",
+    "Interceptions per 90": "Ball Winner",
+    "Defensive duels won, %": "Defensive Wall",
+    "Aerial duels won, %": "Aerial Threat",
+    "Shots blocked per 90": "Shot Blocker",
+    "Save rate, %": "Shot Stopper",
+    "Clean sheets": "Reliable Keeper",
+    "Prevented goals per 90": "Last Line",
+}
+
+
+def _fetch_player_season_history(player_name: str) -> pd.DataFrame:
+    """
+    Queries PlayerSeasonStat across all seasons for a player directly from SQL.
+    Returns a DataFrame sorted ascending by season_id with core + advanced metrics.
+    Never modifies the DataManager state.
+    """
+    try:
+        from sqlalchemy import select
+        from models.db_models import Player, PlayerSeasonStat
+        from utils.db_engine import SessionFactory
+
+        session = SessionFactory()
+        try:
+            stmt = (
+                select(PlayerSeasonStat, Player.name)
+                .join(Player, PlayerSeasonStat.player_id == Player.id)
+                .where(Player.name == player_name)
+                .order_by(PlayerSeasonStat.season_id)
+            )
+            results = session.execute(stmt).all()
+            rows = []
+            for stat_obj, _name in results:
+                row = {
+                    "Season": stat_obj.season_id,
+                    "Goals": stat_obj.goals or 0,
+                    "Assists": stat_obj.assists or 0,
+                    "Minutes played": stat_obj.minutes_played or 0,
+                    "Matches played": stat_obj.matches_played or 0,
+                    "Yellow cards": stat_obj.yellow_cards or 0,
+                    "Red cards": stat_obj.red_cards or 0,
+                }
+                if stat_obj.advanced_stats:
+                    row.update(stat_obj.advanced_stats)
+                    # Normalize key aliases so downstream code has consistent names
+                    # regardless of Wyscout API version casing variations.
+                    _STAT_ALIASES = {
+                        "xg": "xG", "xG_per_90": "xG", "expected_goals": "xG",
+                        "xa": "xA", "xA_per_90": "xA", "expected_assists": "xA",
+                        "padj_interceptions_per_90": "PAdj interceptions per 90",
+                        # Wyscout stores PAdj Interceptions without "per 90" suffix
+                        "PAdj Interceptions": "PAdj interceptions per 90",
+                        "progressive_runs_per_90": "Progressive runs per 90",
+                        "successful_dribbles_pct": "Successful dribbles, %",
+                        "save_pct": "Save rate, %", "save_rate": "Save rate, %",
+                        "xclean_sheets": "xClean sheets", "xcleansheeets": "xClean sheets",
+                    }
+                    for src, dest in _STAT_ALIASES.items():
+                        if src in row and dest not in row:
+                            row[dest] = row[src]
+                    # Compute Prevented goals for GKs when not already present
+                    if "Prevented goals" not in row:
+                        xg_against = row.get("xG against", row.get("xg_against", 0)) or 0
+                        goals_conceded = row.get("Goals conceded", row.get("goals_conceded", 0)) or 0
+                        if xg_against or goals_conceded:
+                            row["Prevented goals"] = round(float(xg_against) - float(goals_conceded), 2)
+                rows.append(row)
+            df = pd.DataFrame(rows) if rows else pd.DataFrame()
+            # Sort by season string ascending (e.g. "2018-19" < "2020-21")
+            if not df.empty and "Season" in df.columns:
+                df = df.sort_values("Season").reset_index(drop=True)
+            return df
+        finally:
+            session.close()
+    except Exception as e:
+        logger.warning(f"_fetch_player_season_history error for '{player_name}': {e}")
+        return pd.DataFrame()
+
+
+def _get_archetype_label(player_name: str, pos_group: str, dm) -> Optional[str]:
+    """
+    Returns a human-readable archetype label for a player based on which position
+    metric they outperform the league average most.
+    Falls back to '<Position> Specialist' when data is insufficient.
+    """
+    try:
+        df = dm.processed_data
+        if df is None or df.empty:
+            return None
+        player_row = df[df["Player"] == player_name]
+        if player_row.empty:
+            return None
+
+        pos_df = (
+            df[df["Position_Group"] == pos_group]
+            if "Position_Group" in df.columns
+            else df
+        )
+        metrics = POSITION_METRICS.get(pos_group, [])
+
+        best_metric = None
+        best_percentile = -1.0
+        for m in metrics:
+            if m not in df.columns:
+                continue
+            player_val = float(player_row.iloc[0].get(m) or 0)
+            league_vals = pos_df[m].dropna()
+            if len(league_vals) < 2:
+                continue
+            pct = float((league_vals < player_val).mean() * 100)
+            if pct > best_percentile:
+                best_percentile = pct
+                best_metric = m
+
+        if best_metric and best_percentile > 40:
+            return _METRIC_TO_ARCHETYPE.get(best_metric, f"{pos_group} Specialist")
+        return f"{pos_group} Specialist"
+    except Exception as e:
+        logger.debug(f"_get_archetype_label error: {e}")
+        return None
+
+
+_CLUSTER_PALETTE = [
+    "#00b4d8", "#06d6a0", "#ffb703", "#e63946", "#a8dadc",
+    "#8338ec", "#fb8500", "#3a86ff", "#ff006e", "#43aa8b",
+]
+
+
+_ARCHETYPE_STYLE = {
+    # (archetype_keyword, position_group) -> style sentence
+    ("creative",  "Forward"):    "As a forward, his creative output adds a rare distributional layer to his attacking play.",
+    ("creative",  "Midfielder"): "As a midfielder, his passing vision and precision make him the team's primary playmaker.",
+    ("creative",  "Winger"):     "As a winger, he combines delivery quality with smart movement to unlock defences.",
+    ("creative",  "Defender"):   "As a defender, his ball-playing ability allows him to initiate attacks from the back.",
+    ("maestro",   "Forward"):    "As a forward, his creative output adds a rare distributional layer to his attacking play.",
+    ("maestro",   "Midfielder"): "As a midfielder, his passing vision and precision make him the team's primary playmaker.",
+    ("maestro",   "Winger"):     "As a winger, he combines delivery quality with smart movement to unlock defences.",
+    ("maestro",   "Defender"):   "As a defender, his ball-playing ability allows him to initiate attacks from the back.",
+    ("striker",   "Forward"):    "As a forward, his clinical finishing and movement into scoring positions define his threat.",
+    ("striker",   "Winger"):     "As a winger, his cutting edge and direct runs make him a constant scoring danger.",
+    ("forward",   "Forward"):    "As a forward, his goal output and positional instinct give his team a reliable focal point.",
+    ("forward",   "Midfielder"): "As a midfielder, his late runs and finishing add a decisive dimension to his game.",
+    ("defender",  "Defender"):   "As a defender, he reads the game early, wins duels, and cuts out danger before it develops.",
+    ("defender",  "Midfielder"): "As a midfielder, his defensive awareness protects the team and disrupts opposition build-up.",
+    ("physical",  "Defender"):   "As a defender, his strength and aerial power make him dominant in defensive duels.",
+    ("physical",  "Forward"):    "As a forward, his physicality wins knock-downs and stretches opposition defensive lines.",
+    ("physical",  "Midfielder"): "As a midfielder, his power helps him win possession and drive forward through pressure.",
+    ("engine",    "Midfielder"): "As a midfielder, his relentless work rate links every line and covers ground continuously.",
+    ("engine",    "Winger"):     "As a winger, his energy and pressing off the ball create turnovers high up the pitch.",
+    ("winger",    "Winger"):     "As a winger, he beats defenders with pace and dribbling before delivering into danger areas.",
+    ("winger",    "Forward"):    "As a forward, his wide movement and dribbling create space and stretch defensive blocks.",
+    ("goalkeep",  "Goalkeeper"): "As a goalkeeper, his distribution and shot-stopping make him a key starting point for attacks.",
+}
+
+
+def _build_archetype_bio(
+    player_name: str,
+    cluster_label: str,
+    pos_group: str,
+    trait_pct_pairs: list,  # [(clean_trait_name, pct_label), ...]
+) -> str:
+    """Generates a player-specific 2-sentence archetype description."""
+    first_name = player_name.split()[0] if player_name else "This player"
+
+    # Sentence 1: qualifying traits
+    if len(trait_pct_pairs) >= 2:
+        t1, p1 = trait_pct_pairs[0]
+        t2, p2 = trait_pct_pairs[1]
+        sent1 = f"{first_name} qualifies as a {cluster_label} through his {t1} ({p1}) and {t2} ({p2})."
+    elif len(trait_pct_pairs) == 1:
+        t1, p1 = trait_pct_pairs[0]
+        sent1 = f"{first_name} qualifies as a {cluster_label} through his elite {t1} ({p1})."
+    else:
+        sent1 = f"{first_name} is classified as a {cluster_label}."
+
+    # Sentence 2: positional style
+    label_lower = cluster_label.lower()
+    sent2 = ""
+    for (kw, pos), style in _ARCHETYPE_STYLE.items():
+        if kw in label_lower and pos_group.lower().startswith(pos.lower()):
+            sent2 = style
+            break
+    if not sent2:
+        # Generic fallback by position
+        _pos_fallback = {
+            "Forward":    "His standout metrics make him one of the most distinctive attackers in HKPL.",
+            "Midfielder": "His standout metrics make him one of the most distinctive midfielders in HKPL.",
+            "Defender":   "His standout metrics make him one of the most distinctive defenders in HKPL.",
+            "Winger":     "His standout metrics make him one of the most distinctive wide players in HKPL.",
+            "Goalkeeper": "His standout metrics make him one of the most distinctive keepers in HKPL.",
+        }
+        sent2 = _pos_fallback.get(pos_group, "His standout metrics set him apart across the HKPL.")
+
+    return f"{sent1} {sent2}"
+
+
+def _build_cluster_dna(data: Dict) -> html.Div:
+    """§2 Cluster DNA: K-Means cluster label, HKPL % share, DNA mini-bars vs. centroid."""
+    from scipy.stats import norm as _norm
+
+    cluster_id    = data.get("cluster_id")
+    cluster_label = data.get("cluster_label")
+    cluster_size  = data.get("cluster_size_pct")
+    centroid      = data.get("cluster_centroid") or {}
+    player_vec    = data.get("player_scaled_vec") or {}
+    pos_group     = data.get("pos_group") or ""
+    player_name   = data.get("player_name") or ""
+    archetype     = data.get("archetype") or pos_group or "Player"
+
+    # Gold used for the avg marker — contrasts well against dark backgrounds
+    AVG_MARKER_COLOR = HKFATheme.ACCENT_GOLD
+
+    header = html.H6([
+        html.I(className="bi bi-hexagon-fill me-2"),
+        html.Span("Tactical DNA", className="animate-glass-draw"),
+    ], className="mb-2 fw-semibold", style={"color": "var(--accent-cyan, #00d4ff)"})
+
+    # ── Fallback to legacy badge when K-Means not available ───────────────
+    if cluster_id is None:
+        pos_icons = {
+            "Forward": "bi-lightning-charge-fill", "Winger": "bi-wind",
+            "Midfielder": "bi-shuffle", "Defender": "bi-shield-fill",
+            "Goalkeeper": "bi-bullseye",
+        }
+        fallback_badge = html.Span([
+            html.I(className=f"bi {pos_icons.get(pos_group, 'bi-person-fill')} me-1",
+                   style={"color": HKFATheme.ACCENT_GOLD, "fontSize": "0.75rem"}),
+            html.Span(archetype, style={"color": HKFATheme.ACCENT_GOLD, "fontWeight": "700", "fontSize": "0.75rem"}),
+        ], style={
+            "display": "inline-flex", "alignItems": "center",
+            "padding": "2px 10px", "borderRadius": "12px",
+            "background": f"rgba({_hex_to_rgb(HKFATheme.ACCENT_GOLD)}, 0.1)",
+            "border": f"1px solid rgba({_hex_to_rgb(HKFATheme.ACCENT_GOLD)}, 0.35)",
+        })
+        return html.Div([header, fallback_badge])
+
+    cluster_color = _CLUSTER_PALETTE[cluster_id % len(_CLUSTER_PALETTE)]
+
+    # ── Pre-compute percentile labels (needed for description + bars) ─────
+    def _pct_label(p_val):
+        norm_pct = _norm.cdf(p_val) * 100
+        if p_val > 0:
+            return f"Top {max(1, round(100 - norm_pct))}%", cluster_color
+        return f"Btm {max(1, round(norm_pct))}%", HKFATheme.TEXT_SECONDARY
+
+    def _clean_trait(name):
+        return name.split(",")[0].split(" per")[0].replace("Successful ", "").strip()
+
+    trait_pct_pairs = [
+        (_clean_trait(t), _pct_label(player_vec[t])[0])
+        for t in list(centroid.keys())[:2]
+        if t in player_vec
+    ]
+
+    # ── Archetype description: player-specific ────────────────────────────
+    description = _build_archetype_bio(player_name, cluster_label, pos_group, trait_pct_pairs)
+
+    label_row = html.Div([
+        # Left: archetype badge
+        html.Div([
+            html.Span("⬡", style={"color": cluster_color, "marginRight": "6px", "fontSize": "1rem"}),
+            html.Span(cluster_label, style={"fontWeight": "700", "fontSize": "0.95rem", "color": HKFATheme.TEXT_PRIMARY, "whiteSpace": "nowrap"}),
+        ], style={"display": "flex", "alignItems": "center", "flexShrink": "0"}),
+        # Right: title + description block
+        html.Div([
+            html.Div("Archetype Profile", style={
+                "fontSize": "0.6rem", "fontWeight": "700", "letterSpacing": "0.08em",
+                "textTransform": "uppercase", "color": cluster_color,
+                "marginBottom": "3px", "textAlign": "right",
+            }),
+            html.Span(description, style={
+                "fontSize": "0.7rem", "color": HKFATheme.TEXT_SECONDARY,
+                "fontStyle": "italic", "lineHeight": "1.35",
+                "display": "block", "textAlign": "right",
+            }),
+        ], style={"maxWidth": "55%", "paddingLeft": "10px"}),
+    ], style={"display": "flex", "justifyContent": "space-between", "alignItems": "flex-start", "marginBottom": "4px"})
+
+    share_text = html.Div(
+        f"{cluster_size:.1f}% of HKPL players",
+        style={"fontSize": "0.75rem", "color": HKFATheme.TEXT_SECONDARY, "marginBottom": "14px", "marginLeft": "22px"},
+    )
+
+    # ── DNA Traits: bar on top, avg marker crossing bar, text below ───────
+    dna_rows = []
+    if centroid and player_vec:
+        try:
+            for t in list(centroid.keys()):
+                c_val = centroid[t]
+                p_val = player_vec[t]
+
+                p_pct = max(5, min(95, (p_val + 2) / 4 * 100))
+                c_pct = max(5, min(95, (c_val + 2) / 4 * 100))
+
+                pct_label, label_color = _pct_label(p_val)
+                trait_label = _clean_trait(t)
+
+                dna_rows.append(html.Div([
+                    # Trait name + percentile
+                    html.Div([
+                        html.Span(trait_label, style={"fontSize": "0.68rem", "color": HKFATheme.TEXT_SECONDARY, "flex": "1"}),
+                        html.Span(pct_label, style={"fontSize": "0.65rem", "fontWeight": "700", "color": label_color}),
+                    ], style={"display": "flex", "justifyContent": "space-between", "marginBottom": "3px"}),
+
+                    # Bar track + player fill + avg marker crossing through bar
+                    html.Div(style={
+                        "position": "relative",
+                        "height": "4px",
+                        "background": "rgba(255,255,255,0.07)",
+                        "borderRadius": "2px",
+                    }, children=[
+                        # Player fill
+                        html.Div(style={
+                            "height": "100%", "width": f"{p_pct}%",
+                            "background": cluster_color, "borderRadius": "2px",
+                            "boxShadow": f"0 0 8px {cluster_color}66",
+                        }),
+                        # Avg marker — crosses above and below the bar
+                        html.Div(style={
+                            "position": "absolute",
+                            "left": f"{c_pct}%", "top": "-4px",
+                            "transform": "translateX(-50%)",
+                            "height": "12px", "width": "2px",
+                            "background": AVG_MARKER_COLOR,
+                            "boxShadow": f"0 0 5px {AVG_MARKER_COLOR}99",
+                            "borderRadius": "1px",
+                            "zIndex": "2",
+                        }),
+                    ]),
+
+                    # "avg" label below bar, aligned with the marker
+                    html.Div(style={"position": "relative", "height": "14px"}, children=[
+                        html.Span("avg", style={
+                            "position": "absolute",
+                            "left": f"{c_pct}%",
+                            "top": "2px",
+                            "transform": "translateX(-50%)",
+                            "fontSize": "0.48rem",
+                            "color": AVG_MARKER_COLOR,
+                            "letterSpacing": "0.04em",
+                            "fontWeight": "600",
+                        }),
+                    ]),
+                ], style={"marginBottom": "6px"}))
+        except Exception as e:
+            logger.warning(f"_build_cluster_dna chart error: {e}")
+
+    return html.Div([
+        header,
+        label_row,
+        share_text,
+        html.Div("Core Identity Traits", style={
+            "fontSize": "0.6rem", "color": HKFATheme.TEXT_TERTIARY,
+            "textTransform": "uppercase", "letterSpacing": "0.08em", "marginBottom": "8px"
+        }),
+        html.Div(dna_rows, style={"padding": "0 4px"}),
+    ])
+
+
+def _build_career_cluster_evolution(data: Dict) -> html.Div:
+    """§5 Career Cluster Evolution: horizontal timeline of K-Means cluster per season."""
+    history_df = data.get("history_df", pd.DataFrame())
+
+    if history_df.empty or len(history_df) < 2:
+        return html.P("Evolución disponible a partir de 2 temporadas", className="text-muted small")
+
+    try:
+        from ai_models.model_registry import ModelRegistry
+        from ai_models.clustering import label_archetypes
+
+        km = ModelRegistry().load("kmeans_overall_k5")
+        if km is None:
+            return html.Span()
+
+        dm_e = get_hong_kong_data_manager()
+        df_e = dm_e.processed_data
+        if df_e is None or df_e.empty:
+            return html.Span()
+
+        meta_cols_e = {"Player", "Season", "Team", "Position"}
+        feature_cols_e = [
+            c for c in df_e.columns
+            if c not in meta_cols_e and pd.api.types.is_numeric_dtype(df_e[c])
+        ]
+        archetype_labels_e = label_archetypes(km, feature_cols_e)
+
+        timeline_items = []
+        for _, row in history_df.iterrows():
+            season = row.get("Season", "?")
+            # Build vector from history row using matching feature columns
+            feat_vals = [float(row.get(c, 0) or 0) for c in feature_cols_e]
+            vector = np.array(feat_vals).reshape(1, -1)
+            cid = int(km.predict(vector)[0])
+            clabel = archetype_labels_e[cid] if cid < len(archetype_labels_e) else f"Cluster {cid}"
+            color = _CLUSTER_PALETTE[cid % len(_CLUSTER_PALETTE)]
+
+            timeline_items.append(
+                dbc.Badge(
+                    [html.Span(str(season), style={"fontSize": "0.6rem", "display": "block",
+                                                    "opacity": "0.8"}),
+                     html.Span(clabel, style={"fontSize": "0.68rem", "fontWeight": "600"})],
+                    style={"backgroundColor": color, "color": "#fff", "padding": "4px 8px",
+                           "borderRadius": "8px", "whiteSpace": "nowrap"},
+                )
+            )
+
+        # Interleave arrows
+        items_with_arrows = []
+        for i, item in enumerate(timeline_items):
+            items_with_arrows.append(item)
+            if i < len(timeline_items) - 1:
+                items_with_arrows.append(
+                    html.Span("→", style={"color": HKFATheme.TEXT_SECONDARY,
+                                          "margin": "0 4px", "alignSelf": "center", "fontSize": "0.75rem"})
+                )
+
+        return html.Div([
+            html.Div("Cluster evolution", style={
+                "fontSize": "0.65rem", "color": HKFATheme.TEXT_SECONDARY,
+                "textTransform": "uppercase", "letterSpacing": "0.04em", "marginBottom": "6px",
+            }),
+            html.Div(items_with_arrows, style={
+                "display": "flex", "alignItems": "center", "flexWrap": "wrap", "gap": "4px",
+            }),
+        ])
+
+    except Exception as e:
+        logger.debug(f"_build_career_cluster_evolution error: {e}")
+        return html.Span()
+
+
+def _generate_career_insight(
+    history_df: pd.DataFrame,
+    primary_metric: str,
+    player_name: str,
+    pos_group: str = "",
+    form_trend: Optional[Dict] = None,
+    transferability: Optional[Dict] = None,
+) -> Optional[str]:
+    """
+    Returns a tactical insight about a player's career trajectory.
+
+    Attempts a Gemini API call that synthesises LSTM form data and TabPFN
+    transferability scores into a 2-sentence scout-level report.
+    Falls back to the original template-based approach when the API is
+    unavailable or the API key is not configured.
+
+    Args:
+        history_df:       Multi-season history DataFrame.
+        primary_metric:   Key metric to highlight (position-specific).
+        player_name:      Player display name.
+        pos_group:        Position group for contextual prompting.
+        form_trend:       Output of ``get_form_trend`` (optional).
+        transferability:  Output of ``get_transferability_score`` (optional).
+    """
+    def _template_fallback() -> Optional[str]:
+        try:
+            if history_df.empty or primary_metric not in history_df.columns:
+                return None
+            vals = history_df[primary_metric].dropna().tolist()
+            seasons = history_df["Season"].tolist()
+            if not vals:
+                return None
+            current = vals[-1]
+            metric_label = primary_metric.split(",")[0].strip().lower()
+            if len(vals) == 1:
+                return f"{int(current)} {metric_label} in {seasons[-1]}."
+            if current == max(vals) and len(vals) > 1:
+                return f"Best-ever season for {metric_label} — {int(current)} recorded in {seasons[-1]}."
+            delta = current - vals[-2]
+            if delta > 0:
+                return f"▲ {int(delta)} more {metric_label} than last season — upward trajectory."
+            elif delta < 0:
+                return f"▼ {int(abs(delta))} fewer {metric_label} than last season."
+            return f"Consistent output — same {metric_label} as last season ({int(current)})."
+        except Exception:
+            return None
+
+    try:
+        from utils.ai_config import GOOGLE_API_KEY, AI_DEFAULTS
+        if not GOOGLE_API_KEY:
+            return _template_fallback()
+
+        import google.generativeai as genai  # type: ignore
+
+        # ── Build brief stats string ───────────────────────────────────────
+        brief_stats = ""
+        if not history_df.empty and primary_metric in history_df.columns:
+            last3 = history_df.tail(3)
+            parts = []
+            for _, r in last3.iterrows():
+                val = r.get(primary_metric, 0)
+                parts.append(f"{r['Season']}: {val:.1f}")
+            brief_stats = ", ".join(parts)
+
+        trend_str    = form_trend.get("trend", "stable") if form_trend else "unknown"
+        slope_str    = f"{form_trend.get('slope', 0.0):+.3f}" if form_trend else "N/A"
+        t_score      = f"{round((transferability or {}).get('score', 0) * 100)}%" if transferability else "N/A"
+        t_label      = (transferability or {}).get("label", "")
+
+        prompt = (
+            f"Football scout context. Player: {player_name} ({pos_group}).\n"
+            f"Last 5-match form trend: {trend_str} (slope {slope_str}).\n"
+            f"Transferability Score for a higher-tier league: {t_score} ({t_label}).\n"
+            f"Season {primary_metric.split(',')[0].strip()} history: {brief_stats}.\n"
+            f"Write exactly 2 concise sentences of tactical insight for a professional scout. "
+            f"Focus on development trajectory and transfer potential. No bullet points."
+        )
+
+        genai.configure(api_key=GOOGLE_API_KEY)
+        model_name = AI_DEFAULTS.get("gemini", {}).get("model", "gemini-2.5-flash")
+        model = genai.GenerativeModel(model_name)
+        response = model.generate_content(
+            prompt,
+            generation_config={"temperature": 0.6, "max_output_tokens": 150},
+            request_options={"timeout": 30},
+        )
+        text = response.text.strip()
+        if text:
+            return text
+
+    except Exception as e:
+        logger.debug(f"_generate_career_insight Gemini error: {e}")
+
+    return _template_fallback()
+
+
+def _build_delta_kpis(
+    current_row: pd.Series,
+    prev_row: pd.Series,
+    metrics: List[str],
+) -> html.Div:
+    """
+    Renders a row of compact KPI badges showing season-over-season deltas.
+    Green arrow = improvement, red arrow = decline, neutral = no change.
+    """
+    kpis = []
+    for m in metrics:
+        curr = float(current_row.get(m) or 0)
+        prev = float(prev_row.get(m) or 0)
+        delta = curr - prev
+        label = m.split(",")[0].split(" per")[0].strip()
+
+        if delta > 0.05:
+            icon = "bi-arrow-up-circle-fill"
+            color = HKFATheme.POSITIVE
+            delta_txt = f"+{delta:.1f}"
+        elif delta < -0.05:
+            icon = "bi-arrow-down-circle-fill"
+            color = HKFATheme.NEGATIVE
+            delta_txt = f"{delta:.1f}"
+        else:
+            icon = "bi-dash-circle"
+            color = HKFATheme.TEXT_SECONDARY
+            delta_txt = "—"
+
+        kpis.append(
+            html.Div(
+                [
+                    html.Div(
+                        f"{curr:.1f}",
+                        style={
+                            "fontSize": "1.1rem",
+                            "fontWeight": "700",
+                            "color": HKFATheme.TEXT_PRIMARY,
+                            "lineHeight": "1",
+                        },
+                    ),
+                    html.Div(
+                        [
+                            html.I(className=f"bi {icon} me-1", style={"fontSize": "0.7rem", "color": color}),
+                            html.Span(delta_txt, style={"fontSize": "0.7rem", "color": color}),
+                        ],
+                        style={"lineHeight": "1", "marginTop": "2px"},
+                    ),
+                    html.Div(
+                        label,
+                        style={
+                            "fontSize": "0.65rem",
+                            "color": HKFATheme.TEXT_SECONDARY,
+                            "marginTop": "4px",
+                            "textTransform": "uppercase",
+                            "letterSpacing": "0.04em",
+                        },
+                    ),
+                ],
+                style={
+                    "textAlign": "center",
+                    "padding": "8px 12px",
+                    "background": "rgba(255,255,255,0.04)",
+                    "borderRadius": "8px",
+                    "border": f"1px solid {HKFATheme.BORDER_COLOR}",
+                    "minWidth": "70px",
+                },
+            )
+        )
+
+    return html.Div(
+        kpis,
+        style={
+            "display": "flex",
+            "gap": "8px",
+            "flexWrap": "wrap",
+            "marginBottom": "12px",
+        },
+    )
+
 
 def render_post_match(payload: Dict[str, Any]) -> html.Div:
     """
@@ -194,6 +933,94 @@ def render_post_match(payload: Dict[str, Any]) -> html.Div:
     # ── KPI icons with animate-glass-pulse (task 6.4) ─────────────────────
     kpi_icon = html.I(className="bi bi-person-fill me-1 animate-glass-pulse")
 
+    # ── Performance badge: how does this match rank vs player's season? ────
+    performance_badge = None
+    vs_avg_row = None
+    try:
+        dm = get_hong_kong_data_manager()
+        df = dm.processed_data
+        if df is not None and player_name in df["Player"].values:
+            p_row = df[df["Player"] == player_name].iloc[0]
+            matches = float(p_row.get("Matches played") or 1) or 1
+            season_goals = float(p_row.get("Goals") or 0)
+            season_assists = float(p_row.get("Assists") or 0)
+            avg_goals = season_goals / matches
+            avg_assists = season_assists / matches
+
+            match_goals = float(payload.get("goals") or 0)
+            match_assists = float(payload.get("assists") or 0)
+
+            # Determine performance badge from rating vs player's historical context
+            badge_text = None
+            badge_color = HKFATheme.ACCENT_GOLD
+            if rating is not None:
+                if rating >= 8.5:
+                    badge_text, badge_color = "Outstanding Performance", HKFATheme.ACCENT_GOLD
+                elif rating >= 7.5:
+                    badge_text, badge_color = "Strong Performance", HKFATheme.POSITIVE
+                elif rating >= 7.0:
+                    badge_text, badge_color = "Solid Performance", HKFATheme.ACCENT_BLUE
+                elif rating < 6.0:
+                    badge_text, badge_color = "Difficult Game", HKFATheme.NEGATIVE
+
+            if badge_text:
+                performance_badge = html.Div(
+                    [
+                        html.I(className="bi bi-star-fill me-1", style={"fontSize": "0.75rem"}),
+                        html.Span(badge_text, style={"fontSize": "0.8rem", "fontWeight": "600"}),
+                    ],
+                    style={
+                        "display": "inline-flex",
+                        "alignItems": "center",
+                        "padding": "4px 10px",
+                        "borderRadius": "20px",
+                        "background": f"rgba({_hex_to_rgb(badge_color)}, 0.15)",
+                        "border": f"1px solid {badge_color}",
+                        "color": badge_color,
+                        "marginBottom": "10px",
+                    },
+                )
+
+            # vs season average row
+            def _fmt_cmp(match_val: float, avg_val: float, label: str) -> html.Span:
+                """Helper for match value vs season average display."""
+                delta = match_val - avg_val
+                if delta > 0.05:
+                    clr = HKFATheme.POSITIVE
+                    arr = "↑"
+                elif delta < -0.05:
+                    clr = HKFATheme.NEGATIVE
+                    arr = "↓"
+                else:
+                    clr = HKFATheme.TEXT_SECONDARY
+                    arr = "→"
+                return html.Span(
+                    [
+                        html.Span(f"{label}: ", style={"color": HKFATheme.TEXT_SECONDARY, "fontSize": "0.8rem"}),
+                        html.Span(f"{match_val:.0f}", style={"color": HKFATheme.TEXT_PRIMARY, "fontWeight": "600", "fontSize": "0.8rem"}),
+                        html.Span(f" {arr} avg {avg_val:.1f}", style={"color": clr, "fontSize": "0.75rem"}),
+                    ],
+                    className="me-3",
+                )
+
+            vs_avg_row = html.Div(
+                [
+                    html.Small(
+                        [
+                            html.I(className="bi bi-bar-chart-line me-1", style={"color": HKFATheme.ACCENT_BLUE}),
+                            html.Span("vs your season avg: ", style={"color": HKFATheme.TEXT_SECONDARY}),
+                        ],
+                        className="me-2",
+                    ),
+                    _fmt_cmp(match_goals, avg_goals, "Goals"),
+                    _fmt_cmp(match_assists, avg_assists, "Assists"),
+                ],
+                className="mb-3",
+                style={"display": "flex", "flexWrap": "wrap", "alignItems": "center"},
+            )
+    except Exception as e:
+        logger.debug(f"render_post_match enrichment error: {e}")
+
     # ── Layout ─────────────────────────────────────────────────────────────
     return html.Div(
         html.Div([
@@ -202,7 +1029,9 @@ def render_post_match(payload: Dict[str, Any]) -> html.Div:
                 kpi_icon,
                 html.Span(f"{player_name}", className="fw-semibold me-2"),
                 html.Small(position, className="text-muted badge bg-secondary"),
-            ], className="mb-3"),
+            ], className="mb-2"),
+            performance_badge,
+            vs_avg_row,
             dbc.Row([
                 dbc.Col([
                     html.H6("Performance Radar", className="text-muted mb-2"),
@@ -218,10 +1047,1308 @@ def render_post_match(payload: Dict[str, Any]) -> html.Div:
     )
 
 
-def render_pre_match(payload: Dict[str, Any]) -> html.Div:
+# Positions that face each other in direct duels
+_RIVAL_POSITION_MAP: Dict[str, List[str]] = {
+    "Forward":    ["Defender"],
+    "Winger":     ["Defender", "Midfielder"],
+    "Midfielder": ["Midfielder"],
+    "Defender":   ["Forward", "Winger"],
+    "Goalkeeper": [],
+}
+
+
+def _get_opponent_rivals(
+    opponent_team: str,
+    player_pos_group: str,
+    dm,
+) -> List[Dict]:
+    """
+    Returns top rival players from the opponent team that would directly duel
+    the logged-in player based on their position.
+    Each entry: {name, position_group, key_metric_label, key_metric_val, secondary_val, secondary_label}
+    Returns at most 3 players.
+    """
+    try:
+        df = dm.processed_data
+        if df is None or df.empty:
+            return []
+
+        rival_pos_groups = _RIVAL_POSITION_MAP.get(player_pos_group, [])
+        if not rival_pos_groups:
+            return []
+
+        team_df = df[df["Team"].str.lower() == opponent_team.lower()] if "Team" in df.columns else pd.DataFrame()
+        if team_df.empty:
+            # Try partial match
+            team_df = df[df["Team"].str.lower().str.contains(opponent_team.lower(), na=False)] if "Team" in df.columns else pd.DataFrame()
+
+        if team_df.empty:
+            return []
+
+        if "Position_Group" in team_df.columns:
+            rival_df = team_df[team_df["Position_Group"].isin(rival_pos_groups)]
+        else:
+            rival_df = team_df
+
+        if rival_df.empty:
+            rival_df = team_df
+
+        # Primary sort metric per rival position
+        primary_metrics = {
+            "Defender": ("Defensive duels won, %", "Interceptions per 90"),
+            "Midfielder": ("Accurate passes, %", "Key passes per 90"),
+            "Forward": ("Goals", "xG"),
+            "Winger": ("Goals", "Dribbles per 90"),
+        }
+        # Pick first rival group for sorting
+        sort_group = rival_pos_groups[0] if rival_pos_groups else "Midfielder"
+        prim_col, sec_col = primary_metrics.get(sort_group, ("Goals", "Assists"))
+
+        # Sort by primary metric if available
+        sort_col = prim_col if prim_col in rival_df.columns else (sec_col if sec_col in rival_df.columns else None)
+        if sort_col:
+            rival_df = rival_df.sort_values(sort_col, ascending=False)
+
+        results = []
+        for _, row in rival_df.head(3).iterrows():
+            p_col = prim_col if prim_col in row.index else "Goals"
+            s_col = sec_col if sec_col in row.index else "Assists"
+            results.append({
+                "name": str(row.get("Player", "Unknown")),
+                "position_group": str(row.get("Position_Group", sort_group)),
+                "key_label": p_col.split(",")[0].split(" per")[0].strip(),
+                "key_val": float(row.get(p_col) or 0),
+                "sec_label": s_col.split(",")[0].split(" per")[0].strip(),
+                "sec_val": float(row.get(s_col) or 0),
+            })
+        return results
+    except Exception as e:
+        logger.debug(f"_get_opponent_rivals error: {e}")
+        return []
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PLAYER DASHBOARD — Estado A (no card open)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _fetch_dashboard_data(player_name: str, player_id: str) -> Dict:
+    """
+    Centralized DB fetch for the player dashboard (Estado A).
+    Opens SQLAlchemy session(s), loads all data required by the 6 dashboard builders,
+    and returns a single dict. This is the sole DB entry point for the dashboard.
+    """
+    from sqlalchemy import select
+    from models.db_models import Player, PlayerPhoto, PlayerSeasonStat, MatchHistory
+    from utils.db_engine import SessionFactory
+
+    current_season = _get_current_season()
+    result: Dict = {
+        "player_name": player_name,
+        "player_id": player_id,
+        "current_season": current_season,
+        "position_main": None,
+        "pos_group": None,
+        "team_name": None,
+        "archetype": None,
+        "age": None,
+        "foot": None,
+        "height": None,
+        "cutout_path": None,
+        "matches_played": 0,
+        "goals": 0,
+        "assists": 0,
+        "minutes_played": 0,
+        "last5_results": [],
+        "percentiles_data": {},
+        "history_df": pd.DataFrame(),
+    }
+
+    session = SessionFactory()
+    try:
+        # ── Player + photo + team ──────────────────────────────────────────
+        # Query by primary key first (reliable), fall back to name match
+        player_obj = session.get(Player, player_id) if player_id else None
+        if player_obj is None and player_name:
+            player_obj = session.execute(
+                select(Player).where(Player.name == player_name)
+            ).scalars().first()
+        if player_obj:
+            result["position_main"] = player_obj.position_main
+            result["age"]           = player_obj.age
+            result["foot"]          = player_obj.foot
+            result["height"]        = player_obj.height
+            if player_obj.current_team:
+                result["team_name"] = player_obj.current_team.name
+
+            # Primary photo: blob > cutout_path > original_path
+            primary_photo = next(
+                (p for p in player_obj.photos if getattr(p, "is_primary", False)),
+                player_obj.photos[0] if player_obj.photos else None,
+            )
+            if primary_photo:
+                if primary_photo.photo_data:
+                    import base64
+                    b64 = base64.b64encode(primary_photo.photo_data).decode("utf-8")
+                    result["cutout_path"] = f"data:image/jpeg;base64,{b64}"
+                else:
+                    raw_path = primary_photo.cutout_path or primary_photo.original_path
+                    if raw_path:
+                        web_path = "/" + raw_path if not raw_path.startswith("/") else raw_path
+                        result["cutout_path"] = web_path
+
+        # ── Career-wide totals and latest active season ───────────────────
+        stmt_career = (
+            select(PlayerSeasonStat)
+            .where(PlayerSeasonStat.player_id == player_id)
+            .order_by(PlayerSeasonStat.season_id.desc())
+        )
+        all_seasons_stats = session.execute(stmt_career).scalars().all()
+        
+        latest_active_season = current_season
+        if all_seasons_stats:
+            latest_active_season = all_seasons_stats[0].season_id
+            result["matches_played"] = sum(s.matches_played or 0 for s in all_seasons_stats)
+            result["goals"]          = sum(s.goals or 0 for s in all_seasons_stats)
+            result["assists"]        = sum(s.assists or 0 for s in all_seasons_stats)
+            result["minutes_played"] = sum(s.minutes_played or 0 for s in all_seasons_stats)
+
+        # ── Last 5 match results ───────────────────────────────────────────
+        stmt_mh = (
+            select(MatchHistory)
+            .where(MatchHistory.player_id == player_id)
+            .order_by(MatchHistory.date.desc())
+            .limit(5)
+        )
+        matches = session.execute(stmt_mh).scalars().all()
+        
+        # ── Process match outcomes (W/D/L) ─────────────────────────────────
+        last5_data = []
+        player_team = result.get("team_name")
+        import re
+        
+        for m in reversed(matches):
+            res_str = m.result or ""
+            if not res_str: continue
+            
+            outcome = "EMPTY"
+            score_display = res_str
+            
+            # 1. Check if it's already a code (W/D/L)
+            if res_str.upper() in ["W", "D", "L"]:
+                outcome = res_str.upper()
+                score_display = outcome
+            
+            # 2. Try to derive from score "2:1" and opponent "Home vs Away"
+            elif ":" in res_str and player_team:
+                try:
+                    score_part = res_str.split()[0]
+                    h_score, a_score = map(int, score_part.split(":"))
+                    opp = m.opponent or ""
+                    parts = opp.split(" vs ")
+                    if len(parts) == 2:
+                        h_team_raw, a_team_raw = parts
+                        h_team = re.sub(r'\(\d+\.\)', '', h_team_raw).strip()
+                        a_team = re.sub(r'\(\d+\.\)', '', a_team_raw).strip()
+                        
+                        is_home = player_team.lower() in h_team.lower()
+                        is_away = player_team.lower() in a_team.lower()
+                        
+                        if is_home:
+                            if h_score > a_score: outcome = "W"
+                            elif h_score < a_score: outcome = "L"
+                            else: outcome = "D"
+                        elif is_away:
+                            if a_score > h_score: outcome = "W"
+                            elif a_score < h_score: outcome = "L"
+                            else: outcome = "D"
+                except:
+                    pass
+            
+            last5_data.append({"outcome": outcome, "score": score_display})
+                
+        result["last5_results"] = last5_data
+
+    except Exception as e:
+        logger.warning(f"_fetch_dashboard_data DB error for '{player_name}': {e}")
+    finally:
+        session.close()
+
+    # ── Position group + archetype (uses DM, no extra session) ────────────
+    try:
+        dm = get_hong_kong_data_manager()
+        result["pos_group"] = _get_position_group(player_name, dm)
+        result["archetype"] = _get_archetype_label(player_name, result["pos_group"], dm)
+
+        # ── Percentiles via PercentileRankingSystem ────────────────────────
+        try:
+            # Determine cohort season: current OR player's last active season
+            cohort_season = current_season
+            if dm.processed_data is not None:
+                if player_name not in dm.processed_data["Player"].values:
+                    # Player not in current season, use their latest recorded season as comparison group
+                    cohort_season = latest_active_season
+            
+            # If cohort is different from loaded, use a temporary system
+            if cohort_season != dm.current_season:
+                from utils.efficiency_metrics import PercentileRankingSystem
+                historical_df = dm._load_season_dataframe(cohort_season)
+                historical_df = dm.processor.process_season_data(historical_df, cohort_season)
+                ranker = PercentileRankingSystem(historical_df)
+            else:
+                ranker = dm.aggregator.percentile_system
+
+            if ranker:
+                raw = ranker.get_player_percentiles(player_name, by_position=True)
+                # Pass full metric objects (including benchmarks) to support UI markers
+                result["percentiles_data"] = raw.get("metrics", {})
+        except Exception as e:
+            logger.debug(f"_fetch_dashboard_data percentile error: {e}")
+
+    except Exception as e:
+        logger.warning(f"_fetch_dashboard_data DM error: {e}")
+
+    # ── Cluster data from K-Means registry ────────────────────────────────
+    result["cluster_id"]       = None
+    result["cluster_label"]    = None
+    result["cluster_size_pct"] = None
+    result["cluster_centroid"] = None
+    result["player_scaled_vec"] = None
+    try:
+        from ai_models.model_registry import ModelRegistry
+        from ai_models.clustering import label_archetypes, apply_quality_filters
+        from sklearn.preprocessing import StandardScaler
+        from data.processors.ml_preprocessor import MLPreprocessor
+
+        dm_c = get_hong_kong_data_manager()
+        df_c = dm_c.processed_data
+        if df_c is not None and not df_c.empty:
+            # ── CAREER-WIDE PROFILE AGGREGATION ───────────────────────────
+            # Instead of just the latest season, we build a career aggregate
+            # to avoid noise in short leagues.
+            from models.db_models import Player, PlayerSeasonStat
+            from utils.db_engine import SessionFactory
+            from sqlalchemy import select
+            
+            db_session = SessionFactory()
+            career_metrics = {}
+            total_minutes = 0
+            
+            try:
+                stmt = (
+                    select(PlayerSeasonStat)
+                    .join(Player, PlayerSeasonStat.player_id == Player.id)
+                    .where(Player.name.contains(player_name))
+                )
+                all_seasons = db_session.execute(stmt).scalars().all()
+                
+                if all_seasons:
+                    # Minutes-weighted average of all advanced stats
+                    # This provides a stable playstyle profile regardless of one good/bad season
+                    for stat in all_seasons:
+                        mins = stat.minutes_played or 0
+                        if mins <= 0 or not stat.advanced_stats: continue
+                        
+                        total_minutes += mins
+                        for k, v in stat.advanced_stats.items():
+                            if isinstance(v, (int, float)):
+                                career_metrics[k] = career_metrics.get(k, 0) + (v * mins)
+                    
+                    if total_minutes > 0:
+                        for k in career_metrics:
+                            career_metrics[k] /= total_minutes
+                        
+                        # Inject this stable career profile row
+                        career_row = career_metrics.copy()
+                        career_row["Player"] = player_name
+                        career_row["Season"] = "Career"
+                        career_row["Minutes played"] = total_minutes
+                        # Ensure meta columns exist for preprocessor
+                        career_row["Team"] = result.get("team_name") or "Historical"
+                        career_row["Position"] = result.get("position_main") or "Unknown"
+                        
+                        df_c = pd.concat([df_c, pd.DataFrame([career_row])], ignore_index=True)
+                        real_player_name = player_name
+                    else:
+                        # Fallback to latest season if aggregation fails
+                        p_match = df_c[df_c["Player"].str.contains(player_name, case=False, na=False)]
+                        if not p_match.empty:
+                            real_player_name = p_match.iloc[0]["Player"]
+                        else:
+                            real_player_name = None
+                else:
+                    real_player_name = None
+            except Exception as e:
+                logger.warning(f"Career aggregation failed for {player_name}: {e}")
+                real_player_name = None
+            finally:
+                db_session.close()
+
+            if real_player_name:
+                # Apply same feature engineering as training
+                meta_cols_c = {"Player", "Season", "Team", "Position"}
+                pp = MLPreprocessor()
+                numeric_cols_raw = [c for c in df_c.columns if c not in meta_cols_c and pd.api.types.is_numeric_dtype(df_c[c])]
+                df_c = pp.compute_temporal_features(df_c, numeric_cols_raw)
+                df_c = pp.compute_positional_zscores(df_c, numeric_cols_raw)
+                df_c = pp.compute_benchmark_deltas(df_c, numeric_cols_raw)
+                df_c = pp.inject_composite_metrics(df_c)
+
+                km = ModelRegistry().load("kmeans_overall_k5")
+                if km is not None:
+                    # LOAD metadata to sync features
+                    registry = ModelRegistry()
+                    reg_data = registry._load_registry()
+                    expected_features = reg_data.get("kmeans_overall_k5", {}).get("latest", {}).get("features")
+                    
+                    if expected_features:
+                        available_cols = [c for c in expected_features if c in df_c.columns]
+                        X_input_df = df_c[available_cols].fillna(0).copy()
+                        for mc in expected_features:
+                            if mc not in X_input_df.columns: X_input_df[mc] = 0.0
+                        X_input = X_input_df[expected_features].values
+                        feature_cols_c = expected_features
+                    else:
+                        feature_cols_c = [c for c in df_c.columns if c not in meta_cols_c and pd.api.types.is_numeric_dtype(df_c[c])]
+                        X_input = df_c[feature_cols_c].fillna(0).values
+                    
+                    # Transform based on current league context
+                    df_train_set = apply_quality_filters(df_c, min_minutes=180, smooth_rates=True)
+                    if df_train_set.empty: df_train_set = df_c
+                    
+                    scaler = StandardScaler()
+                    scaler.fit(df_train_set[feature_cols_c].fillna(0))
+                    X_all_scaled = scaler.transform(X_input)
+                    
+                    all_preds = km.predict(X_all_scaled)
+                    
+                    # Locate the "Career" row index
+                    loc_idx = df_c[df_c["Player"] == real_player_name].index[-1]
+                    loc = df_c.index.get_loc(loc_idx)
+                    player_vector_scaled = X_all_scaled[loc : loc + 1]
+                    cluster_id = int(all_preds[loc])
+                    
+                    archetype_labels_c = label_archetypes(km, feature_cols_c, cluster_df=df_c)
+                    centroids = km.cluster_centers_
+                    cluster_label = archetype_labels_c[cluster_id] if cluster_id < len(archetype_labels_c) else f"Cluster {cluster_id}"
+                    
+                    # ── DNA STRENGTH SELECTION ────────────────────────────────
+                    # Only show traits where player is above average (Z > -0.2)
+                    DERIVED_EXCLUDE = ("_roll_", "_delta_", "_benchmark", "_composite", "lag_", "roll_")
+                    DISCIPLINE = {"red card", "yellow card", "foul", "conceded", "loss", "lost"}
+                    PHYSICAL_ATTRS = {"height", "weight", "age", "market value", "contract"}
+                    
+                    ARCHETYPE_PRIORITY = {
+                        "Physical": ["distance", "sprint", "hsr", "hi distance", "speed", "duel"],
+                        "Defensive": ["interception", "tackle", "clearance", "block", "duel"],
+                        "Distributor": ["pass", "accurate pass", "long pass", "forward pass"],
+                        "Maestro": ["key pass", "smart pass", "through pass", "assist", "xa"],
+                        "Finisher": ["goal", "xg", "shot", "conversion"],
+                        "Winger": ["dribble", "cross", "progressive run", "acceleration"],
+                    }
+                    
+                    priority_keywords = []
+                    for kw, features in ARCHETYPE_PRIORITY.items():
+                        if kw.lower() in cluster_label.lower():
+                            priority_keywords.extend(features)
+
+                    valid_idx = []
+                    p_z_vec = player_vector_scaled[0]
+                    
+                    for i, name in enumerate(feature_cols_c):
+                        name_l = name.lower()
+                        if any(s in name for s in DERIVED_EXCLUDE): continue
+                        if any(d in name_l for d in DISCIPLINE | PHYSICAL_ATTRS): continue
+                        
+                        # Use raw value from injected career row to check volume
+                        raw_col = name.replace("_zscore_positional", "")
+                        p_val_raw = 0.0
+                        if raw_col in df_c.columns:
+                            p_val_raw = float(df_c[df_c["Player"] == real_player_name].iloc[-1][raw_col] or 0)
+                        
+                        # Only show REAL strengths (avoid bottom percentiles)
+                        if p_z_vec[i] < -0.2: continue
+                        if "per 90" in name_l and p_val_raw < 0.15: continue
+                        
+                        valid_idx.append(i)
+
+                    if not valid_idx:
+                        valid_idx = [i for i, name in enumerate(feature_cols_c) if "_zscore_positional" in name and p_z_vec[i] >= 0]
+
+                    # Final Identity traits selection with priority bonus
+                    scores = []
+                    for idx in valid_idx:
+                        name_l = feature_cols_c[idx].lower()
+                        score = p_z_vec[idx]
+                        if any(pk in name_l for pk in priority_keywords):
+                            score += 2.5 # Weight archetype-defining traits higher
+                        scores.append(score)
+                    
+                    top5_local = np.argsort(scores)[::-1][:5]
+                    final_top_idx = [valid_idx[i] for i in top5_local]
+                    
+                    result["cluster_id"]       = cluster_id
+                    result["cluster_label"]    = cluster_label
+                    result["cluster_size_pct"] = float((all_preds == cluster_id).mean() * 100)
+                    result["cluster_centroid"] = {feature_cols_c[i]: float(centroids[cluster_id][i]) for i in final_top_idx}
+                    result["player_scaled_vec"] = {feature_cols_c[i]: float(p_z_vec[i]) for i in final_top_idx}
+
+    except Exception as e:
+        logger.warning(f"_fetch_dashboard_data cluster error: {e}")
+                
+    # ── Multi-season history (separate session inside helper) ──────────────
+    result["history_df"] = _fetch_player_season_history(player_name)
+
+    # ── Similar players metadata (pre-fetched for Parallel Categories chart) ─
+    # Gemini task 3.1 reads data["similar_players_meta"] to build the chart
+    # without making additional DB / DM calls.
+    result["similar_players_meta"] = {"similar_players": [], "query_player_embedding_idx": -1}
+    try:
+        from ai_models.similarity import build_embeddings, find_similar
+        from ai_models.model_registry import ModelRegistry as _MReg
+
+        _dm_s = get_hong_kong_data_manager()
+        if _dm_s.processed_data is not None and not _dm_s.processed_data.empty:
+            _corpus_emb = build_embeddings(_dm_s.processed_data)
+            _meta_df    = _MReg().load("player_embeddings_meta")
+
+            if _meta_df is not None:
+                _name_col = "Player" if "Player" in _meta_df.columns else "player_name"
+                _matches  = _meta_df.index[_meta_df[_name_col] == player_name].tolist()
+
+                if _matches:
+                    _qidx       = _matches[0]
+                    _query_emb  = _corpus_emb[_qidx]
+                    _sim_df     = find_similar(
+                        _query_emb, _corpus_emb, _meta_df,
+                        k=20, query_index=_qidx, position=None,
+                    )
+                    # Post-filter by position group
+                    _pos_group = result.get("pos_group") or ""
+                    if "Position" in _sim_df.columns and _pos_group:
+                        _sim_df = _sim_df[
+                            _sim_df["Position"].apply(_infer_position_group) == _pos_group
+                        ]
+
+                    _top5 = _sim_df.head(5)
+                    _similar_list = []
+                    for _, _row in _top5.iterrows():
+                        _sname = str(_row.get(_name_col, _row.get("player_name", "")))
+                        _steam = str(_row.get("Team", _row.get("team", "")))
+                        _spos  = str(_row.get("Position", _row.get("position", "")))
+                        _score = float(_row.get("similarity_score", 0.0))
+                        _similar_list.append({
+                            "name":            _sname,
+                            "team_name":       _steam,
+                            "team_logo_path":  _resolve_team_logo(_steam),
+                            "position":        _spos,
+                            "similarity_score": _score,
+                        })
+
+                    result["similar_players_meta"] = {
+                        "similar_players":             _similar_list,
+                        "query_player_embedding_idx":  _qidx,
+                    }
+    except Exception as _se:
+        logger.debug(f"_fetch_dashboard_data similar players meta error: {_se}")
+
+    # ── Hybrid AI: LSTM form trend + TabPFN transferability ───────────────
+    result["form_trend"] = None
+    result["transferability"] = None
+    try:
+        from sqlalchemy import select
+        from models.db_models import MatchHistory as MH
+        from utils.db_engine import SessionFactory
+        from ai_models.time_series import get_form_trend
+        from ai_models.predictor import get_transferability_score
+
+        with SessionFactory() as sess:
+            rows = sess.execute(
+                select(MH)
+                .where(MH.player_id == player_id)
+                .order_by(MH.date.asc())
+            ).scalars().all()
+            match_records = [
+                {
+                    "minutes_played": r.minutes_played or 0,
+                    "goals": r.goals or 0,
+                    "assists": r.assists or 0,
+                }
+                for r in rows
+            ]
+
+        # 1. LSTM Form Trend
+        lstm_metric = "goals" if result["pos_group"] in ("Forward", "Winger") else (
+            "assists" if result["pos_group"] == "Midfielder" else "minutes_played"
+        )
+        if len(match_records) >= 5: # Lowered threshold slightly for form detection
+            result["form_trend"] = get_form_trend(match_records, lstm_metric, window=5)
+
+        # 2. TabPFN Transferability
+        if not result["history_df"].empty:
+            career_dict = (
+                result["history_df"].drop(columns=["Season"], errors="ignore").mean().to_dict()
+            )
+            result["transferability"] = get_transferability_score(
+                career_dict, result["pos_group"], player_id=player_id
+            )
+
+    except Exception as _hae:
+        logger.debug(f"_fetch_dashboard_data hybrid ai error: {_hae}")
+
+    return result
+
+
+def _build_identity_hero(data: Dict) -> html.Div:
+    """§1 Identity Hero: cutout photo, name, position, team, archetype badge, physical attrs."""
+    pos_icons = {
+        "Forward": "bi-lightning-charge-fill", "Winger": "bi-wind",
+        "Midfielder": "bi-shuffle", "Defender": "bi-shield-fill",
+        "Goalkeeper": "bi-bullseye",
+    }
+    pos_group     = data.get("pos_group") or ""
+    position_main = data.get("position_main") or pos_group
+    pos_label     = POSITION_FULL_NAMES.get(position_main.upper(), position_main) if position_main else pos_group
+    archetype     = data.get("archetype") or pos_group or "Player"
+    team_name     = data.get("team_name") or "—"
+    season        = data.get("current_season") or "—"
+    cutout_path   = data.get("cutout_path")
+
+    age    = data.get("age")
+    foot   = data.get("foot")
+    height = data.get("height")
+
+    # ── Photo ──────────────────────────────────────────────────────────────
+    photo_col = html.Div(
+        html.Img(
+            src=cutout_path,
+            style={
+                "maxHeight": "120px",
+                "objectFit": "contain",
+                "filter": "drop-shadow(0 4px 12px rgba(0,0,0,0.4))",
+                "borderRadius": "12px",
+            },
+        ) if cutout_path else html.Div(
+            html.I(className=f"bi {pos_icons.get(pos_group, 'bi-person-fill')}",
+                   style={"fontSize": "3rem", "color": HKFATheme.TEXT_SECONDARY}),
+            style={"width": "80px", "height": "100px", "display": "flex",
+                   "alignItems": "center", "justifyContent": "center"},
+        ),
+        style={"flexShrink": "0"},
+    )
+
+    # ── Archetype badge (legacy — shown only if cluster DNA section fails) ──
+    arch_badge = html.Span()
+
+    # ── Physical attrs ─────────────────────────────────────────────────────
+    def _attr_chip(icon: str, label: str, value) -> html.Span:
+        display = str(value) if value is not None else "–"
+        return html.Span([
+            html.I(className=f"bi {icon} me-1", style={"fontSize": "0.7rem"}),
+            html.Span(label, style={"fontSize": "0.65rem", "color": HKFATheme.TEXT_SECONDARY}),
+            html.Span(f" {display}", style={"fontSize": "0.72rem", "fontWeight": "600"}),
+        ], style={"marginRight": "10px"})
+
+    height_str = f"{height} cm" if height else None
+    attrs_row = html.Div([
+        _attr_chip("bi-calendar3",     "Age",    age),
+        _attr_chip("bi-arrow-left-right", "Foot", foot),
+        _attr_chip("bi-rulers",        "Height", height_str),
+    ], style={"display": "flex", "alignItems": "center", "marginTop": "6px", "flexWrap": "wrap"})
+
+    # ── Info column ────────────────────────────────────────────────────────
+    info_col = html.Div([
+        html.Div(data.get("player_name", ""), style={
+            "fontSize": "1.25rem", "fontWeight": "800",
+            "color": HKFATheme.TEXT_PRIMARY, "lineHeight": "1.2",
+        }),
+        html.Div(pos_label, style={"fontSize": "0.8rem", "color": HKFATheme.TEXT_SECONDARY, "marginTop": "2px"}),
+        html.Div([
+            *([html.Img(src=_resolve_team_logo(team_name),
+                        style={"height": "16px", "objectFit": "contain", "marginRight": "5px", "verticalAlign": "middle"})]
+              if _resolve_team_logo(team_name) else
+              [html.I(className="bi bi-shield-fill me-1", style={"color": HKFATheme.ACCENT_BLUE, "fontSize": "0.72rem"})]),
+            html.Span(team_name, style={"fontSize": "0.8rem", "color": HKFATheme.TEXT_SECONDARY}),
+            html.Span(f"  ·  {season}", style={"fontSize": "0.72rem", "color": HKFATheme.TEXT_TERTIARY, "marginLeft": "6px"}),
+        ], style={"marginTop": "4px", "display": "flex", "alignItems": "center"}),
+        html.Div(arch_badge, style={"marginTop": "6px"}),
+        attrs_row,
+    ], style={"flex": "1", "minWidth": "0"})
+
+    return html.Div([
+        html.H6([
+            html.I(className="bi bi-person-badge-fill me-2"),
+            html.Span("Player Profile", className="animate-glass-draw"),
+        ], className="mb-3 fw-semibold", style={"color": "var(--accent-cyan, #00d4ff)"}),
+        html.Div([photo_col, info_col], style={"display": "flex", "gap": "14px", "alignItems": "flex-start"}),
+    ])
+
+
+def _build_season_pulse(data: Dict) -> html.Div:
+    """§2 Season Pulse: KPI cards (MP/G/A/MIN), last-5 result chips, Rating (always –)."""
+
+    def _kpi_card(icon: str, label: str, value: str) -> html.Div:
+        return html.Div([
+            html.I(className=f"bi {icon} d-block mb-1",
+                   style={"color": HKFATheme.ACCENT_BLUE, "fontSize": "0.95rem"}),
+            html.Div(value, style={"fontSize": "1.3rem", "fontWeight": "800",
+                                   "color": HKFATheme.TEXT_PRIMARY, "lineHeight": "1"}),
+            html.Div(label, style={"fontSize": "0.6rem", "color": HKFATheme.TEXT_SECONDARY,
+                                   "textTransform": "uppercase", "letterSpacing": "0.08em", "marginTop": "4px"}),
+        ], className="season-pulse-card")
+
+    kpis_row = html.Div([
+        _kpi_card("bi-calendar-check", "Matches", str(data.get("matches_played", 0))),
+        _kpi_card("bi-bullseye",       "Goals",   str(data.get("goals", 0))),
+        _kpi_card("bi-hand-index-thumb", "Assists", str(data.get("assists", 0))),
+        _kpi_card("bi-stopwatch",      "Minutes", str(data.get("minutes_played", 0))),
+        _kpi_card("bi-star-half",      "Rating",  "–"),  # TODO: implementar rating cuando esté disponible
+    ], style={"display": "flex", "gap": "6px", "flexWrap": "wrap", "marginBottom": "24px"}) # Aumentado de 12px a 24px
+
+    # ── Result chips ───────────────────────────────────────────────────────
+    last5 = data.get("last5_results", [])
+    # Pad to 5 slots
+    padded = list(last5) + [None] * max(0, 5 - len(last5))
+
+    def _result_chip(res_data: Dict | str | None) -> html.Span:
+        if not res_data:
+            return html.Span("–", className="result-chip result-chip-empty")
+
+        if isinstance(res_data, str):
+            # Parse something like "W 2-0"
+            outcome = res_data[0].upper() if res_data else "EMPTY"
+            score = res_data
+        else:
+            outcome = res_data.get("outcome", "EMPTY")
+            score = res_data.get("score", "–")
+
+        chip_class = "result-chip"
+        if outcome == "W":
+            chip_class += " result-chip-w"
+        elif outcome == "D":
+            chip_class += " result-chip-d"
+        elif outcome == "L":
+            chip_class += " result-chip-l"
+        else:
+            chip_class += " result-chip-empty"
+
+        return html.Span(score, className=chip_class)
+    chips_row = html.Div([
+        html.Div("Last 5", style={"fontSize": "0.65rem", "color": HKFATheme.TEXT_SECONDARY,
+                                  "textTransform": "uppercase", "letterSpacing": "0.05em",
+                                  "marginRight": "8px", "flexShrink": "0", "alignSelf": "center"}),
+        html.Div([_result_chip(r) for r in padded],
+                 style={"display": "flex", "gap": "5px", "flexWrap": "wrap"}),
+    ], style={"display": "flex", "alignItems": "center"})
+
+    return html.Div([
+        html.H6([
+            html.I(className="bi bi-activity me-2"),
+            html.Span("Season Pulse", className="animate-glass-draw"),
+        ], className="mb-3 fw-semibold", style={"color": "var(--accent-cyan, #00d4ff)"}),
+        kpis_row,
+        chips_row,
+    ])
+
+
+def _build_league_standing(data: Dict) -> html.Div:
+    """§3 League Standing: positional percentile bars via PercentileRankingSystem."""
+    from utils.chart_helpers import create_percentile_bars
+
+    pos_group       = data.get("pos_group") or ""
+    percentiles_all = data.get("percentiles_data") or {}
+
+    header = html.H6([
+        html.I(className="bi bi-bar-chart-line-fill me-2"),
+        html.Span("League Standing", className="animate-glass-draw"),
+    ], className="mb-3 fw-semibold", style={"color": "var(--accent-cyan, #00d4ff)"})
+
+    if pos_group not in POSITION_METRICS or not percentiles_all:
+        return html.Div([
+            header,
+            html.P("Positional data not available for this player.",
+                   className="text-muted small"),
+        ])
+
+    # Base metrics for the position
+    metrics = list(POSITION_METRICS[pos_group])
+    
+    # Add composite metric as a 5th extra bar if applicable
+    if pos_group in COMPOSITE_METRICS:
+        comp_m = COMPOSITE_METRICS[pos_group]
+        if comp_m not in metrics:
+            metrics.append(comp_m)
+
+    filtered = {m: percentiles_all[m] for m in metrics if m in percentiles_all}
+
+    if not filtered:
+        return html.Div([
+            header,
+            html.P("No hay datos de percentiles para esta posición.",
+                   className="text-muted small"),
+        ])
+
+    bars = create_percentile_bars(filtered)
+    comparison_label = html.Div(
+        f"vs. {pos_group}s in HKPL",
+        style={"fontSize": "0.65rem", "color": HKFATheme.TEXT_SECONDARY,
+               "textAlign": "right", "marginBottom": "8px", "letterSpacing": "0.03em"},
+    )
+
+    return html.Div([header, comparison_label, bars])
+
+
+def _build_career_arc(data: Dict) -> html.Div:
+    """§4 Career Arc: multi-season trend chart + positional radar + narrative insight."""
+    from utils.chart_helpers import create_radar_chart
+
+    history_df  = data.get("history_df", pd.DataFrame())
+    pos_group   = data.get("pos_group") or ""
+    player_name = data.get("player_name", "")
+    
+    # Use the first metric as primary for the title/default logic
+    primary_metric = POSITION_METRICS.get(pos_group, ["Goals"])[0]
+
+    header = html.H6([
+        html.I(className="bi bi-graph-up-arrow me-2"),
+        html.Span("Career Arc", className="animate-glass-draw"),
+    ], className="mb-3 fw-semibold", style={"color": "var(--accent-cyan, #00d4ff)"})
+
+    if history_df.empty:
+        return html.Div([
+            header,
+            html.P("No hay datos de carrera disponibles.", className="text-muted small"),
+        ])
+
+    # ── Multi-metric Trend chart ───────────────────────────────────────────
+    trend_fig = go.Figure()
+    all_metrics = CAREER_ARC_ALL_METRICS.get(pos_group, [primary_metric])
+
+    # Sort by season so X axis is always chronological
+    history_df = history_df.sort_values("Season").reset_index(drop=True)
+    seasons = history_df["Season"].tolist()
+
+    has_minutes = "Minutes played" in history_df.columns and "Minutes played" in all_metrics
+    colors = HKFATheme.DATA_SERIES
+
+    for i, metric in enumerate(all_metrics):
+        if metric not in history_df.columns:
+            continue
+
+        vals = history_df[metric].fillna(0).tolist()
+        raw_label = metric.split(",")[0].strip()
+        # Wrap long labels at a word boundary so they don't crowd the legend
+        if len(raw_label) > 11 and " " in raw_label:
+            words = raw_label.split()
+            mid = max(1, len(words) // 2)
+            raw_label = " ".join(words[:mid]) + "<br>" + " ".join(words[mid:])
+        m_label = raw_label
+
+        is_minutes = metric == "Minutes played"
+        visibility = get_career_arc_visibility(metric, pos_group)
+
+        trace_color = colors[i % len(colors)]
+        group_key = f"metric_{i}"
+
+        trace_kwargs = {
+            "x": seasons,
+            "y": vals,
+            "mode": "lines+markers",
+            "name": m_label,
+            "visible": visibility,
+            "line": dict(color=trace_color, width=2 if visibility is True else 1.5),
+            "marker": dict(size=6),
+            "cliponaxis": False,
+            "hovertemplate": f"%{{x}}<br>{m_label}: %{{y:.1f}}<extra></extra>",
+            "legendgroup": group_key,
+        }
+
+        if is_minutes:
+            trace_kwargs["yaxis"] = "y2"
+            trace_kwargs["line"]["dash"] = "dash"
+
+        trend_fig.add_trace(go.Scatter(**trace_kwargs))
+
+        # Add "best" star marker for every metric (visible or legendonly)
+        # Shares legendgroup so clicking legend toggles both line and star together
+        if vals:
+            best_idx = vals.index(max(vals))
+            star_kwargs = dict(
+                x=[seasons[best_idx]], y=[vals[best_idx]],
+                mode="markers+text", showlegend=False,
+                legendgroup=group_key,
+                marker=dict(size=11, color=HKFATheme.ACCENT_GOLD, symbol="star"),
+                text=[f"Best: {vals[best_idx]:.0f}"],
+                textposition="top center",
+                textfont=dict(size=9, color=HKFATheme.ACCENT_GOLD),
+                hovertemplate=f"Career best<br>{m_label}: %{{y:.1f}}<extra></extra>",
+                visible=visibility,
+                cliponaxis=False,
+            )
+            if is_minutes:
+                star_kwargs["yaxis"] = "y2"
+            trend_fig.add_trace(go.Scatter(**star_kwargs))
+
+    # Layout updates for secondary Y-axis and legend
+    # Pre-reserve right margin when minutes axis exists so the plot width stays
+    # constant whether minutes played is visible or legendonly (prevents legend shrink).
+    right_margin = 70 if has_minutes else 40
+
+    layout_update = {
+        "title": dict(text="Performance Evolution", x=0.01, xanchor="left", font=dict(size=13)),
+        "xaxis_title": "Season",
+        "xaxis": dict(ticklabelstandoff=8),
+        "yaxis_title": "Metric Value",
+        "yaxis": dict(rangemode="tozero"),
+        "hovermode": "x unified",
+        "showlegend": True,
+        "legend": dict(
+            orientation="h",
+            yanchor="top",
+            y=-0.18,
+            xanchor="left",
+            x=0,
+            font=dict(size=9),
+            tracegroupgap=0,
+        ),
+        "margin": dict(l=40, r=right_margin, t=40, b=100),
+    }
+
+    if has_minutes:
+        layout_update["yaxis2"] = dict(
+            title="Minutes Played",
+            overlaying="y",
+            side="right",
+            showgrid=False,
+            rangemode="tozero",
+            title_font=dict(color=HKFATheme.TEXT_SECONDARY),
+            tickfont=dict(color=HKFATheme.TEXT_SECONDARY),
+        )
+        layout_update["yaxis_title"] = "Technical Metrics"
+
+    trend_fig.update_layout(**layout_update)
+    trend_fig = glass_figure_layout(trend_fig)
+
+    # Post-theme overrides — must run AFTER glass_figure_layout so apply_hkfa_theme
+    # doesn't clobber them.  The right (y2) axis border is added here so it
+    # matches the left y-axis styling.
+    if has_minutes:
+        trend_fig.update_layout(yaxis2=dict(
+            showline=True,
+            linewidth=1,
+            linecolor="rgba(255,255,255,0.35)",
+            layer="below traces",
+        ))
+
+    # ── Radar chart ────────────────────────────────────────────────────────
+    percentiles_all = data.get("percentiles_data") or {}
+    # Position-specific metrics + general supplements for a fuller player picture
+    pos_radar      = [m for m in POSITION_METRICS.get(pos_group, []) if m in percentiles_all]
+    supplemental   = [m for m in SUPPLEMENTAL_RADAR_METRICS.get(pos_group, [])
+                      if m in percentiles_all and m not in pos_radar]
+    radar_metrics  = pos_radar + supplemental
+    radar_fig      = go.Figure()
+    if len(radar_metrics) >= 3:
+        # percentiles_all[m] is a dict: {value, percentile, group_avg_percentile, ...}
+        pct_vals = [percentiles_all[m]["percentile"] for m in radar_metrics]
+        ref_vals = [percentiles_all[m]["group_avg_percentile"] for m in radar_metrics]
+        raw_labels = [m.split(",")[0].split(" per")[0].strip() for m in radar_metrics]
+        labels = []
+        for lbl in raw_labels:
+            if len(lbl) > 10 and " " in lbl:
+                words = lbl.split()
+                mid = max(1, len(words) // 2)
+                lbl = " ".join(words[:mid]) + "<br>" + " ".join(words[mid:])
+            labels.append(lbl)
+        radar_fig = glass_figure_layout(create_radar_chart(
+            values=pct_vals, metrics=labels,
+            title="Position Profile", name=player_name, height=340,
+            reference_values=ref_vals, reference_name="Position Avg",
+        ))
+        radar_fig.update_layout(
+            legend=dict(
+                orientation="h",
+                yanchor="top",
+                y=-0.15,
+                xanchor="center",
+                x=0.5,
+                font=dict(size=9),
+            ),
+            margin=dict(l=20, r=20, t=55, b=70),
+        )
+    else:
+        radar_fig.add_annotation(text="Insufficient data", showarrow=False,
+                                 font=dict(color=HKFATheme.TEXT_SECONDARY))
+        radar_fig = glass_figure_layout(radar_fig)
+
+    # ── Rich insights ──────────────────────────────────────────────────────
+    insight_rows: List[tuple] = []  # (icon_class, color, text)
+
+    has_min_col = "Minutes played" in history_df.columns
+    label_pm    = primary_metric.split(",")[0].split(" per")[0].strip()
+
+    # 1. Position Profile cross-ref: standout metric vs group
+    if radar_metrics and percentiles_all:
+        best_m   = max(radar_metrics, key=lambda m: percentiles_all[m]["percentile"])
+        worst_m  = min(radar_metrics, key=lambda m: percentiles_all[m]["percentile"])
+        best_pct = percentiles_all[best_m]["percentile"]
+        worst_pct= percentiles_all[worst_m]["percentile"]
+        pos_avg  = percentiles_all[best_m]["group_avg_percentile"]
+        short_b  = best_m.split(",")[0].split(" per")[0].strip()
+        short_w  = worst_m.split(",")[0].split(" per")[0].strip()
+        delta    = best_pct - pos_avg
+        insight_rows.append((
+            "bi bi-award",
+            HKFATheme.ACCENT_GOLD,
+            f"Position Profile · Strength: {short_b} ({best_pct:.0f}th pct, {delta:+.0f} vs group) "
+            f"— Area to develop: {short_w} ({worst_pct:.0f}th pct)"
+        ))
+
+    # 2. Performance Evolution cross-ref: career trajectory + peak with minutes context
+    if primary_metric in history_df.columns and len(history_df) >= 2:
+        metric_vals    = history_df[primary_metric].fillna(0).tolist()
+        metric_seasons = history_df["Season"].tolist()
+        if metric_vals:
+            peak_idx    = metric_vals.index(max(metric_vals))
+            peak_val    = metric_vals[peak_idx]
+            peak_season = metric_seasons[peak_idx]
+            peak_mins   = int(history_df["Minutes played"].fillna(0).iloc[peak_idx]) if has_min_col else None
+            mins_note   = f" ({peak_mins} mins that season)" if peak_mins else ""
+            n = len(metric_vals)
+            if n >= 3:
+                first_avg = sum(metric_vals[:max(1, n // 2)]) / max(1, n // 2)
+                last_avg  = sum(metric_vals[n // 2:]) / max(1, n - n // 2)
+                pct_chg   = ((last_avg - first_avg) / max(0.001, abs(first_avg))) * 100
+                if pct_chg > 10:
+                    icon, color = "bi bi-graph-up-arrow", HKFATheme.POSITIVE
+                    traj = f"Performance Evolution · Improving trajectory — career high {peak_val:.1f} {label_pm} in {peak_season}{mins_note}"
+                elif pct_chg < -10:
+                    icon, color = "bi bi-graph-down-arrow", HKFATheme.NEGATIVE
+                    traj = f"Performance Evolution · Declining since {peak_season} peak ({peak_val:.1f} {label_pm}{mins_note})"
+                else:
+                    icon, color = "bi bi-activity", HKFATheme.ACCENT_BLUE
+                    traj = f"Performance Evolution · Consistent output — career high {peak_val:.1f} {label_pm} in {peak_season}{mins_note}"
+            else:
+                icon, color = "bi bi-activity", HKFATheme.ACCENT_BLUE
+                traj = f"Performance Evolution · Career high {peak_val:.1f} {label_pm} in {peak_season}"
+            insight_rows.append((icon, color, traj))
+
+    # 3. xG vs Goals efficiency (for attacking positions — non-obvious from charts at a glance)
+    if pos_group in ("Forward", "Winger") and "xG" in history_df.columns and "Goals" in history_df.columns:
+        xg_total    = history_df["xG"].fillna(0).sum()
+        goals_total = history_df["Goals"].fillna(0).sum()
+        if xg_total > 0.5:
+            ratio = goals_total / xg_total
+            if ratio < 0.75:
+                insight_rows.append((
+                    "bi bi-crosshair", HKFATheme.NEGATIVE,
+                    f"Finishing gap: {goals_total:.0f} goals vs {xg_total:.1f} xG career total "
+                    f"— converting at {ratio*100:.0f}% of expected (below average)"
+                ))
+            elif ratio > 1.2:
+                insight_rows.append((
+                    "bi bi-crosshair", HKFATheme.POSITIVE,
+                    f"Clinical finisher: {goals_total:.0f} goals vs {xg_total:.1f} xG career total "
+                    f"— {(ratio-1)*100:.0f}% above expected output"
+                ))
+
+    # 4. Minutes-performance correlation (non-obvious pattern)
+    if has_min_col and primary_metric in history_df.columns and len(history_df) >= 3:
+        import numpy as _np
+        mins_arr = history_df["Minutes played"].fillna(0).values
+        perf_arr = history_df[primary_metric].fillna(0).values
+        if mins_arr.std() > 0 and perf_arr.std() > 0:
+            corr = float(_np.corrcoef(mins_arr, perf_arr)[0, 1])
+            if corr > 0.65:
+                insight_rows.append((
+                    "bi bi-clock-history", HKFATheme.ACCENT_BLUE,
+                    f"Pattern: {label_pm} closely tracks playing time (r={corr:.2f}) "
+                    f"— see Performance Evolution: peaks align with most minutes"
+                ))
+            elif corr < -0.5:
+                insight_rows.append((
+                    "bi bi-lightning-charge", HKFATheme.ACCENT_GOLD,
+                    f"Impact player: {label_pm} highest when minutes are limited (r={corr:.2f}) "
+                    f"— concentrated efficiency over full-season endurance"
+                ))
+
+    # 5. Playing time evolution
+    if has_min_col and len(history_df) >= 2:
+        mins_list = history_df["Minutes played"].fillna(0).tolist()
+        first_min, last_min = mins_list[0], mins_list[-1]
+        first_szn = history_df["Season"].iloc[0]
+        last_szn  = history_df["Season"].iloc[-1]
+        if first_min > 0:
+            pct_chg = ((last_min - first_min) / first_min) * 100
+            if pct_chg > 25:
+                insight_rows.append((
+                    "bi bi-person-check", HKFATheme.POSITIVE,
+                    f"Playing time ↑{pct_chg:.0f}% from {first_szn} to {last_szn} "
+                    f"({int(first_min)}→{int(last_min)} mins) — growing coach trust"
+                ))
+            elif pct_chg < -25:
+                insight_rows.append((
+                    "bi bi-person-dash", HKFATheme.NEGATIVE,
+                    f"Playing time ↓{abs(pct_chg):.0f}% from {first_szn} peak "
+                    f"({int(first_min)} mins) — role reduced by {last_szn}"
+                ))
+
+    # 6. Narrative from Gemini (when available) or enriched template
+    narrative = _generate_career_insight(
+        history_df, primary_metric, player_name,
+        pos_group=pos_group,
+        form_trend=data.get("form_trend"),
+        transferability=data.get("transferability"),
+    )
+    if narrative:
+        insight_rows.append(("bi bi-lightbulb", HKFATheme.ACCENT_GOLD, narrative))
+
+    if insight_rows:
+        insight_el = html.Div(
+            [html.Div(
+                [html.I(className=f"{icon} me-2", style={"color": color, "fontSize": "0.72rem", "flexShrink": "0"}),
+                 html.Span(txt, style={"fontSize": "0.78rem", "color": HKFATheme.TEXT_SECONDARY, "lineHeight": "1.4"})],
+                style={"display": "flex", "alignItems": "flex-start", "marginBottom": "4px"},
+            ) for icon, color, txt in insight_rows],
+            style={"padding": "8px 12px", "background": "rgba(255,255,255,0.03)",
+                   "borderRadius": "6px", "marginTop": "8px"},
+        )
+    else:
+        insight_el = html.Span()
+
+    # ── Career cluster evolution ───────────────────────────────────────────
+    try:
+        evolution_el = _build_career_cluster_evolution(data)
+    except Exception as e:
+        logger.debug(f"_build_career_cluster_evolution failed: {e}")
+        evolution_el = html.Span()
+
+    return html.Div([
+        header,
+        dbc.Row([
+            dbc.Col(dcc.Graph(figure=trend_fig, config={"displayModeBar": False}, className="w-100"), width=12, lg=7),
+            dbc.Col(dcc.Graph(figure=radar_fig, config={"displayModeBar": False}, className="w-100"), width=12, lg=5),
+        ]),
+        evolution_el,
+        insight_el,
+    ])
+
+
+def _build_projection_section(data: Dict, player_id: str) -> html.Div:
+    """§5 Projection: season-end projection chart with guard for matches_played < 10."""
+    header = html.H6([
+        html.I(className="bi bi-graph-up me-2"),
+        html.Span("Season Projection", className="animate-glass-draw"),
+    ], className="mb-3 fw-semibold", style={"color": "var(--accent-cyan, #00d4ff)"})
+
+    matches_played = data.get("matches_played", 0)
+    if matches_played < 10:
+        return html.Div([
+            header,
+            html.P("Proyección disponible a partir de 10 partidos jugados.",
+                   className="text-muted small"),
+        ])
+
+    current_season = data.get("current_season") or _get_current_season()
+    proj_fig = get_projection_figure(player_id, current_season, current_season)
+    return html.Div([
+        header,
+        dcc.Graph(figure=proj_fig, config={"displayModeBar": False}, className="w-100"),
+    ])
+
+
+_CYTO_STYLESHEET = [
+    {"selector": "node", "style": {
+        "label": "data(label)",
+        "color": "#ffffff",
+        "font-size": "10px",
+        "text-valign": "bottom",
+        "text-margin-y": "4px",
+        "border-width": "1px",
+        "border-color": "rgba(255,255,255,0.2)",
+    }},
+    {"selector": ".central", "style": {
+        "background-color": HKFATheme.ACCENT_RED,
+        "width": 60, "height": 60,
+        "border-width": "3px",
+        "border-color": "#ffffff",
+        "font-size": "11px",
+        "font-weight": "bold",
+    }},
+    {"selector": ".similar", "style": {
+        "width": 44, "height": 44,
+    }},
+    {"selector": "edge", "style": {
+        "width": "data(weight)",
+        "line-color": "rgba(255,255,255,0.25)",
+        "label": "data(score_label)",
+        "font-size": "9px",
+        "color": "rgba(255,255,255,0.5)",
+        "text-rotation": "autorotate",
+    }},
+]
+
+
+def _build_similar_players(data: Dict) -> html.Div:
+    """
+    §6 Similar Players: Parallel Categories chart visualizing categorical similarity dimensions.
+    Replaces legacy Cytoscape graph. Maps Player, Team, Similitud Range, and Position.
+    """
+    player_name = data.get("player_name", "Query Player")
+    meta = data.get("similar_players_meta", {})
+    similar_list = meta.get("similar_players", [])
+
+    header = html.H6([
+        html.I(className="bi bi-people-fill me-2"),
+        html.Span("Categorical Similarity Mapping", className="animate-glass-draw"),
+    ], className="mb-3 fw-semibold", style={"color": "var(--accent-cyan, #00d4ff)"})
+
+    if not similar_list:
+        return html.Div([header, html.P("Similar players not available.", className="text-muted small")])
+
+    # ── Build Parallel Categories Chart ────────────────────────────────────
+    try:
+        # Construct DataFrame for dimensions
+        rows = []
+        # Include query player as first flow for reference
+        rows.append({
+            "Player": player_name,
+            "Team": data.get("team_name") or "Your Team",
+            "Similarity": "100% (Query)",
+            "Position": data.get("position_main") or data.get("pos_group") or "Unknown"
+        })
+
+        for p in similar_list:
+            score = p["similarity_score"]
+            if score >= 0.95: s_range = "95-100% Elite"
+            elif score >= 0.90: s_range = "90-95% High"
+            elif score >= 0.85: s_range = "85-90% Strong"
+            else: s_range = "80-85% Moderate"
+
+            rows.append({
+                "Player": p["name"],
+                "Team": p["team_name"],
+                "Similarity": s_range,
+                "Position": p["position"]
+            })
+
+        df_sim = pd.DataFrame(rows)
+        
+        fig = px.parallel_categories(
+            df_sim,
+            dimensions=["Player", "Team", "Similarity", "Position"],
+            color_continuous_scale=px.colors.sequential.Teal,
+            labels={c: c.replace("_", " ") for c in df_sim.columns}
+        )
+
+        # Apply HKFA theme styling
+        fig.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color=HKFATheme.TEXT_PRIMARY, size=10),
+            margin=dict(l=60, r=60, t=20, b=20),
+            height=300,
+            dragmode=False, # Disable zooming/panning per spec
+        )
+        
+        # Details Table
+        table_header = [
+            html.Thead(html.Tr([
+                html.Th("Player", style={"fontSize": "0.7rem", "color": HKFATheme.TEXT_SECONDARY}),
+                html.Th("Team", style={"fontSize": "0.7rem", "color": HKFATheme.TEXT_SECONDARY}),
+                html.Th("Pos", style={"fontSize": "0.7rem", "color": HKFATheme.TEXT_SECONDARY}),
+                html.Th("Sim %", style={"fontSize": "0.7rem", "color": HKFATheme.TEXT_SECONDARY, "textAlign": "right"}),
+            ]))
+        ]
+        
+        table_rows = []
+        for p in similar_list:
+            logo_path = p.get("team_logo_path")
+            team_cell = html.Div([
+                html.Img(src=logo_path, style={"height": "12px", "marginRight": "4px"}) if logo_path else None,
+                html.Span(p["team_name"], style={"fontSize": "0.75rem"})
+            ], style={"display": "flex", "alignItems": "center"})
+
+            table_rows.append(html.Tr([
+                html.Td(p["name"], style={"fontSize": "0.75rem", "fontWeight": "600"}),
+                html.Td(team_cell),
+                html.Td(p["position"], style={"fontSize": "0.75rem"}),
+                html.Td(f"{p['similarity_score']*100:.1f}%", style={"fontSize": "0.75rem", "textAlign": "right", "color": HKFATheme.ACCENT_BLUE}),
+            ]))
+
+        table = dbc.Table(
+            table_header + [html.Tbody(table_rows)],
+            borderless=True, hover=True, responsive=True, size="sm",
+            style={"marginTop": "15px", "background": "transparent"}
+        )
+
+        return html.Div([
+            header,
+            dcc.Graph(figure=fig, config={"displayModeBar": False, "staticPlot": True}),
+            table
+        ])
+
+    except Exception as e:
+        logger.warning(f"_build_similar_players Parallel Categories error: {e}")
+        return html.Div([header, html.P("Mapping error. Reverting to basic view.", className="text-muted small")])
+
+
+def render_player_dashboard(
+    player_name: str,
+    player_id: str,
+    user_role: str = "player",
+) -> html.Div:
+    """
+    Orchestrates the 6-section player dashboard for Estado A (no card open).
+    Fetches data once and delegates to independent builders with per-section error isolation.
+    """
+    data = _fetch_dashboard_data(player_name, player_id)
+
+    def _safe_build(builder_fn, *args, **kwargs) -> html.Div:
+        try:
+            return builder_fn(*args, **kwargs)
+        except Exception as e:
+            logger.warning(f"Dashboard section '{builder_fn.__name__}' failed: {e}")
+            return html.P("Sección no disponible", className="text-muted small")
+
+    sections = [
+        _safe_build(_build_identity_hero,       data),
+        html.Hr(style={"borderColor": HKFATheme.BORDER_COLOR, "margin": "12px 0"}),
+        _safe_build(_build_cluster_dna,          data),
+        html.Hr(style={"borderColor": HKFATheme.BORDER_COLOR, "margin": "12px 0"}),
+        _safe_build(_build_season_pulse,         data),
+        html.Hr(style={"borderColor": HKFATheme.BORDER_COLOR, "margin": "12px 0"}),
+        _safe_build(_build_league_standing,      data),
+        html.Hr(style={"borderColor": HKFATheme.BORDER_COLOR, "margin": "12px 0"}),
+        _safe_build(_build_career_arc,           data),
+        html.Hr(style={"borderColor": HKFATheme.BORDER_COLOR, "margin": "12px 0"}),
+        _safe_build(_build_projection_section,   data, player_id),
+        html.Hr(style={"borderColor": HKFATheme.BORDER_COLOR, "margin": "12px 0"}),
+        _safe_build(_build_similar_players,      data),
+    ]
+
+    return html.Div(
+        dbc.Card(html.Div(sections, className="pb-2"), className="glass-card glass-career"),
+    )
+
+
+def render_career_overview(
+    player_name: str,
+    player_id: str,
+    user_role: str = "player",
+) -> html.Div:
+    """
+    Default stage shown when NO card is open.
+    # Shim — ver render_player_dashboard()
+    Delegates entirely to render_player_dashboard() preserving the original signature
+    for backward compatibility with any existing callers.
+    """
+    return render_player_dashboard(player_name, player_id, user_role)
+
+
+def render_pre_match(payload: Dict[str, Any], player_pos_group: str = "") -> html.Div:
     """
     Renders the Pre-Match preparation hub.
-    Shows fixture details, opponent info, and a rule-based Game-Plan insight.
+    Shows fixture details, opponent rival player analysis, and AI Game-Plan.
     """
     opponent = payload.get("opponent", "Opponent")
     home = payload.get("home_team", "")
@@ -230,6 +2357,10 @@ def render_pre_match(payload: Dict[str, Any]) -> html.Div:
     stadium = payload.get("stadium", "")
     streaming_url = payload.get("streaming_url")
     competition = payload.get("competition", "HK Premier League")
+
+    # Resolve opponent team name (who the logged-in player plays against)
+    # The opponent could be in either home or away position
+    opponent_team = opponent if opponent else (away if home else home)
 
     # ── Fixture header ─────────────────────────────────────────────────────
     streaming_link = html.A(
@@ -258,22 +2389,85 @@ def render_pre_match(payload: Dict[str, Any]) -> html.Div:
         ])
     ], className="mb-3 border-0 shadow-sm")
 
-    # ── Game-Plan insight (rule-based) ─────────────────────────────────────
+    # ── Opponent rival analysis ────────────────────────────────────────────
+    rivals_section = None
     try:
         dm = get_hong_kong_data_manager()
-        opp_stats = dm.get_player_overview(opponent)
-        has_opp_data = opp_stats and "error" not in opp_stats
-    except Exception:
-        has_opp_data = False
+        pos_group = player_pos_group or "Midfielder"
+        rivals = _get_opponent_rivals(opponent_team, pos_group, dm)
 
-    if has_opp_data:
+        if rivals:
+            rival_pos_names = _RIVAL_POSITION_MAP.get(pos_group, ["Midfielder"])
+            rival_label = " / ".join(rival_pos_names) if rival_pos_names else "Rival"
+
+            rival_cards = []
+            for r in rivals:
+                rival_cards.append(
+                    html.Div([
+                        html.Div([
+                            html.I(className="bi bi-person-fill me-1", style={"color": HKFATheme.ACCENT_RED}),
+                            html.Span(r["name"], style={"fontWeight": "600", "fontSize": "0.9rem", "color": HKFATheme.TEXT_PRIMARY}),
+                        ], className="mb-1"),
+                        html.Div([
+                            html.Span(r["position_group"], className="badge me-1",
+                                      style={"backgroundColor": HKFATheme.BG_TERTIARY, "color": HKFATheme.TEXT_SECONDARY,
+                                             "border": f"1px solid {HKFATheme.BORDER_COLOR}", "fontSize": "0.65rem"}),
+                        ], className="mb-2"),
+                        html.Div([
+                            html.Div([
+                                html.Span(f"{r['key_val']:.1f}", style={"fontSize": "1rem", "fontWeight": "700", "color": HKFATheme.ACCENT_RED}),
+                                html.Span(f" {r['key_label']}", style={"fontSize": "0.7rem", "color": HKFATheme.TEXT_SECONDARY}),
+                            ], className="me-3"),
+                            html.Div([
+                                html.Span(f"{r['sec_val']:.1f}", style={"fontSize": "0.9rem", "fontWeight": "600", "color": HKFATheme.TEXT_PRIMARY}),
+                                html.Span(f" {r['sec_label']}", style={"fontSize": "0.7rem", "color": HKFATheme.TEXT_SECONDARY}),
+                            ]),
+                        ], style={"display": "flex", "alignItems": "baseline"}),
+                    ], style={
+                        "padding": "10px 14px",
+                        "borderRadius": "8px",
+                        "background": "rgba(237,28,36,0.06)",
+                        "border": f"1px solid rgba({_hex_to_rgb(HKFATheme.ACCENT_RED)}, 0.2)",
+                        "flex": "1",
+                        "minWidth": "140px",
+                    })
+                )
+
+            rivals_section = html.Div([
+                html.Div([
+                    html.I(className="bi bi-shield-exclamation me-2", style={"color": HKFATheme.ACCENT_RED}),
+                    html.Span(
+                        f"Potential Rivals — {rival_label}s to watch",
+                        style={"fontWeight": "600", "fontSize": "0.85rem", "color": HKFATheme.TEXT_SECONDARY},
+                    ),
+                ], className="mb-2"),
+                html.Div(rival_cards, style={"display": "flex", "gap": "8px", "flexWrap": "wrap"}),
+            ], style={"marginBottom": "16px"})
+    except Exception as e:
+        logger.debug(f"Rival analysis error: {e}")
+
+    # ── Game-Plan insight (rule-based, improved) ───────────────────────────
+    try:
+        dm = get_hong_kong_data_manager()
+        team_stats = dm.get_team_statistics(opponent_team) if opponent_team else {}
+        overview = team_stats.get("overview", {}) if team_stats else {}
+        top_scorer_name = ""
+        top_scorers = (team_stats.get("top_players", {}) or {}).get("top_scorers", [])
+        if top_scorers:
+            top_scorer_name = top_scorers[0].get("name", "")
+            top_scorer_goals = top_scorers[0].get("goals", 0)
+            game_plan_text = (
+                f"{opponent_team}'s top scorer is {top_scorer_name} ({top_scorer_goals} goals). "
+                "Study their movement patterns and prepare your defensive line."
+            )
+        else:
+            game_plan_text = (
+                f"Focus on your strengths against {opponent_team}. "
+                "High pressure and quick transitions can create opportunities."
+            )
+    except Exception:
         game_plan_text = (
-            f"Analysis available for {opponent}. "
-            "Review their defensive and offensive stats to prepare tactics."
-        )
-    else:
-        game_plan_text = (
-            f"Prepare for the match against {opponent}. "
+            f"Prepare for the match against {opponent_team}. "
             "Focus on quick transitions and high pressure in midfield."
         )
 
@@ -287,7 +2481,6 @@ def render_pre_match(payload: Dict[str, Any]) -> html.Div:
         ])
     ], className="border-0 shadow-sm mb-3", color="dark", outline=True)
 
-    # ── Clock icon with animate-glass-spin (task 6.4) ─────────────────────
     spin_icon = html.I(className="bi bi-calendar3 me-1 animate-glass-spin")
 
     return html.Div(
@@ -297,6 +2490,7 @@ def render_pre_match(payload: Dict[str, Any]) -> html.Div:
                 spin_icon,
                 html.Small(date_str, className="text-muted"),
             ], className="mb-2 small") if date_str else None,
+            rivals_section,
             game_plan_card,
         ]),
         className="glass-card glass-prematch",
@@ -306,12 +2500,122 @@ def render_pre_match(payload: Dict[str, Any]) -> html.Div:
 def render_career_insights(payload: Dict[str, Any], user_role: str = "player") -> html.Div:
     """
     Renders the Career Insights stage with contextual projection, UMAP clustering,
+    archetype badge, season-over-season delta KPIs, AI insight line,
     and a role-conditional Dossier export button.
     """
     season = payload.get("season", "")
     player_id = payload.get("player_id", "")
     player_name = payload.get("player_name", "Player")
     current_season = _get_current_season()
+
+    # ── Fetch multi-season history (real data, no random) ──────────────────
+    history_df = _fetch_player_season_history(player_name)
+
+    # ── Archetype badge ────────────────────────────────────────────────────
+    archetype_section = None
+    try:
+        dm = get_hong_kong_data_manager()
+        pos_group = _get_position_group(player_name, dm)
+        archetype = _get_archetype_label(player_name, pos_group, dm)
+        if archetype:
+            pos_icons = {
+                "Forward": "bi-lightning-charge-fill",
+                "Winger": "bi-wind",
+                "Midfielder": "bi-shuffle",
+                "Defender": "bi-shield-fill",
+                "Goalkeeper": "bi-bullseye",
+            }
+            pos_icon = pos_icons.get(pos_group, "bi-person-fill")
+            archetype_section = html.Div(
+                [
+                    html.I(
+                        className=f"bi {pos_icon} me-2",
+                        style={"color": HKFATheme.ACCENT_GOLD},
+                    ),
+                    html.Span(
+                        archetype,
+                        style={
+                            "color": HKFATheme.ACCENT_GOLD,
+                            "fontWeight": "700",
+                            "fontSize": "0.9rem",
+                        },
+                    ),
+                    html.Span(
+                        f"  ·  {pos_group}",
+                        style={
+                            "color": HKFATheme.TEXT_SECONDARY,
+                            "fontSize": "0.8rem",
+                            "marginLeft": "4px",
+                        },
+                    ),
+                ],
+                style={
+                    "display": "inline-flex",
+                    "alignItems": "center",
+                    "padding": "5px 14px",
+                    "borderRadius": "20px",
+                    "background": f"rgba({_hex_to_rgb(HKFATheme.ACCENT_GOLD)}, 0.1)",
+                    "border": f"1px solid rgba({_hex_to_rgb(HKFATheme.ACCENT_GOLD)}, 0.35)",
+                    "marginBottom": "12px",
+                },
+            )
+    except Exception as e:
+        logger.debug(f"Archetype badge error: {e}")
+
+    # ── Season-over-season delta KPIs ──────────────────────────────────────
+    delta_section = None
+    try:
+        dm = get_hong_kong_data_manager()
+        pos_group = _get_position_group(player_name, dm)
+        kpi_metrics = POSITION_METRICS.get(pos_group, ["Goals", "Assists"])[:3]
+        # Filter to metrics available in history_df
+        kpi_metrics = [m for m in kpi_metrics if m in (history_df.columns if not history_df.empty else [])]
+
+        if not history_df.empty and len(history_df) >= 2 and kpi_metrics:
+            current_row = history_df.iloc[-1]
+            prev_row = history_df.iloc[-2]
+            prev_season = history_df.iloc[-2]["Season"]
+            delta_section = html.Div([
+                html.Small(
+                    [
+                        html.I(className="bi bi-arrow-left-right me-1"),
+                        f"vs {prev_season}",
+                    ],
+                    style={"color": HKFATheme.TEXT_SECONDARY, "display": "block", "marginBottom": "8px"},
+                ),
+                _build_delta_kpis(current_row, prev_row, kpi_metrics),
+            ])
+    except Exception as e:
+        logger.debug(f"Delta KPIs error: {e}")
+
+    # ── AI career insight (template-based) ────────────────────────────────
+    insight_section = None
+    try:
+        dm = get_hong_kong_data_manager()
+        pos_group = _get_position_group(player_name, dm)
+        primary_metric = POSITION_METRICS.get(pos_group, ["Goals"])[0]
+        insight_text = _generate_career_insight(history_df, primary_metric, player_name)
+        if insight_text:
+            insight_section = html.Div(
+                [
+                    html.I(
+                        className="bi bi-lightbulb-fill me-2",
+                        style={"color": HKFATheme.ACCENT_GOLD, "fontSize": "0.85rem"},
+                    ),
+                    html.Span(insight_text, style={"fontSize": "0.85rem", "color": HKFATheme.TEXT_SECONDARY}),
+                ],
+                style={
+                    "padding": "8px 12px",
+                    "borderRadius": "8px",
+                    "background": "rgba(255,184,28,0.06)",
+                    "border": f"1px solid rgba({_hex_to_rgb(HKFATheme.ACCENT_GOLD)}, 0.2)",
+                    "marginBottom": "14px",
+                    "display": "flex",
+                    "alignItems": "center",
+                },
+            )
+    except Exception as e:
+        logger.debug(f"Career insight error: {e}")
 
     # ── Projection figure (context-aware: wrap_up vs projection mode) ──────
     projection_fig = get_projection_figure(player_id, season, current_season=current_season)
@@ -351,6 +2655,9 @@ def render_career_insights(payload: Dict[str, Any], user_role: str = "player") -
                     className="animate-glass-draw",
                 ),
             ], className="mb-3 fw-semibold", style={"color": "var(--accent-cyan, #00d4ff)"}),
+            archetype_section,
+            insight_section,
+            delta_section,
             dbc.Row([
                 dbc.Col(projection_section, width=12, lg=6),
                 dbc.Col(umap_section, width=12, lg=6),
@@ -403,29 +2710,33 @@ def get_umap_figure(player_id: str) -> go.Figure:
         # Serialize Numba/UMAP calls — workqueue layer is not thread-safe
         with _umap_lock:
             umap_df, _ = fit_umap(X_scaled, player_names=names)
-        
+
         # Add metadata for hover
         if "Team" in df_plot.columns: umap_df["team"] = df_plot["Team"].values
         if "Season" in df_plot.columns: umap_df["season"] = df_plot["Season"].values
-            
-        fig = umap_scatter_chart(umap_df)
-        
-        # 3. Highlight player
-        if player_name:
-            player_point = umap_df[umap_df["player_name"] == player_name]
-            if not player_point.empty:
-                fig.add_trace(go.Scatter(
-                    x=player_point["x"],
-                    y=player_point["y"],
-                    mode="markers+text",
-                    marker=dict(size=15, color="white", line=dict(width=3, color=HKFATheme.ACCENT_RED)),
-                    text=[player_name],
-                    textposition="top center",
-                    name="Selected",
-                    showlegend=True
-                ))
 
-        fig.update_layout(title="Playstyle Map (UMAP)")
+        # Build K-Means cluster labels for constellation
+        cluster_labels_umap = None
+        archetype_labels_umap = None
+        try:
+            from ai_models.model_registry import ModelRegistry
+            from ai_models.clustering import label_archetypes
+            km_u = ModelRegistry().load("kmeans_overall_k5")
+            if km_u is not None:
+                cluster_labels_umap = km_u.predict(X_scaled)
+                archetype_labels_umap = label_archetypes(km_u, feature_cols)
+        except Exception:
+            pass
+
+        knn_edges = _build_knn_edges(umap_df, k=4)
+        fig = constellation_chart(
+            umap_df,
+            cluster_labels=cluster_labels_umap,
+            archetype_labels=archetype_labels_umap,
+            highlight_player=player_name,
+            knn_edges=knn_edges,
+        )
+        fig.update_layout(title="Playstyle Constellation (UMAP)")
         return glass_figure_layout(fig)
     except Exception as e:
         logger.error(f"Error generating UMAP figure: {e}")
@@ -489,21 +2800,50 @@ def get_projection_figure(
 
 
 def _get_position_group(player_name: str, dm: "HongKongDataManager") -> str:
-    """Derives the Position_Group for a player from the processed DataFrame."""
+    """Derives the Position_Group for a player from the processed DataFrame (current or last active)."""
     try:
         df = dm.processed_data
-        if df is None or df.empty:
-            return "Midfielder"
-        row = df[df["Player"] == player_name]
-        if row.empty:
-            return "Midfielder"
-        pos_group = row.iloc[0].get("Position_Group") if "Position_Group" in row.columns else None
-        if pos_group and str(pos_group) in POSITION_METRICS:
-            return str(pos_group)
-        raw_pos = row.iloc[0].get("Position", "")
-        return _infer_position_group(str(raw_pos))
-    except Exception:
+        if df is not None and not df.empty:
+            row = df[df["Player"] == player_name]
+            if not row.empty:
+                pos_group = row.iloc[0].get("Position_Group")
+                if pos_group and str(pos_group) in POSITION_METRICS:
+                    return str(pos_group)
+
+        # Fallback to DB if not in current season
+        from sqlalchemy import select
+        from models.db_models import Player
+        from utils.db_engine import SessionFactory
+        with SessionFactory() as session:
+            player = session.execute(select(Player).where(Player.name == player_name)).scalars().first()
+            if player and player.position_main:
+                # Map position_main to group
+                pos = player.position_main.split(",")[0].strip().upper()
+                if pos in ("GK", "GOALKEEPER"): return "Goalkeeper"
+                if pos in ("CB", "RCB", "LCB", "LB", "RB", "LWB", "RWB"): return "Defender"
+                if pos in ("RW", "LW", "RWF", "LWF", "RAMF", "LAMF"): return "Winger"
+                if pos in ("CF", "ST"): return "Forward"
+                return "Midfielder"
+
         return "Midfielder"
+    except Exception as e:
+        logger.debug(f"_get_position_group error: {e}")
+        return "Midfielder"
+
+
+def _get_archetype_label(player_name: str, pos_group: str, dm: "HongKongDataManager") -> str:
+    """Returns a human-readable archetype label for a player."""
+    try:
+        df = dm.processed_data
+        if df is not None and not df.empty:
+            row = df[df["Player"] == player_name]
+            if not row.empty:
+                archetype = row.iloc[0].get("archetype")
+                if archetype: return str(archetype).title()
+
+        return f"{pos_group} Specialist"
+    except:
+        return "Standard Player"
 
 
 def _build_wrapup_chart(
@@ -578,50 +2918,173 @@ def _build_projection_chart(
     player_name: str,
     seasons: List[str],
     current_season: str,
+    player_id: Optional[str] = None,
 ) -> go.Figure:
     """
-    Builds a forward-looking performance projection line chart.
+    Builds a forward-looking performance projection line chart using REAL season data.
+
+    Integrates:
+    - Position-specific primary metric (via get_position_projection_metrics).
+    - LSTM form trend overlay when ≥10 match records exist.
+    - TabPFN Transferability Score badge annotation.
+    - Baseline linear projection line preserved for reference.
     """
     try:
         dm = get_hong_kong_data_manager()
         pos_group = _get_position_group(player_name, dm)
-        # Use the first metric for the primary trend line
-        primary_metric = POSITION_METRICS.get(pos_group, ["Goals"])[0]
+
+        # Fetch real multi-season data
+        history_df = _fetch_player_season_history(player_name)
+
+        # ── Fetch match history for LSTM + position metrics ────────────────
+        match_records: List[Dict] = []
+        try:
+            from sqlalchemy import select
+            from models.db_models import Player, MatchHistory as MH
+            from utils.db_engine import SessionFactory
+            with SessionFactory() as sess:
+                p_id = player_id
+                if not p_id:
+                    p_obj = sess.execute(
+                        select(Player).where(Player.name == player_name)
+                    ).scalars().first()
+                    p_id = p_obj.id if p_obj else None
+                if p_id:
+                    rows = sess.execute(
+                        select(MH)
+                        .where(MH.player_id == p_id)
+                        .order_by(MH.date.asc())
+                    ).scalars().all()
+                    match_records = [
+                        {
+                            "minutes_played": r.minutes_played or 0,
+                            "goals": r.goals or 0,
+                            "assists": r.assists or 0,
+                        }
+                        for r in rows
+                    ]
+        except Exception as me:
+            logger.debug(f"_build_projection_chart: match history fetch failed: {me}")
+
+        # ── Position-specific primary metric ──────────────────────────────
+        from utils.performance_helpers import get_position_projection_metrics
+        proj_meta = get_position_projection_metrics(pos_group, history_df, match_records)
+        primary_metric = proj_meta.get("primary_metric") or POSITION_METRICS.get(pos_group, ["Goals"])[0]
+
+        # Fall back to first available numeric column if primary_metric missing
+        if not history_df.empty and primary_metric not in history_df.columns:
+            fallback_cols = [c for c in history_df.columns if c != "Season" and history_df[c].dtype in (float, int, "float64", "int64")]
+            if fallback_cols:
+                primary_metric = fallback_cols[0]
+
         metric_label = primary_metric.split(",")[0].strip()
 
-        # Use available seasons as X axis; mock values where real data absent
-        historical_y = [np.random.randint(2, 12) for _ in seasons]
+        if history_df.empty or primary_metric not in history_df.columns:
+            fig = go.Figure()
+            fig.add_annotation(
+                text=f"No multi-season data available for {player_name}",
+                showarrow=False,
+                font=dict(color=HKFATheme.TEXT_SECONDARY),
+            )
+            fig.update_layout(title=f"Performance Trend: {player_name}")
+            return glass_figure_layout(fig)
 
-        next_year_start = int(current_season.split("-")[0]) + 1
-        next_season = f"{next_year_start}-{str(next_year_start + 1)[-2:]}"
-
-        last_val = historical_y[-1]
-        projected_val = max(0, last_val + np.random.normal(1, 2))
+        real_seasons = history_df["Season"].tolist()
+        real_vals = history_df[primary_metric].fillna(0).tolist()
 
         fig = go.Figure()
+
+        # Historical line (real data)
         fig.add_trace(go.Scatter(
-            x=seasons,
-            y=historical_y,
+            x=real_seasons,
+            y=real_vals,
             mode="lines+markers",
-            name=f"Historical ({metric_label})",
+            name=metric_label,
             line=dict(color=HKFATheme.ACCENT_BLUE, width=3),
             marker=dict(size=8),
+            hovertemplate=f"Season %{{x}}<br>{metric_label}: %{{y:.1f}}<extra></extra>",
         ))
-        fig.add_trace(go.Scatter(
-            x=[seasons[-1], next_season],
-            y=[last_val, projected_val],
-            mode="lines+markers",
-            name="AI Projection",
-            line=dict(color=HKFATheme.ACCENT_RED, width=3, dash="dash"),
-            marker=dict(size=10, symbol="star"),
-        ))
+
+        # ── LSTM form trend overlay ────────────────────────────────────────
+        form_info: Dict = {}
+        lstm_metric = "goals" if pos_group in ("Forward", "Winger") else (
+            "assists" if pos_group == "Midfielder" else "minutes_played"
+        )
+        if len(match_records) >= 10:
+            try:
+                from ai_models.time_series import get_form_trend
+                form_info = get_form_trend(match_records, lstm_metric, window=5)
+            except Exception as fe:
+                logger.debug(f"LSTM form trend error: {fe}")
+
+        # ── Baseline linear projection ────────────────────────────────────
+        if len(real_vals) >= 2:
+            deltas = [b - a for a, b in zip(real_vals[:-1], real_vals[1:])]
+            avg_delta = sum(deltas) / len(deltas)
+
+            # Adjust by LSTM slope if available (blend: 70% linear + 30% LSTM)
+            slope = form_info.get("slope", 0.0)
+            blended_delta = avg_delta * 0.7 + slope * 0.3
+            projected_val = max(0.0, real_vals[-1] + blended_delta)
+
+            try:
+                parts = current_season.split("-")
+                next_season = f"{int(parts[0]) + 1}-{str(int(parts[1]) + 1).zfill(2)}"
+            except Exception:
+                next_season = "Next"
+
+            trend_name = "Trend Projection"
+            if form_info.get("trend") == "improving":
+                trend_name = "Trend Projection ▲"
+            elif form_info.get("trend") == "declining":
+                trend_name = "Trend Projection ▼"
+
+            fig.add_trace(go.Scatter(
+                x=[real_seasons[-1], next_season],
+                y=[real_vals[-1], projected_val],
+                mode="lines+markers",
+                name=trend_name,
+                line=dict(color=HKFATheme.ACCENT_RED, width=2, dash="dash"),
+                marker=dict(size=10, symbol="star", color=HKFATheme.ACCENT_GOLD),
+                hovertemplate=f"{next_season}<br>Projected: %{{y:.1f}}<extra></extra>",
+            ))
+
+        # ── TabPFN Transferability Score badge ────────────────────────────
+        transferability_label = ""
+        try:
+            from ai_models.predictor import get_transferability_score
+            career_dict = (
+                history_df.drop(columns=["Season"], errors="ignore").mean().to_dict()
+                if not history_df.empty else {}
+            )
+            t_result = get_transferability_score(career_dict, pos_group, player_id=player_id)
+            score_pct = round(t_result.get("score", 0) * 100)
+            t_label = t_result.get("label", "")
+            transferability_label = f"Transferability: {score_pct}% ({t_label})"
+        except Exception as te:
+            logger.debug(f"Transferability score error: {te}")
+
+        if transferability_label:
+            fig.add_annotation(
+                text=transferability_label,
+                xref="paper", yref="paper",
+                x=0.99, y=0.99,
+                xanchor="right", yanchor="top",
+                showarrow=False,
+                bgcolor="rgba(0,212,255,0.12)",
+                bordercolor=HKFATheme.ACCENT_BLUE,
+                borderwidth=1,
+                font=dict(color=HKFATheme.ACCENT_BLUE, size=11),
+            )
+
         fig.update_layout(
-            title=f"Performance Projection: {player_name}",
+            title=f"Performance Trend: {player_name}",
             xaxis_title="Season",
             yaxis_title=metric_label,
             hovermode="x unified",
         )
         return glass_figure_layout(fig)
+
     except Exception as e:
         logger.error(f"Projection chart error: {e}")
         fig = go.Figure()

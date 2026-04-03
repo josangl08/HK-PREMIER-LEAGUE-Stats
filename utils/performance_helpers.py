@@ -1,3 +1,5 @@
+# ABOUTME: Auxiliary helpers for the performance dashboard and position-specific projection metrics.
+# ABOUTME: Provides get_position_projection_metrics() and other reusable performance logic.
 """
 Funciones auxiliares para el dashboard de performance.
 Evita duplicación de código en performance_callbacks.py
@@ -5,9 +7,89 @@ Evita duplicación de código en performance_callbacks.py
 
 from typing import Dict, List, Optional, Any, Tuple
 import logging
+import numpy as np
+import pandas as pd
 from utils.common import validate_filters, safe_get_analysis_level
 
 logger = logging.getLogger(__name__)
+
+
+def get_position_projection_metrics(
+    pos_group: str,
+    history_df: "pd.DataFrame",
+    match_records: List[Dict],
+) -> Dict[str, Any]:
+    """
+    Returns position-specific KPIs for the projection section of the Player Portal.
+
+    Aggregates season-level averages from ``history_df`` and combines them with
+    match-by-match context from ``match_records`` to produce the most relevant
+    forward-looking metrics per position group.
+
+    Args:
+        pos_group:     Position group string ("Forward", "Winger", "Midfielder",
+                       "Defender", "Goalkeeper").
+        history_df:    Season-level DataFrame (output of _fetch_player_season_history).
+        match_records: List of MatchHistory dicts, sorted ascending by date.
+
+    Returns:
+        Dict with the following keys depending on position:
+        - **GK**:  ``primary_metric``, ``prevented_goals``, ``save_rate``
+        - **DF**:  ``primary_metric``, ``padj_interceptions``, ``xcleansheeets``
+        - **MF/FW/Winger**: ``primary_metric``, ``xg``, ``xa``, ``expected_minutes``
+    """
+    empty = history_df.empty if history_df is not None else True
+
+    def _latest(col: str, default: float = 0.0) -> float:
+        if empty or col not in history_df.columns:
+            return default
+        vals = history_df[col].dropna()
+        return float(vals.iloc[-1]) if not vals.empty else default
+
+    def _match_avg(key: str, n: int = 5) -> float:
+        if not match_records:
+            return 0.0
+        recent = match_records[-n:]
+        vals = [float(r.get(key) or 0) for r in recent]
+        return round(float(np.mean(vals)), 3) if vals else 0.0
+
+    if pos_group == "Goalkeeper":
+        prevented = _latest("Prevented goals")
+        save_rate  = _latest("Save rate, %")
+        return {
+            "primary_metric": "Prevented goals",
+            "prevented_goals": prevented,
+            "save_rate": save_rate,
+        }
+
+    if pos_group == "Defender":
+        padj = _latest("PAdj interceptions per 90")
+        # xClean sheets = number of matches with 0 goals conceded in match_records
+        if match_records:
+            clean_count = sum(
+                1 for r in match_records
+                if (r.get("goals_conceded") or r.get("goals") or 0) == 0
+            )
+            xcleansheeets = round(clean_count / max(len(match_records), 1), 3)
+        else:
+            xcleansheeets = _latest("xClean sheets")
+        return {
+            "primary_metric": "PAdj interceptions per 90",
+            "padj_interceptions": padj,
+            "xcleansheeets": xcleansheeets,
+        }
+
+    # Forward / Winger / Midfielder
+    xg = _latest("xG")
+    xa = _latest("xA")
+    # Expected minutes = average minutes in last 5 matches, or season average
+    expected_minutes = _match_avg("minutes_played") or _latest("Minutes played")
+    return {
+        "primary_metric": "xG" if pos_group in ("Forward", "Winger") else "xA",
+        "xg": xg,
+        "xa": xa,
+        "expected_minutes": expected_minutes,
+    }
 
 def get_streaming_label(url: Optional[str], platform: Optional[str] = None) -> str:
     """

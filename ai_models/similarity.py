@@ -122,6 +122,7 @@ def find_similar(
     k: int = 10,
     seasons: Optional[List[str]] = None,
     query_index: Optional[int] = None,
+    position: Optional[str] = None,
 ) -> pd.DataFrame:
     """
     Finds the top-k most similar players to a query embedding via cosine similarity.
@@ -133,6 +134,7 @@ def find_similar(
         k: Number of similar players to return.
         seasons: Optional list of seasons to restrict results to.
         query_index: Row index of the query player in corpus to exclude self (avoid score=1.0).
+        position: Optional position string (e.g. "Forward") to restrict results to same position.
 
     Returns:
         DataFrame with columns: player_name, season, team, similarity_score.
@@ -152,6 +154,10 @@ def find_similar(
     else:
         # Heuristic: exclude row(s) with score ≥ 0.9999
         meta = meta[meta["similarity_score"] < 0.9999]
+
+    # Apply position filter
+    if position and "Position" in meta.columns:
+        meta = meta[meta["Position"].str.lower() == position.lower()]
 
     # Apply season filter
     if seasons:
@@ -174,8 +180,12 @@ def find_similar(
         if col not in meta.columns:
             meta[col] = "Unknown"
 
+    output_cols = ["player_name", "season", "team", "similarity_score"]
+    if "Position" in meta.columns:
+        output_cols = ["player_name", "season", "team", "Position", "similarity_score"]
+
     result = (
-        meta[["player_name", "season", "team", "similarity_score"]]
+        meta[output_cols]
         .sort_values("similarity_score", ascending=False)
         .head(k)
         .reset_index(drop=True)

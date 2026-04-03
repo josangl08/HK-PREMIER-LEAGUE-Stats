@@ -8,7 +8,12 @@ Includes classical (XGBoost) and state-of-the-art (TabPFN) tabular models.
 
 # Standard Library
 import logging
+import os
 from typing import Any, Dict, List, Optional, Tuple
+
+# Safeguard for Numba threading layer on macOS (Silicon)
+if "NUMBA_THREADING_LAYER" not in os.environ:
+    os.environ["NUMBA_THREADING_LAYER"] = "workqueue"
 
 # Third-party
 import numpy as np
@@ -165,6 +170,173 @@ def predict(
         return labels
 
     return raw_preds
+
+
+def predict_with_interval(
+    model: Any,
+    X: np.ndarray,
+    model_id: str,
+) -> dict:
+    """
+    Returns a point prediction with a ±1 RMSE confidence interval.
+
+    The interval is derived from the cross-validation RMSE stored in the
+    ModelRegistry at training time — no re-fitting required.
+
+    Args:
+        model: Trained model (XGBoost or TabPFN).
+        X: Feature matrix for a single player (1, n_features).
+        model_id: Registry key (e.g. "xgboost_Goals") used to look up the RMSE.
+
+    Returns:
+        Dict with keys: prediction, lower, upper, rmse.
+    """
+    raw = predict(model, X)
+    point = float(raw[0])
+
+    rmse = 0.0
+    try:
+        registry = ModelRegistry()
+        reg_data = registry._load_registry()
+        rmse = float(
+            reg_data.get(model_id, {}).get("latest", {}).get("metrics", {}).get("rmse", 0.0)
+        )
+    except Exception:
+        pass
+
+    return {
+        "prediction": point,
+        "lower": max(0.0, point - rmse),
+        "upper": point + rmse,
+        "rmse": rmse,
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Transferability Score (TabPFN Transfer Learning)
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Hardcoded percentile benchmarks for "higher-tier league" success.
+# These represent the ~75th-percentile threshold values observed in top Asian /
+# lower-tier European leagues, used as synthetic reference rows for TabPFN.
+_LEAGUE_BENCHMARKS: Dict[str, Dict[str, float]] = {
+    "Forward": {
+        "xG": 0.45, "Goals": 12.0, "Goal conversion, %": 18.0,
+        "Shots on target, %": 52.0, "Assists": 4.0, "Minutes played": 2200.0,
+        "Dribbles per 90": 2.1, "Aerial duels won, %": 42.0,
+    },
+    "Winger": {
+        "xG": 0.28, "Goals": 7.0, "Assists": 6.0, "Successful dribbles, %": 58.0,
+        "Crosses per 90": 3.2, "Key passes per 90": 2.4, "Minutes played": 2000.0,
+        "xA": 0.22,
+    },
+    "Midfielder": {
+        "xA": 0.20, "Assists": 5.0, "Accurate passes, %": 82.0,
+        "Key passes per 90": 2.0, "Goals": 4.0, "Minutes played": 2300.0,
+        "Interceptions per 90": 3.5, "Duels won, %": 52.0,
+    },
+    "Defender": {
+        "PAdj interceptions per 90": 8.0, "Defensive duels won, %": 68.0,
+        "Aerial duels won, %": 62.0, "Shots blocked per 90": 0.9,
+        "Accurate passes, %": 80.0, "Minutes played": 2400.0,
+        "Fouls per 90": 1.2, "xClean sheets": 12.0,
+    },
+    "Goalkeeper": {
+        "Save rate, %": 72.0, "Prevented goals": 5.0, "Clean sheets": 10.0,
+        "xG against per 90": 1.1, "Minutes played": 2700.0,
+        "xClean sheets": 11.0, "Passes per 90": 28.0, "Long passes per 90": 12.0,
+    },
+}
+
+
+def get_transferability_score(
+    career_stats: Dict[str, Any],
+    pos_group: str,
+    player_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Estimates the probability that a player would succeed in a higher-tier league
+    using TabPFN transfer learning with synthetic reference data.
+
+    Falls back to a rule-based percentile calculation when TabPFN is unavailable.
+
+    Args:
+        career_stats: Dict of career (or season-averaged) stats for the player.
+        pos_group:    Position group (e.g. "Forward", "Defender").
+        player_id:    Optional — used for ModelRegistry caching.
+
+    Returns:
+        Dict with keys:
+            ``score``        — float 0-1 (probability of higher-league success)
+            ``label``        — "Elite" | "Promising" | "Developing"
+            ``key_factors``  — list of up to 3 metric names driving the score
+    """
+    benchmarks = _LEAGUE_BENCHMARKS.get(pos_group, _LEAGUE_BENCHMARKS["Midfielder"])
+    feature_keys = list(benchmarks.keys())
+
+    # Build player feature vector (normalised against benchmarks)
+    player_vec = np.array(
+        [float(career_stats.get(k) or 0) / max(benchmarks[k], 1e-6) for k in feature_keys],
+        dtype=np.float32,
+    )
+
+    # Build synthetic reference dataset:
+    # Row 0 = "elite" player (1.2× benchmark), Row 1 = "average" (1.0×), Row 2 = "low" (0.6×)
+    ref_X = np.array([
+        [1.2] * len(feature_keys),
+        [1.0] * len(feature_keys),
+        [0.6] * len(feature_keys),
+    ], dtype=np.float32)
+    ref_y = np.array([1.0, 0.6, 0.2], dtype=np.float32)
+
+    # Combine reference + player row for TabPFN inference
+    X_combined = np.vstack([ref_X, player_vec.reshape(1, -1)])
+
+    score = 0.0
+    used_tabpfn = False
+    try:
+        from tabpfn import TabPFNRegressor
+
+        model = TabPFNRegressor(device="cpu")
+        model.fit(ref_X, ref_y)
+        raw = model.predict(player_vec.reshape(1, -1))
+        score = float(np.clip(raw[0], 0.0, 1.0))
+        used_tabpfn = True
+    except Exception as e:
+        logger.warning(f"get_transferability_score: TabPFN unavailable ({e}). Using rule-based fallback.")
+
+    if not used_tabpfn:
+        # Rule-based fallback: mean normalised ratio, clipped to [0, 1]
+        score = float(np.clip(np.mean(player_vec), 0.0, 1.0))
+
+    # Key factors = top-3 features closest to or exceeding benchmark
+    ratios = list(zip(feature_keys, player_vec.tolist()))
+    top_factors = [k for k, v in sorted(ratios, key=lambda x: x[1], reverse=True)[:3]]
+
+    if score >= 0.75:
+        label = "Elite"
+    elif score >= 0.45:
+        label = "Promising"
+    else:
+        label = "Developing"
+
+    result = {"score": round(score, 3), "label": label, "key_factors": top_factors}
+
+    # Optionally cache
+    if player_id:
+        try:
+            registry = ModelRegistry()
+            registry.save(
+                result,
+                model_id=f"transferability_{player_id}",
+                model_type="predictors",
+                metrics={"score": score},
+                features=feature_keys,
+            )
+        except Exception:
+            pass
+
+    return result
 
 
 def compute_shap(model: Any, X: np.ndarray) -> np.ndarray:

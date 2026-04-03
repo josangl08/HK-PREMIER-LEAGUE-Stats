@@ -13,6 +13,7 @@ from data.processors.hong_kong_processor import HongKongDataProcessor
 from models.db_models import Player, Team, Season, PlayerSeasonStat, SystemSyncLog
 from utils.db_engine import SessionFactory
 from utils.common import get_current_season
+from utils.player_index import get_player_index
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,7 @@ class HKPLSyncManager:
     def __init__(self):
         self.extractor = HongKongDataExtractor()
         self.processor = HongKongDataProcessor()
+        self.player_index = get_player_index()
 
     def sync_season(self, season_id: str = None):
         """
@@ -82,23 +84,37 @@ class HKPLSyncManager:
 
                 # 2. Player (Upsert)
                 player_name = str(row.get('Player'))
-                player_slug = self._get_slug(player_name)
-                player = session.get(Player, player_slug)
+                
+                # USE PLAYER INDEX FOR CONSISTENT IDs
+                # Player names are already Title Case from processor
+                player_id = self.player_index.get_player_id(player_name)
+                
+                if not player_id:
+                    logger.warning(f"Player '{player_name}' not found in index during sync. Rebuilding index...")
+                    self.player_index.build(force=True)
+                    player_id = self.player_index.get_player_id(player_name)
+                    
+                if not player_id:
+                    # Fallback to name-based slug only if index failed, but log it as an error
+                    logger.error(f"CRITICAL: Player '{player_name}' still missing ID after index rebuild.")
+                    player_id = self._get_slug(player_name)
+
+                player = session.get(Player, player_id)
                 
                 # Update basic player info
                 if not player:
                     player = Player(
-                        id=player_slug,
+                        id=player_id,
                         name=player_name,
                         current_team_id=team.id,
-                        position_main=row.get('Position_Group', 'Unknown'),
+                        position_main=row.get('Position_Clean', row.get('Position_Group', 'Unknown')),
                         age=int(row.get('Age', 0)) if pd.notna(row.get('Age')) else 0
                     )
                     session.add(player)
                     session.flush()
                 else:
                     player.current_team_id = team.id
-                    player.position_main = row.get('Position_Group', 'Unknown')
+                    player.position_main = row.get('Position_Clean', row.get('Position_Group', 'Unknown'))
                     if pd.notna(row.get('Age')):
                         player.age = int(row.get('Age'))
 
@@ -176,5 +192,116 @@ class HKPLSyncManager:
                 log.last_run = datetime.now()
                 log.status = "SUCCESS"
             session.commit()
+        finally:
+            session.close()
+
+    def resolve_player_tm_data(self, player_id: str, player_name: str, team: str = "") -> None:
+        """
+        Background-safe method to resolve Transfermarkt data for a newly created player.
+
+        Steps:
+        1. If player.tm_id is None, search TM by name+team and persist the result.
+        2. If tm_id resolved, fetch and store the profile photo as a DB blob.
+        3. If player.position_main is None, fetch TM position and persist it.
+
+        Safe to call from a daemon thread — opens its own DB session.
+        """
+        from data.extractors.transfermarkt_extractor import TransfermarktExtractor
+        from data.processors.hong_kong_processor import POSITION_FULL_NAMES
+
+        extractor = TransfermarktExtractor()
+        session = SessionFactory()
+
+        _TM_TEXT_TO_ABBR = {
+            'goalkeeper': 'GK', 'portero': 'GK',
+            'centre-back': 'CB', 'central': 'CB', 'central defender': 'CB', 'defensa central': 'CB', 'defensa': 'CB',
+            'right-back': 'RB', 'lateral derecho': 'RB',
+            'left-back': 'LB', 'lateral izquierdo': 'LB',
+            'right wing-back': 'RWB', 'left wing-back': 'LWB',
+            'defensive midfield': 'DM', 'central midfield': 'CM', 'centrocampista': 'CM',
+            'attacking midfield': 'AMF', 'mediapunta': 'AMF', 'centrocampista ofensivo': 'AMF',
+            'right midfield': 'RM', 'left midfield': 'LM',
+            'interior derecho': 'RM', 'interior izquierdo': 'LM',
+            'right winger': 'RW', 'left winger': 'LW',
+            'right wing forward': 'RWF', 'left wing forward': 'LWF',
+            'centre-forward': 'CF', 'centre forward': 'CF', 'delantero centro': 'CF',
+            'striker': 'ST', 'second striker': 'SS',
+        }
+
+        def _to_abbr(tm_text: str) -> Optional[str]:
+            key = tm_text.lower().strip()
+            if key in _TM_TEXT_TO_ABBR:
+                return _TM_TEXT_TO_ABBR[key]
+            for pattern, code in _TM_TEXT_TO_ABBR.items():
+                if pattern in key:
+                    return code
+            return None
+
+        try:
+            player = session.get(Player, player_id)
+            if player is None:
+                logger.warning(f"resolve_player_tm_data: player_id={player_id!r} not found in DB.")
+                return
+
+            # Step 1: resolve tm_id if missing
+            if not player.tm_id:
+                birth_year = player.birth_date.year if player.birth_date else (
+                    (datetime.now().year - player.age) if player.age else None
+                )
+                found = extractor.search_player_by_name(
+                    player_name,
+                    team=team,
+                    nationality=player.nationality or player.birth_country or "",
+                    birth_year=birth_year,
+                    position=player.position_main or "",
+                )
+                if found:
+                    player.tm_id = found
+                    session.commit()
+                    logger.info(f"resolve_player_tm_data: tm_id={found} resolved for {player_name!r}")
+                else:
+                    logger.warning(f"resolve_player_tm_data: could not find TM id for {player_name!r}")
+                    return
+
+            tm_id_str = str(player.tm_id)
+
+            # Step 2: fetch and store photo
+            try:
+                extractor.fetch_and_store_player_photo(player_id, tm_id_str, session)
+            except Exception as exc:
+                logger.warning(f"resolve_player_tm_data: photo fetch failed for {player_name!r}: {exc}")
+
+            # Step 2.5: Sincronizar Historial de Partidos (TM Data Manager)
+            try:
+                from data.transfermarkt_data_manager import TransfermarktDataManager
+                tm_dm = TransfermarktDataManager(auto_load=False)
+                # Sincronizamos historial de las últimas temporadas
+                for season_id in [get_current_season(), "2024-25", "2023-24"]:
+                    raw_matches = tm_dm.extractor.get_match_history(tm_id_str, season_id)
+                    if raw_matches:
+                        tm_dm._upsert_history_to_sql(player_id, raw_matches)
+                logger.info(f"resolve_player_tm_data: Match history synced for {player_name!r}")
+            except Exception as exc:
+                logger.warning(f"resolve_player_tm_data: match history sync failed for {player_name!r}: {exc}")
+
+            # Step 3: resolve position if missing
+            if not player.position_main:
+                tm_pos = extractor.get_player_main_position(tm_id_str)
+                if tm_pos:
+                    abbr = _to_abbr(tm_pos)
+                    if abbr:
+                        player.position_main = abbr
+                        session.commit()
+                        logger.info(
+                            f"resolve_player_tm_data: position_main={abbr} set for {player_name!r}"
+                        )
+                    else:
+                        logger.warning(
+                            f"resolve_player_tm_data: unrecognised TM position '{tm_pos}' for {player_name!r}"
+                        )
+
+        except Exception as e:
+            logger.error(f"resolve_player_tm_data error for {player_name!r}: {e}", exc_info=True)
+            session.rollback()
         finally:
             session.close()

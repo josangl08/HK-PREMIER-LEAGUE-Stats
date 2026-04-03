@@ -107,7 +107,8 @@ def apply_hkfa_theme(fig: go.Figure) -> go.Figure:
             zeroline=False,
             showline=True,
             linewidth=1,
-            linecolor=HKFATheme.BORDER_COLOR,
+            linecolor="rgba(255,255,255,0.35)",
+            layer="below traces",
             title_font=dict(color=HKFATheme.TEXT_SECONDARY)
         ),
         yaxis=dict(
@@ -117,7 +118,8 @@ def apply_hkfa_theme(fig: go.Figure) -> go.Figure:
             zeroline=False,
             showline=True,
             linewidth=1,
-            linecolor=HKFATheme.BORDER_COLOR,
+            linecolor="rgba(255,255,255,0.35)",
+            layer="below traces",
             title_font=dict(color=HKFATheme.TEXT_SECONDARY)
         ),
 
@@ -340,25 +342,30 @@ def create_radar_chart(
                 showlegend=True
             ))
 
-    # Add reference values (league average)
+    # Close the polygon explicitly by repeating first point
+    metrics_closed = list(metrics) + [metrics[0]]
+
+    # Add reference values — purple
     if reference_values:
+        ref_closed = list(reference_values) + [reference_values[0]]
         fig.add_trace(go.Scatterpolar(
-            r=reference_values,
-            theta=metrics,
+            r=ref_closed,
+            theta=metrics_closed,
             fill='toself',
-            fillcolor='rgba(167, 167, 167, 0.2)',
-            line=dict(color=HKFATheme.TEXT_SECONDARY, width=2),
+            fillcolor='rgba(155, 89, 182, 0.2)',
+            line=dict(color='#9B59B6', width=2),
             name=reference_name,
-            opacity=0.7
+            opacity=0.85
         ))
 
-    # Add primary values
+    # Add primary values — green
+    values_closed = list(values) + [values[0]]
     fig.add_trace(go.Scatterpolar(
-        r=values,
-        theta=metrics,
+        r=values_closed,
+        theta=metrics_closed,
         fill='toself',
-        fillcolor='rgba(237, 28, 36, 0.3)',
-        line=dict(color=HKFATheme.ACCENT_RED, width=2),
+        fillcolor='rgba(46, 204, 113, 0.25)',
+        line=dict(color='#2ECC71', width=2.5),
         name=name
     ))
 
@@ -688,29 +695,85 @@ def get_chart_config(
 # SECTION 7: DASH COMPONENT HELPERS
 # ============================================================================
 
-def create_percentile_bars(percentiles_dict: Dict[str, float]) -> html.Div:
+def create_percentile_bars(percentiles_dict: Dict[str, Any]) -> html.Div:
     """
     Returns an html.Div with dbc.Progress bars for each stat.
-
-    Ideal for: Quick visualization of player strengths/weaknesses.
+    Includes benchmark markers for Group and Position averages if available.
 
     Args:
-        percentiles_dict: Dict mapping stat_name -> percentile (0-100)
+        percentiles_dict: Dict mapping stat_name -> percentile (float) or 
+                         stat_name -> data_dict (with 'percentile', 'group_avg_percentile', etc.)
 
     Returns:
-        html.Div containing labeled progress bars
+        html.Div containing labeled progress bars with benchmark markers
     """
     if not percentiles_dict:
         return html.Div("No hay datos de percentiles disponibles",
                         style={"color": HKFATheme.TEXT_SECONDARY})
 
-    # Sort by value descending
-    sorted_stats = sorted(
-        percentiles_dict.items(), key=lambda x: x[1], reverse=True
-    )
+    # Normalizar datos: asegurar que cada entrada sea un dict
+    normalized_data = {}
+    for stat, data in percentiles_dict.items():
+        if isinstance(data, dict):
+            normalized_data[stat] = data
+        else:
+            normalized_data[stat] = {'percentile': float(data)}
+
+    # Definir descripciones para los índices
+    descriptions = {
+        'efficiency_index': ' (Opportunity conversion ratio)',
+        'defensive_wall': ' (Interception & duel capacity)'
+    }
+
+    # Separar métricas normales del índice para asegurar que el índice sea el último
+    normal_metrics = []
+    index_metrics = []
+    
+    for stat, data in normalized_data.items():
+        if stat in ['efficiency_index', 'defensive_wall']:
+            index_metrics.append((stat, data))
+        else:
+            normal_metrics.append((stat, data))
+
+    # Ordenar métricas normales por valor descendente
+    normal_metrics.sort(key=lambda x: x[1].get('percentile', 0), reverse=True)
+    
+    # Combinar (normales primero, índices al final)
+    all_metrics = normal_metrics + index_metrics
 
     rows = []
-    for stat, val in sorted_stats:
+    
+    # ── Legend for Benchmarks ──────────────────────────────────────────────
+    has_benchmarks = any('group_avg_percentile' in d or 'pos_avg_percentile' in d for d in normalized_data.values())
+    if has_benchmarks:
+        legend_items = []
+        # Group Avg item (White)
+        if any('group_avg_percentile' in d for d in normalized_data.values()):
+            legend_items.append(html.Div([
+                html.Div(style={"width": "8px", "height": "8px", "backgroundColor": "#FFFFFF", "borderRadius": "50%", "marginRight": "4px"}),
+                html.Span("Group Avg", style={"fontSize": "0.65rem", "color": HKFATheme.TEXT_SECONDARY}),
+            ], style={"display": "flex", "alignItems": "center", "marginRight": "12px"}))
+        
+        # Pos Avg item (Purple)
+        if any('pos_avg_percentile' in d for d in normalized_data.values()):
+            legend_items.append(html.Div([
+                html.Div(style={"width": "8px", "height": "8px", "backgroundColor": "#9B59B6", "borderRadius": "50%", "marginRight": "4px"}),
+                html.Span("Pos Avg", style={"fontSize": "0.65rem", "color": HKFATheme.TEXT_SECONDARY}),
+            ], style={"display": "flex", "alignItems": "center"}))
+
+        if legend_items:
+            rows.append(html.Div(legend_items, style={"display": "flex", "justifyContent": "flex-end", "marginBottom": "10px"}))
+
+    for stat, data in all_metrics:
+        val = data.get('percentile', 0)
+        group_avg = data.get('group_avg_percentile')
+        pos_avg = data.get('pos_avg_percentile')
+
+        # Formatear nombre de la métrica
+        display_name = stat.replace('_', ' ').title()
+        if stat in descriptions:
+            display_name += descriptions[stat]
+
         # Determine color based on threshold
         if val >= 90:
             color = HKFATheme.ACCENT_BLUE   # Elite
@@ -724,28 +787,53 @@ def create_percentile_bars(percentiles_dict: Dict[str, float]) -> html.Div:
         rows.append(html.Div([
             html.Div([
                 html.Span(
-                    stat,
-                    style={"color": HKFATheme.TEXT_SECONDARY, "fontSize": "0.9rem"}
+                    display_name,
+                    style={"color": HKFATheme.TEXT_SECONDARY, "fontSize": "0.85rem"}
                 ),
                 html.Span(
-                    f"{val:.0f}th",
+                    f"{val:.0f}%",
                     style={
                         "color": HKFATheme.TEXT_PRIMARY,
-                        "fontSize": "0.9rem",
+                        "fontSize": "0.85rem",
                         "fontWeight": "bold"
                     }
                 )
             ], style={"display": "flex", "justifyContent": "space-between"}),
-            dbc.Progress(
-                value=val,
-                color=color,
-                style={
-                    "height": "8px",
-                    "marginTop": "4px",
-                    "marginBottom": "12px",
-                    "borderRadius": "4px"
-                }
-            )
+            
+            # Container for Progress bar + Markers
+            html.Div(style={"position": "relative", "marginTop": "4px", "marginBottom": "12px"}, children=[
+                dbc.Progress(
+                    value=val,
+                    color=color,
+                    style={
+                        "height": "8px",
+                        "borderRadius": "4px",
+                        "backgroundColor": "rgba(255,255,255,0.05)"
+                    }
+                ),
+                # Group Average Marker (White) - Larger and shifted left if overlap
+                html.Div(style={
+                    "position": "absolute",
+                    "left": f"{max(0.5, group_avg - (1.5 if abs(group_avg - (pos_avg or 0)) < 1.0 else 0))}%",
+                    "top": "-6px",
+                    "height": "20px",
+                    "width": "3px",
+                    "backgroundColor": "#FFFFFF",
+                    "boxShadow": "0 0 8px rgba(255, 255, 255, 0.9)",
+                    "zIndex": "21",
+                }) if group_avg is not None else None,
+                # Position Average Marker (Purple) - Shifted right if overlap
+                html.Div(style={
+                    "position": "absolute",
+                    "left": f"{min(99.5, pos_avg + (1.5 if abs(group_avg - (pos_avg or 0)) < 1.0 else 0))}%",
+                    "top": "-4px",
+                    "height": "16px",
+                    "width": "2px",
+                    "backgroundColor": "#9B59B6",
+                    "boxShadow": "0 0 8px rgba(155, 89, 182, 0.9)",
+                    "zIndex": "22",
+                }) if pos_avg is not None else None,
+            ])
         ]))
 
     return html.Div(rows)

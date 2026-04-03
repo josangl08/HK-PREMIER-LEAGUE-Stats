@@ -20,7 +20,7 @@ from data.hong_kong_data_manager import HongKongDataManager
 from data.processors.ml_preprocessor import MLPreprocessor
 from ai_models.model_registry import ModelRegistry
 from ai_models.predictor import train_xgboost, train_tabpfn
-from ai_models.clustering import fit_kmeans, fit_umap, label_archetypes, FEATURE_LENSES
+from ai_models.clustering import fit_kmeans, fit_umap, label_archetypes, FEATURE_LENSES, apply_quality_filters
 from ai_models.similarity import build_embeddings
 
 # Logger configuration
@@ -57,6 +57,14 @@ def load_data(seasons=None) -> pd.DataFrame:
         logger.info(f"Filtered to seasons: {seasons} → {len(df)} rows")
     else:
         logger.info(f"Loaded {len(df)} player-season rows.")
+
+    # ── Layer 3 Filter: AI Training Quality ───────────────────────────────
+    # We use apply_quality_filters to ensure high-quality training data:
+    # 1. Minimum minutes (180+) to avoid statistical noise.
+    # 2. Bayesian smoothing for rate-based metrics (%) to regress low-volume outliers.
+    initial_len = len(df)
+    df = apply_quality_filters(df, min_minutes=180, smooth_rates=True)
+    logger.info(f"AI Quality Filter: {initial_len} -> {len(df)} valid rows remain (Min 180 mins + Smoothed Rates).")
 
     return df.reset_index(drop=True)
 
@@ -172,7 +180,7 @@ def train_clustering(df: pd.DataFrame) -> None:
     player_names = df["Player"].values if "Player" in df.columns else [str(i) for i in range(len(df))]
 
     for lens in FEATURE_LENSES:
-        for k in [4, 5, 6]:
+        for k in [4, 5, 6, 8]:
             logger.info(f"Fitting KMeans k={k} lens='{lens}' …")
             try:
                 labels, kmeans_model = fit_kmeans(X, k=k, feature_lens=lens, feature_names=feature_cols)

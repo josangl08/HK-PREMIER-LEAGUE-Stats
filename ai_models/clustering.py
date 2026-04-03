@@ -4,11 +4,17 @@
 """
 Clustering module for discovering player archetypes.
 Uses K-Means for grouping and UMAP for high-dimensional visualization.
+This version uses Position-Relative Z-Scores to compare players against their peers.
 """
 
 # Standard Library
 import logging
+import os
 from typing import Any, Dict, List, Optional, Tuple
+
+# Safeguard for Numba threading layer on macOS (Silicon)
+if "NUMBA_THREADING_LAYER" not in os.environ:
+    os.environ["NUMBA_THREADING_LAYER"] = "workqueue"
 
 # Third-party
 import numpy as np
@@ -19,168 +25,157 @@ from ai_models.model_registry import ModelRegistry
 
 logger = logging.getLogger(__name__)
 
-# Predefined feature lenses — maps lens name → relevant column substrings
+# Predefined feature lenses
 FEATURE_LENSES: Dict[str, List[str]] = {
-    "overall": [],  # empty = use all features passed in
+    "overall": [],
     "physical": ["speed", "sprint", "distance", "aerial", "duel", "strength"],
     "creative": ["key_pass", "assist", "through_ball", "chance", "dribble", "cross"],
     "defensive": ["tackle", "interception", "clearance", "block", "duel_won", "clean_sheet"],
 }
 
-# Archetype label patterns: frozenset of top-feature keyword substrings → label
+# Archetype label patterns: Semantic interpretation of cluster centers
 _ARCHETYPE_PATTERNS: List[Tuple[frozenset, str]] = [
-    (frozenset(["goals_per90", "shots_per90", "xg_per90"]), "Lethal Finisher"),
-    (frozenset(["key_pass", "assist", "through_ball"]), "Creative Maestro"),
-    (frozenset(["tackle", "interception", "duel_won"]), "Defensive Wall"),
-    (frozenset(["pass", "pass_accuracy", "key_pass"]), "Midfield Metronome"),
-    (frozenset(["aerial", "headed_goal", "shots_per90"]), "Target Man"),
-    (frozenset(["dribble", "fouls_won", "key_pass"]), "Tricky Winger"),
-    (frozenset(["clean_sheet", "save", "goals_conceded"]), "Shot Stopper"),
-    (frozenset(["goals", "assist", "shots"]), "Box Threat"),
-    (frozenset(["pass", "possession", "ball_recovery"]), "Anchor Midfielder"),
+    (frozenset(["save rate", "clean sheet", "prevented goals"]), "Shot Stopper"),
+    (frozenset(["interception", "tackle", "defensive duel", "blocked"]), "Defensive Wall"),
+    (frozenset(["pass", "accurate pass", "long pass", "progressive pass"]), "Deep-Lying Distributor"),
+    (frozenset(["goals", "shots", "xg", "penalty"]), "Lethal Finisher"),
+    (frozenset(["key pass", "assist", "through pass", "xa"]), "Creative Maestro"),
+    (frozenset(["dribble", "progressive run", "acceleration"]), "Tricky Winger"),
+    (frozenset(["pass", "accurate pass", "short / medium pass"]), "Midfield Metronome"),
+    (frozenset(["aerial duel", "head goal", "height"]), "Target Man"),
+    (frozenset(["touches in box", "offensive duel"]), "Box Threat"),
+    (frozenset(["market value", "age"]), "Valuable Prospect"),
+    (frozenset(["distance", "hsr", "sprint"]), "Physical Engine"),
 ]
 
 
-def _apply_lens(X: np.ndarray, feature_names: List[str], feature_lens: str) -> np.ndarray:
-    """Filter feature matrix columns to those relevant to the given lens."""
-    keywords = FEATURE_LENSES.get(feature_lens, [])
-    if not keywords:
-        return X
-    indices = [
-        i for i, name in enumerate(feature_names)
-        if any(kw in name.lower() for kw in keywords)
-    ]
-    if not indices:
-        logger.warning(f"fit_kmeans: lens '{feature_lens}' matched no features; using all.")
-        return X
-    return X[:, indices]
-
-
-def fit_kmeans(
-    X: np.ndarray,
-    k: int,
-    feature_lens: str = "overall",
-    feature_names: Optional[List[str]] = None,
-) -> Tuple[np.ndarray, Any]:
+def apply_quality_filters(
+    df: pd.DataFrame, 
+    min_minutes: int = 45, # Lowered to 45 to allow everyone to see data
+    smooth_rates: bool = True,
+    m_constant: float = 25.0
+) -> pd.DataFrame:
     """
-    Fits a K-Means clustering model to the feature matrix.
-
-    Args:
-        X: Feature matrix (n_samples, n_features), already scaled.
-        k: Number of clusters.
-        feature_lens: One of 'overall', 'physical', 'creative', 'defensive'.
-        feature_names: Column names for X (used for lens filtering and registry metadata).
-
-    Returns:
-        Tuple of (cluster labels array of shape (n_samples,), fitted KMeans model).
+    Applies quality filters and Bayesian smoothing to avoid statistical noise.
     """
-    from sklearn.cluster import KMeans
-    from sklearn.metrics import silhouette_score
+    df = df.copy()
+    if "Minutes played" in df.columns:
+        df = df[df["Minutes played"] >= min_minutes]
+        
+    if not smooth_rates or df.empty:
+        return df
 
-    feature_names = feature_names or list(range(X.shape[1]))
-    X_lens = _apply_lens(X, feature_names, feature_lens)
+    rate_cols = [c for c in df.columns if '%' in c or 'rate' in c.lower()]
+    for col in rate_cols:
+        if not pd.api.types.is_numeric_dtype(df[col]): continue
+        
+        prefix = col.split(',')[0].replace('Accurate', '').replace('Successful', '').strip()
+        vol_col = next((v for v in df.columns if prefix.lower() in v.lower() and 'per 90' in v.lower() and v != col), None)
+        
+        if not vol_col:
+            if 'dribble' in col.lower(): vol_col = 'Dribbles per 90'
+            elif 'cross' in col.lower(): vol_col = 'Crosses per 90'
+            elif 'duel' in col.lower(): vol_col = 'Duels per 90'
+            elif 'shot' in col.lower(): vol_col = 'Shots per 90'
 
-    model = KMeans(n_clusters=k, random_state=42, n_init=10)
-    labels = model.fit_predict(X_lens)
-
-    sil_score = float(silhouette_score(X_lens, labels)) if k > 1 and len(set(labels)) > 1 else 0.0
-    logger.info(f"KMeans k={k} lens={feature_lens} silhouette={sil_score:.4f}")
-
-    metrics = {"silhouette_score": sil_score, "k": k, "feature_lens": feature_lens}
-    registry = ModelRegistry()
-    registry.save(
-        model,
-        model_id=f"kmeans_{feature_lens}_k{k}",
-        model_type="clustering",
-        metrics=metrics,
-        features=list(feature_names),
-    )
-    return labels, model
-
-
-def fit_umap(
-    X: np.ndarray,
-    player_names: List[str],
-    random_state: int = 42,
-) -> Tuple[pd.DataFrame, Any]:
-    """
-    Reduces feature matrix to 2D via UMAP for interactive visualization.
-
-    Args:
-        X: Feature matrix (n_samples, n_features), already scaled.
-        player_names: List of player name strings, one per row.
-        random_state: Fixed seed for reproducibility.
-
-    Returns:
-        Tuple of (DataFrame with columns x, y, player_name; fitted UMAP reducer).
-    """
-    import umap as umap_lib
-
-    reducer = umap_lib.UMAP(n_components=2, random_state=random_state)
-    embedding = reducer.fit_transform(X)
-
-    umap_df = pd.DataFrame({
-        "x": embedding[:, 0],
-        "y": embedding[:, 1],
-        "player_name": player_names,
-    })
-
-    registry = ModelRegistry()
-    registry.save(
-        reducer,
-        model_id="umap_2d",
-        model_type="clustering",
-        metrics={},
-        features=[],
-    )
-    return umap_df, reducer
+        if vol_col and vol_col in df.columns and "Minutes played" in df.columns:
+            vol = df[vol_col] * (df["Minutes played"] / 90.0)
+            global_mean = df[col].mean()
+            df[col] = (df[col] * vol + global_mean * m_constant) / (vol + m_constant)
+            df[col] = df[col].clip(0, 100)
+    return df
 
 
 def label_archetypes(
     kmeans_model: Any,
     feature_names: List[str],
+    cluster_df: Optional[pd.DataFrame] = None
 ) -> List[str]:
     """
-    Assigns semantic archetype labels to K-Means cluster centroids.
-
-    Strategy:
-    1. Compute z-scores of centroids across all clusters.
-    2. For each centroid, identify top-3 dominant features by abs z-score.
-    3. Match against predefined archetype patterns (partial: ≥2 keyword overlaps).
-    4. Default to "Cluster {i}" if no match found.
-
-    Args:
-        kmeans_model: Fitted KMeans model with .cluster_centers_ attribute.
-        feature_names: Feature names corresponding to centroid columns.
-
-    Returns:
-        List of archetype label strings, one per cluster.
+    Assigns semantic archetype labels based on dominant cluster traits.
+    Purely statistical approach using z-scores of centroids.
     """
-    centroids = kmeans_model.cluster_centers_  # (k, n_features)
+    centroids = kmeans_model.cluster_centers_
+    
+    # CRITICAL: feature_names MUST match centroids shape
+    if len(feature_names) != centroids.shape[1]:
+        logger.warning(f"label_archetypes: names ({len(feature_names)}) != centroids ({centroids.shape[1]}). Truncating/Padding.")
+        if len(feature_names) > centroids.shape[1]:
+            feature_names = feature_names[:centroids.shape[1]]
+        else:
+            feature_names = feature_names + [f"Feature {i}" for i in range(len(feature_names), centroids.shape[1])]
+
     centroid_mean = centroids.mean(axis=0)
-    centroid_std = centroids.std(axis=0) + 1e-8  # avoid division by zero
-    z_scores = (centroids - centroid_mean) / centroid_std  # (k, n_features)
+    centroid_std = centroids.std(axis=0) + 1e-8
+    z_scores = (centroids - centroid_mean) / centroid_std
 
     feature_names_lower = [str(f).lower() for f in feature_names]
-    labels = []
+    # Filter out derived/technical noise for cleaner labeling
+    NOISE_FOR_DNA = {"red card", "yellow card", "foul", "conceded", "loss", "lost", "as gk", "exits", "lag_1", "roll_3"}
 
+    labels = []
     for i, z_row in enumerate(z_scores):
-        top3_indices = np.argsort(np.abs(z_row))[::-1][:3]
-        top3_features = {feature_names_lower[j] for j in top3_indices}
+        valid_indices = [j for j, name in enumerate(feature_names_lower) if not any(neg in name for neg in NOISE_FOR_DNA)]
+        z_valid = z_row[valid_indices]
+        
+        # Identify top traits that define this group
+        top5_local_idx = np.argsort(z_valid)[::-1][:5]
+        top5_features = {feature_names_lower[valid_indices[j]] for j in top5_local_idx}
 
         best_label = None
-        best_overlap = 0
+        best_overlap = 0 # Must have at least one match
 
         for pattern_keywords, archetype_label in _ARCHETYPE_PATTERNS:
-            overlap = sum(
-                any(kw in feat for kw in pattern_keywords)
-                for feat in top3_features
-            )
-            if overlap >= 2 and overlap > best_overlap:
+            overlap = sum(any(kw in feat for kw in pattern_keywords) for feat in top5_features)
+            if overlap > best_overlap:
                 best_overlap = overlap
                 best_label = archetype_label
 
         labels.append(best_label if best_label else f"Cluster {i}")
-        logger.info(f"Cluster {i} top features: {top3_features} → '{labels[-1]}'")
+        logger.info(f"Cluster {i} top features: {top5_features} -> '{labels[-1]}'")
 
     return labels
+
+
+def fit_kmeans(X: np.ndarray, k: int, feature_lens: str = "overall", feature_names: Optional[List[str]] = None) -> Tuple[np.ndarray, Any]:
+    from sklearn.cluster import KMeans
+    from sklearn.metrics import silhouette_score
+    feature_names = feature_names or []
+    
+    # 1. Lens Filtering (High priority)
+    lens_features = FEATURE_LENSES.get(feature_lens.lower(), [])
+    if lens_features:
+        indices = [i for i, f in enumerate(feature_names) if any(lf in str(f).lower() for lf in lens_features)]
+        logger.info(f"fit_kmeans: Using lens '{feature_lens}' filtering to {len(indices)} features.")
+    else:
+        # 2. Positional Z-Score Selection (Fallback)
+        indices = [i for i, f in enumerate(feature_names) if "_zscore_positional" in str(f)]
+    
+    if indices:
+        X_input = X[:, indices]
+        selected_features = [feature_names[i] for i in indices]
+    else:
+        X_input = X
+        selected_features = feature_names
+
+    model = KMeans(n_clusters=k, random_state=42, n_init=20)
+    labels = model.fit_predict(X_input)
+    
+    registry = ModelRegistry()
+    # SAVE the selected features so they can be re-loaded for labeling
+    registry.save(model, model_id=f"kmeans_{feature_lens}_k{k}", model_type="clustering", 
+                  metrics={"k": k, "features_used": len(selected_features)}, 
+                  features=selected_features)
+    return labels, model
+
+def fit_umap(X: np.ndarray, player_names: List[str], random_state: int = 42) -> Tuple[pd.DataFrame, Any]:
+    import umap as umap_lib
+    reducer = umap_lib.UMAP(n_components=2, random_state=random_state, n_neighbors=15, min_dist=0.1)
+    embedding = reducer.fit_transform(X)
+    umap_df = pd.DataFrame({"x": embedding[:, 0], "y": embedding[:, 1], "player_name": player_names})
+    
+    # Save to registry for downstream use
+    registry = ModelRegistry()
+    registry.save(reducer, model_id="umap_reducer", model_type="dimensionality_reduction")
+    
+    return umap_df, reducer

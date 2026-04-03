@@ -87,20 +87,20 @@ class HongKongDataManager:
         try:
             # Consulta: Unir Estadísticas con Jugadores y Equipos
             stmt = (
-                select(PlayerSeasonStat, Player.name, Team.name.label("team_name"))
+                select(PlayerSeasonStat, Player.name, Player.position_main, Team.name.label("team_name"))
                 .join(Player, PlayerSeasonStat.player_id == Player.id)
                 .outerjoin(Team, Player.current_team_id == Team.id)
                 .where(PlayerSeasonStat.season_id == season_id)
             )
-            
+
             results = session.execute(stmt).all()
-            
+
             data_list = []
-            for stat_obj, player_name, team_name in results:
-                # Combinar core metrics con advanced metrics del JSON
+            for stat_obj, player_name, position_main, team_name in results:
+                # Core metrics
                 row = {
                     "Player": player_name,
-                    "Team": team_name or "Unknown",
+                    "Season": stat_obj.season_id,
                     "Matches played": stat_obj.matches_played,
                     "Minutes played": stat_obj.minutes_played,
                     "Goals": stat_obj.goals,
@@ -108,11 +108,31 @@ class HongKongDataManager:
                     "Yellow cards": stat_obj.yellow_cards,
                     "Red cards": stat_obj.red_cards
                 }
-                
+
                 # Añadir métricas avanzadas del campo JSON
                 if stat_obj.advanced_stats:
                     row.update(stat_obj.advanced_stats)
+
+                # Robust Team Name Resolution
+                # Confirmation: Team within selected timeframe is the team where they started the season.
+                # Team is the team at the moment of the CSV.
+                json_team = row.get("Team within selected timeframe")
                 
+                final_team = team_name # From DB join (current team)
+                
+                # For historical seasons, prioritize the record's team
+                if json_team and str(json_team) not in ("0.0", "0", "nan", "None"):
+                    final_team = str(json_team)
+                elif not final_team or final_team == "Unknown" or final_team == "0.0":
+                    final_team = "Unknown Team"
+                
+                row["Team"] = final_team
+
+                # Posición confirmada (TM o migración): actúa como override cuando la
+                # posición del CSV es una lista ambigua de múltiples valores.
+                if position_main:
+                    row["Position_Confirmed"] = position_main
+
                 data_list.append(row)
             
             return pd.DataFrame(data_list)
@@ -200,3 +220,11 @@ class HongKongDataManager:
 
     def get_next_fixture(self, team: str) -> Optional[dict]:
         return get_fixture_manager().get_next_fixture(team)
+
+    @property
+    def processed_data(self) -> Optional[pd.DataFrame]:
+        """
+        Exposes the processed player DataFrame from the underlying aggregator.
+        Returns None if the aggregator has not been initialised (no data in DB).
+        """
+        return self.aggregator.data if self.aggregator is not None else None

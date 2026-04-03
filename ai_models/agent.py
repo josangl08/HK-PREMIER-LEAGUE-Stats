@@ -48,6 +48,15 @@ def create_agent(flow: str = "scouting") -> Any:
     Hierarchical Orchestration: Gemini 3 Pro -> Gemini 2.5 Pro
     Hierarchical Execution: Gemini 3 Flash -> Gemini 2.5 Flash -> Gemini 2 Flash
     """
+    # Resolve alias if present
+    flow = FLOW_ALIASES.get(flow, flow)
+
+    if flow not in ("content", "scouting"):
+        raise ValueError(f"Unknown flow '{flow}'. Choose 'content' or 'scouting'.")
+
+    if flow in _compiled_flows:
+        return _compiled_flows[flow]
+
     from utils.ai_config import AI_DEFAULTS
 
     # 1. Instantiate the Brain (Orchestrator) with fallback
@@ -66,12 +75,6 @@ def create_agent(flow: str = "scouting") -> Any:
     llm_worker = _get_llm_with_fallback(worker_list, temperature=AI_DEFAULTS["worker"]["temperature"])
 
     logger.info(f"🚀 ELITE MULTI-MODEL ACTIVE: Brain ({llm_brain.model}) + Worker ({llm_worker.model}).")
-
-    if flow not in ("content", "scouting"):
-        raise ValueError(f"Unknown flow '{flow}'. Choose 'content' or 'scouting'.")
-
-    if flow in _compiled_flows:
-        return _compiled_flows[flow]
 
     # Lazy import flows and tools
     from ai_models.agent_flows import build_content_flow, build_scouting_flow

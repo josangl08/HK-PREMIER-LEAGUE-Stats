@@ -176,11 +176,15 @@ reports/
 # Archivos de configuración sensibles
 .env
 secrets.json
+client_secret.json
 
 # Datos temporales y de prueba
 temp/
 tmp/
-
+*.csv
+data/archive/
+data/database.db
+data/historical_records/*.json
 
 # Archivos IDE específicos
 .vscode/
@@ -214,9 +218,14 @@ DS_Store
 # Fixtures
 data/fixtures/fixtures.json
 
-# Team Media
+# Team Media & Photos
 assets/team_media/*
 !assets/team_media/.gitkeep
+assets/team_jersey/
+assets/team_logos/
+assets/team_media/
+assets/templates
+data/player_cards/
 
 # .claude
 .claude/

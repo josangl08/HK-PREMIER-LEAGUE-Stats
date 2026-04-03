@@ -184,6 +184,11 @@ def _predictor_panel() -> dbc.Card:
                 [
                     html.Div(id="ai-predictor-result", className="mb-3"),
                     dcc.Graph(
+                        id="ai-predictor-trend-graph",
+                        config={"displayModeBar": False},
+                        style={"minHeight": "220px"},
+                    ),
+                    dcc.Graph(
                         id="ai-predictor-shap-graph",
                         config={"displayModeBar": False},
                         style={"minHeight": "300px"},

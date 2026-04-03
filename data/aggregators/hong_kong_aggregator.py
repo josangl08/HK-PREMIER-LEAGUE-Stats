@@ -36,11 +36,11 @@ class HongKongStatsAggregator:
 
         # Definir métricas clave por posición
         self.position_metrics = {
-            'Goalkeeper': ['Clean sheets', 'Save rate, %', 'Conceded goals', 'xG against'],
-            'Defender': ['Defensive duels won, %', 'Aerial duels won, %', 'Interceptions per 90', 'Fouls per 90'],
-            'Midfielder': ['Accurate passes, %', 'Key passes per 90', 'Progressive passes per 90', 'Assists'],
-            'Winger': ['Successful dribbles, %', 'Crosses per 90', 'Assists', 'Goals'],
-            'Forward': ['Goals', 'xG', 'Goal conversion, %', 'Shots on target, %']
+            'Goalkeeper': ['Save rate, %', 'Clean sheets', 'Prevented goals per 90', 'xG against per 90'],
+            'Defender': ['Interceptions per 90', 'Defensive duels won, %', 'Aerial duels won, %', 'Shots blocked per 90'],
+            'Midfielder': ['Assists', 'xA', 'Key passes per 90', 'Accurate passes, %'],
+            'Winger': ['Goals', 'Assists', 'Dribbles per 90', 'Crosses per 90'],
+            'Forward': ['Goals', 'xG', 'Shots on target, %', 'Goal conversion, %']
         }
 
         # Métricas generales para todos los jugadores

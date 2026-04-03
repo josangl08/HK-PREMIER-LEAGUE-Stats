@@ -94,6 +94,7 @@ class TimelineAggregator:
                         "group_year": get_season_from_date(next_fix["date_utc"]),
                         "payload": {
                             **next_fix,
+                            "team": home_name if next_fix["home_team"] == current_team_id else away_name,
                             "home_team": home_name,
                             "away_team": away_name,
                             "home_logo": home_logo,
@@ -158,12 +159,20 @@ class TimelineAggregator:
                         "player_id": player_id,
                         "player_name": player_name,
                         "matches": season_matches,
-                        "stats": {
-                            "matches_played": stat.matches_played if stat else sum(1 for m in season_matches if m['minutes_played'] > 0),
-                            "goals": stat.goals if stat else sum(m['goals'] or 0 for m in season_matches),
-                            "assists": stat.assists if stat else sum(m['assists'] or 0 for m in season_matches),
-                            "minutes_played": stat.minutes_played if stat else sum(m['minutes_played'] or 0 for m in season_matches)
+                        "stats": (
+                        {
+                            "matches_played": sum(1 for m in season_matches if (m['minutes_played'] or 0) > 0),
+                            "goals":          sum(m['goals'] or 0 for m in season_matches),
+                            "assists":        sum(m['assists'] or 0 for m in season_matches),
+                            "minutes_played": sum(m['minutes_played'] or 0 for m in season_matches),
+                        } if season_matches else {
+                            # Fallback: solo HKPL cuando no hay historial de TM scrapeado
+                            "matches_played": stat.matches_played if stat else 0,
+                            "goals":          stat.goals if stat else 0,
+                            "assists":        stat.assists if stat else 0,
+                            "minutes_played": stat.minutes_played if stat else 0,
                         }
+                    )
                     }
                 })
 

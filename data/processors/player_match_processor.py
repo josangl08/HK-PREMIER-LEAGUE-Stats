@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 # Keys expected in a match_report entry
 _INJURY_MARKERS = {"injury", "injured", "verletzt", "lesion", "lesión", "blessé"}
-_SUSPENSION_MARKERS = {"suspension", "suspended", "gesperrt", "sperre", "suspendido", "sanction"}
+_SUSPENSION_MARKERS = {"suspension", "suspended", "gesperrt", "sperre", "suspendido", "sanction", "sancionado", "sanción"}
 
 
 def enrich_absence_reason(

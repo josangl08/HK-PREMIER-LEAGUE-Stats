@@ -5,6 +5,11 @@ import os
 import io
 import shutil
 from pathlib import Path
+
+# Safeguard for Numba threading layer on macOS (Silicon)
+if "NUMBA_THREADING_LAYER" not in os.environ:
+    os.environ["NUMBA_THREADING_LAYER"] = "workqueue"
+
 from rembg import remove
 from PIL import Image
 
@@ -18,9 +23,15 @@ def remove_background(image_bytes: bytes) -> bytes:
     """
     Removes background from image bytes using rembg (U2-Net).
     Returns RGBA PNG bytes.
+    Handles potential onnxruntime/OpenMP crashes gracefully by falling back to original.
     """
-    output_bytes = remove(image_bytes)
-    return output_bytes
+    try:
+        output_bytes = remove(image_bytes)
+        return output_bytes
+    except Exception as exc:
+        logger.warning(f"Background removal failed (likely OpenMP/ONNX issue): {exc}")
+        # Return original bytes if rembg fails
+        return image_bytes
 
 def save_player_photo(player_id, image_bytes: bytes, filename: str) -> dict:
     """

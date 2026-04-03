@@ -365,7 +365,7 @@ class PercentileRankingSystem:
                                by_position: bool = True) -> Dict:
         """
         Get percentile rankings for player across key metrics.
-        by_position: Compare vs same position (True) or all players (False)
+        Includes benchmarks for group average and specific position average.
         """
         player_data = self.data[self.data['Player'] == player_name]
 
@@ -373,47 +373,97 @@ class PercentileRankingSystem:
             logger.warning(f"Player '{player_name}' not found")
             return {}
 
-        position = player_data['Position_Group'].iloc[0] if 'Position_Group' in player_data.columns else None
+        row = player_data.iloc[0]
+        pos_group = row.get('Position_Group', 'Unknown')
+        raw_pos = str(row.get('Position_Clean', 'Unknown')).split(',')[0].strip()
 
-        # Define key metrics to analyze
+        # Simplified position for benchmarking (e.g. LCB -> CB, RWF -> RW)
+        def _simplify_pos(p):
+            p = str(p).upper()
+            if any(x in p for x in ['CB', 'CENTRE-BACK', 'CENTRAL']): return 'CB'
+            if any(x in p for x in ['LB', 'RB', 'LWB', 'RWB', 'BACK']): return 'FB'
+            if any(x in p for x in ['DMF', 'CMF', 'AMF', 'MIDFIELD']): return 'MF'
+            if any(x in p for x in ['RW', 'LW', 'WF']): return 'WG'
+            if any(x in p for x in ['CF', 'ST', 'FORWARD']): return 'FW'
+            return p
+
+        simple_raw_pos = _simplify_pos(raw_pos)
+        
+        def _match_pos(pos_str):
+            if pd.isna(pos_str): return False
+            tokens = [t.strip() for t in str(pos_str).split(',')]
+            return any(_simplify_pos(t) == simple_raw_pos for t in tokens)
+
+        # Filter comparison data for the player's percentile rank
+        if by_position and pos_group != 'Unknown':
+            rank_comparison_data = self.data[self.data.get('Position_Group', '') == pos_group]
+        else:
+            rank_comparison_data = self.data
+
+        # Benchmark comparison data (all players in the same group and same simplified position)
+        group_data = self.data[self.data.get('Position_Group', '') == pos_group] if pos_group != 'Unknown' else self.data
+        pos_main_data = self.data[self.data.get('Position_Clean', '').apply(_match_pos)] if raw_pos != 'Unknown' else group_data
+
+        # Define key metrics to analyze (expanded for GK and composite metrics)
         key_metrics = [
             'Goals', 'Assists', 'xG', 'xA', 'Shots', 'Shots on target, %',
-            'Passes per 90', 'Accurate passes, %',
+            'Goal conversion, %',
+            'Passes per 90', 'Accurate passes, %', 'Key passes per 90',
             'Tackles per 90', 'Interceptions per 90',
-            'Duels won, %', 'Defensive duels won, %'
+            'PAdj interceptions per 90',
+            'Duels won, %', 'Defensive duels won, %',
+            'Aerial duels won, %', 'Shots blocked per 90',
+            # Winger / attacking metrics present in Wyscout export
+            'Successful dribbles, %', 'Crosses per 90', 'Dribbles per 90',
+            # GK metrics
+            'Save rate, %', 'Clean sheets', 'Prevented goals per 90', 'xG against per 90',
+            # Composite metrics
+            'efficiency_index', 'defensive_wall'
         ]
-
-        # Filter comparison data
-        if by_position and position:
-            comparison_data = self.data[self.data.get('Position_Group', '') == position]
-        else:
-            comparison_data = self.data
 
         percentiles = {}
 
         for metric in key_metrics:
-            if metric not in player_data.columns or metric not in comparison_data.columns:
+            if metric not in player_data.columns or metric not in self.data.columns:
                 continue
 
-            player_value = pd.to_numeric(player_data[metric].iloc[0], errors='coerce')
+            player_value = pd.to_numeric(row[metric], errors='coerce')
             if pd.isna(player_value):
                 continue
 
-            # Calculate percentile rank
-            metric_values = pd.to_numeric(comparison_data[metric], errors='coerce').dropna()
+            # Calculate player's percentile rank in comparison group
+            metric_values_rank = pd.to_numeric(rank_comparison_data[metric], errors='coerce').dropna()
+            
+            if len(metric_values_rank) > 0:
+                # Use mean(<=) for robustness, consistent with other parts of the app
+                percentile = (metric_values_rank <= player_value).mean() * 100
+                
+                # Benchmark: Group Average (e.g. all Defenders)
+                group_metric_values = pd.to_numeric(group_data[metric], errors='coerce').dropna()
+                group_avg = group_metric_values.mean() if not group_metric_values.empty else 0
+                group_avg_percentile = (metric_values_rank <= group_avg).mean() * 100 if not metric_values_rank.empty else 50
 
-            if len(metric_values) > 0:
-                percentile = (metric_values < player_value).sum() / len(metric_values) * 100
+                # Benchmark: Specific Position Average (e.g. all Centre-Backs)
+                pos_metric_values = pd.to_numeric(pos_main_data[metric], errors='coerce').dropna()
+                pos_avg = pos_metric_values.mean() if not pos_metric_values.empty else 0
+                pos_avg_percentile = (metric_values_rank <= pos_avg).mean() * 100 if not metric_values_rank.empty else 50
+
                 percentiles[metric] = {
                     'value': round(float(player_value), 3),
                     'percentile': round(float(percentile), 2),
-                    'comparison_group': position if by_position else 'league',
-                    'comparison_size': len(metric_values)
+                    'comparison_group': pos_group if by_position else 'league',
+                    'comparison_size': len(metric_values_rank),
+                    # Benchmark data for UI markers
+                    'group_avg_percentile': round(float(group_avg_percentile), 2),
+                    'pos_avg_percentile': round(float(pos_avg_percentile), 2),
+                    'group_avg_value': round(float(group_avg), 3),
+                    'pos_avg_value': round(float(pos_avg), 3)
                 }
 
         return {
             'player': player_name,
-            'position': position,
+            'position': pos_group,
+            'position_main': raw_pos,
             'comparison_type': 'position' if by_position else 'league',
             'metrics': percentiles
         }

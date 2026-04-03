@@ -283,6 +283,17 @@ def handle_registration(n_clicks, username, password, confirm_password,
                     f"(player={player_name}, team={player_profile.get('team', '?')}, "
                     f"season={player_profile.get('season', '?')})"
                 )
+                # Background TM data resolution (photo, position, tm_id)
+                import threading
+                from data.managers.hkpl_sync_manager import HKPLSyncManager
+                _team_hint = player_profile.get('team', '') or ''
+                def _bg_tm_sync(_pid=player_id, _pname=player_name, _team=_team_hint):
+                    try:
+                        HKPLSyncManager().resolve_player_tm_data(_pid, _pname, _team)
+                    except Exception as _exc:
+                        logger.warning(f"Background TM sync failed for {_pname!r}: {_exc}")
+                threading.Thread(target=_bg_tm_sync, daemon=True).start()
+                logger.info(f"Background TM sync started for {player_name!r}")
                 return (None, None, None, None, '/login') + _NO_AGENT_ERRORS
             else:
                 return (

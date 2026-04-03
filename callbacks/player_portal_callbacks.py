@@ -12,8 +12,11 @@ from utils.stage_helpers import (
     render_post_match,
     render_pre_match,
     render_career_insights,
+    render_career_overview,
+    render_player_dashboard,
     get_cached_image_path,
     render_image_gallery,
+    _get_position_group,
 )
 from utils.performance_helpers import get_streaming_label
 from utils.app_context import get_hong_kong_data_manager
@@ -23,45 +26,147 @@ import html as _html_lib
 
 logger = logging.getLogger(__name__)
 
-# Static team color palette — sourced from official club identity (primary, secondary)
+# Static team color palette — sourced from official club identity (Badge and Kits)
 _TEAM_COLORS = {
-    "kitchee": {"colour1": "#E31837", "colour2": "#003087"},
-    "kitchee sc": {"colour1": "#E31837", "colour2": "#003087"},
-    "eastern": {"colour1": "#004EA2", "colour2": "#FFD700"},
-    "eastern aa": {"colour1": "#004EA2", "colour2": "#FFD700"},
-    "eastern sc": {"colour1": "#004EA2", "colour2": "#FFD700"},
-    "lee man": {"colour1": "#C8102E", "colour2": "#1a1a2e"},
-    "lee man fc": {"colour1": "#C8102E", "colour2": "#1a1a2e"},
-    "southern district": {"colour1": "#0057A8", "colour2": "#E31837"},
-    "southern": {"colour1": "#0057A8", "colour2": "#E31837"},
-    "rangers": {"colour1": "#0057A8", "colour2": "#ffffff"},
-    "hk rangers": {"colour1": "#0057A8", "colour2": "#ffffff"},
-    "tai po": {"colour1": "#003087", "colour2": "#FFB612"},
-    "north district": {"colour1": "#F58220", "colour2": "#1a1a2e"},
-    "hong kong football club": {"colour1": "#E41B17", "colour2": "#ffffff"},
-    "hkfc": {"colour1": "#E41B17", "colour2": "#ffffff"},
-    "kowloon city": {"colour1": "#6A0DAD", "colour2": "#1a1a2e"},
+    "kitchee": {
+        "badge": ["#14236b", "#e7b330", "#848cb2"],
+        "kit_home": ["#091e47", "#db5d96", "#0a468c"],
+        "kit_away": ["#dfdeeb", "#eb4380"],
+        "colour1": "#14236b",
+        "colour2": "#e7b330"
+    },
+    "kitchee sc": {
+        "badge": ["#14236b", "#e7b330", "#848cb2"],
+        "kit_home": ["#091e47", "#db5d96", "#0a468c"],
+        "kit_away": ["#dfdeeb", "#eb4380"],
+        "colour1": "#14236b",
+        "colour2": "#e7b330"
+    },
+    "eastern": {
+        "badge": ["#224283", "#d3242b", "#e6c8cd"],
+        "kit_home": ["#1e407e"],
+        "kit_away": ["#d0d0d5"],
+        "colour1": "#224283",
+        "colour2": "#d3242b"
+    },
+    "eastern aa": {
+        "badge": ["#224283", "#d3242b", "#e6c8cd"],
+        "kit_home": ["#1e407e"],
+        "kit_away": ["#d0d0d5"],
+        "colour1": "#224283",
+        "colour2": "#d3242b"
+    },
+    "eastern sc": {
+        "badge": ["#224283", "#d3242b", "#e6c8cd"],
+        "kit_home": ["#1e407e"],
+        "kit_away": ["#d0d0d5"],
+        "colour1": "#224283",
+        "colour2": "#d3242b"
+    },
+    "eastern district": {
+        "badge": ["#e1e3e5", "#0d1c35", "#646d78"],
+        "kit_home": ["#16233a", "#d5dbe0", "#387287"],
+        "kit_away": ["#e9363a", "#f7e4e7", "#e68184"],
+        "colour1": "#0d1c35",
+        "colour2": "#e1e3e5"
+    },
+    "lee man": {
+        "badge": ["#e7b844", "#1b2180", "#e30513"],
+        "kit_home": ["#edcc55"],
+        "kit_away": ["#1f2837", "#edcc55"],
+        "colour1": "#e7b844",
+        "colour2": "#1b2180"
+    },
+    "lee man fc": {
+        "badge": ["#e7b844", "#1b2180", "#e30513"],
+        "kit_home": ["#edcc55"],
+        "kit_away": ["#1f2837", "#edcc55"],
+        "colour1": "#e7b844",
+        "colour2": "#1b2180"
+    },
+    "southern district": {
+        "badge": ["#b91329", "#064276", "#e0cbcd"],
+        "kit_home": ["#d81d3b", "#e9d6da", "#632c38"],
+        "kit_away": ["#2b3854", "#b8c7e7"],
+        "colour1": "#b91329",
+        "colour2": "#064276"
+    },
+    "southern": {
+        "badge": ["#b91329", "#064276", "#e0cbcd"],
+        "kit_home": ["#d81d3b", "#e9d6da", "#632c38"],
+        "kit_away": ["#2b3854", "#b8c7e7"],
+        "colour1": "#b91329",
+        "colour2": "#064276"
+    },
+    "rangers": {
+        "badge": ["#a7e1fa", "#05a6e8", "#5ac5f1"],
+        "kit_home": ["#2179c0", "#c6cedc", "#04266e"],
+        "kit_away": ["#b55384", "#d4c4d8", "#2f2142"],
+        "colour1": "#05a6e8",
+        "colour2": "#a7e1fa"
+    },
+    "hk rangers": {
+        "badge": ["#a7e1fa", "#05a6e8", "#5ac5f1"],
+        "kit_home": ["#2179c0", "#c6cedc", "#04266e"],
+        "kit_away": ["#b55384", "#d4c4d8", "#2f2142"],
+        "colour1": "#05a6e8",
+        "colour2": "#a7e1fa"
+    },
+    "tai po": {
+        "badge": ["#134726", "#b4bc8e", "#60856e"],
+        "kit_home": ["#124b62", "#c0c2c4", "#2191a4"],
+        "kit_away": ["#75446b", "#e0d4d4"],
+        "colour1": "#134726",
+        "colour2": "#b4bc8e"
+    },
+    "north district": {
+        "badge": ["#272860", "#cb2220", "#dcc9cb"],
+        "kit_home": ["#8f131d", "#251216", "#dfcfd6"],
+        "kit_away": ["#ac8616", "#202021", "#c1c7b3"],
+        "colour1": "#272860",
+        "colour2": "#cb2220"
+    },
+    "hong kong football club": {
+        "badge": ["#d1dee6", "#6182ae", "#06448b"],
+        "kit_home": ["#343246"],
+        "kit_away": ["#ededec"],
+        "colour1": "#06448b",
+        "colour2": "#6182ae"
+    },
+    "hkfc": {
+        "badge": ["#d1dee6", "#6182ae", "#06448b"],
+        "kit_home": ["#343246"],
+        "kit_away": ["#ededec"],
+        "colour1": "#06448b",
+        "colour2": "#6182ae"
+    },
+    "kowloon city": {
+        "badge": ["#c0940c"],
+        "kit_home": ["#74171d", "#d8c9b4", "#1f1817"],
+        "kit_away": ["#b5ae94", "#151411", "#e7e5dd"],
+        "colour1": "#c0940c",
+        "colour2": "#1f1817"
+    },
 }
 
 
 def _get_team_colors(team_name: str) -> dict:
-    """Returns team color dict {colour1, colour2} for a given team name, or empty dict."""
+    """Returns team color dict {badge, kit_home, kit_away, colour1, colour2} for a given team name."""
     if not team_name:
         return {}
     key = team_name.lower().strip()
     return _TEAM_COLORS.get(key, {})
 
 
-# Badge color per competition — must be distinct from the TYPE accent colors:
-#   pre-match=primary (blue), post-match=success (green), career=warning (yellow).
-# Allowed: danger, info, secondary, dark, light.
+# Hex color palettes per competition — sourced from official branding
 _COMPETITION_COLOR_MAP = {
-    "HK Premier League": "info",  # teal/cyan
-    "HKFA Cup": "danger",  # red
-    "Sapling Cup": "dark",  # near-black
-    "Senior Shield": "secondary",  # muted grey
-    "League Cup": "light",  # light (white-ish)
-    "AFC Champions League Two": "secondary",  # grey
+    "HK Premier League": ["#ac0c34", "#1c1c1c", "#b40c34"],
+    "Sapling Cup": ["#153465", "#c1cf31", "#78ac46"],
+    "Senior Shield": ["#050505", "#b8b8b8", "#444444"],
+    "HKFA Cup": ["#bb9d5e", "#bcbcbc", "#bcbcc4"],
+    "AFC Cup": ["#c6bcb6", "#318cd6", "#191c1a", "#61af69", "#eb8b3e"],
+    "AFC Champions League Two": ["#111112", "#cec9c1", "#218ec2", "#f7a240", "#959b9e"],
+    "AFC Champions League": ["#111112", "#cec9c1", "#218ec2", "#f7a240", "#959b9e"],
 }
 
 
@@ -76,17 +181,38 @@ def _competition_logo_url(competition: str):
 
 
 def _competition_color(competition: str) -> str:
-    """Return Bootstrap badge color for a competition name."""
-    return _COMPETITION_COLOR_MAP.get(_normalize_comp(competition), "primary")
+    """Return primary hex color for a competition name."""
+    palette = _COMPETITION_COLOR_MAP.get(_normalize_comp(competition), ["#0d6efd"])
+    return palette[0]
 
 
-def _comp_badge(competition: str) -> "dbc.Badge | None":
-    """Return a colored Badge with the competition name (logo shown separately in right column)."""
+def _comp_badge(competition: str) -> "html.Span | None":
+    """Return a styled Span badge with the competition name."""
     comp = _normalize_comp(competition)
     if not comp:
         return None
-    color = _competition_color(comp)
-    return dbc.Badge(comp, color=color, className="small")
+    bg_color = _competition_color(comp)
+    # Determine text color based on background brightness (simplified)
+    # For now, white text for dark/vibrant backgrounds, black for very light ones
+    text_color = "#ffffff"
+    light_bgs = [
+        "#cec9c1", "#bcbcbc", "#d1dee6", "#ededec", "#e1e3e5", 
+        "#c6bcb6", "#bb9d5e", "#d0d0d5", "#f7e4e7"
+    ]
+    if bg_color.lower() in [c.lower() for c in light_bgs]:
+        text_color = "#18181a"
+
+    return html.Span(
+        comp,
+        className="small px-2 py-0 rounded-1 fw-semibold",
+        style={
+            "backgroundColor": bg_color,
+            "color": text_color,
+            "fontSize": "0.7rem",
+            "display": "inline-block",
+            "lineHeight": "1.4",
+        }
+    )
 
 
 def _competition_logo_img(competition: str, logo_url: str = None):
@@ -891,7 +1017,7 @@ def register_player_portal_callbacks(app):
             milestones = aggregator.get_player_timeline(player_id)
 
             if not milestones:
-                return None
+                return []
 
             return _serialize_milestones(milestones)
 
@@ -1003,6 +1129,11 @@ def register_player_portal_callbacks(app):
             return no_update
         triggered = ctx.triggered_id
         if isinstance(triggered, dict) and triggered.get("type") == "year-chip":
+            # Guard: Dash 4 fires ALL-pattern callbacks when components are dynamically
+            # added to the DOM (n_clicks=0). Only process genuine user clicks.
+            trigger_value = ctx.triggered[0].get("value", 0) if ctx.triggered else 0
+            if not trigger_value:
+                return no_update
             year = triggered["year"]
             return None if year == str(current_year) else year
         return no_update
@@ -1014,7 +1145,7 @@ def register_player_portal_callbacks(app):
         Output("timeline-milestones", "children"),
         Output("timeline-expand-store", "data"),
         Input("milestones-data-store", "data"),
-        prevent_initial_call=False,
+        prevent_initial_call=True,
     )
     def render_timeline_milestones(milestones_data):
         """
@@ -1092,12 +1223,11 @@ def register_player_portal_callbacks(app):
                         )
                     )
 
-                matches_group = html.Div(
-                    match_items,
-                    id={"type": "season-matches-group", "index": career_id} if career_id else None,
-                    className="season-matches-group",
-                )
-                
+                matches_group_kwargs = {"className": "season-matches-group"}
+                if career_id:
+                    matches_group_kwargs["id"] = {"type": "season-matches-group", "index": career_id}
+                matches_group = html.Div(match_items, **matches_group_kwargs)
+
                 if career_item:
                     # Wrap career + matches in a container that controls match visibility via is-expanded class
                     expanded_cls = " is-expanded" if is_recent else ""
@@ -1110,6 +1240,9 @@ def register_player_portal_callbacks(app):
                     )
                 else:
                     items.extend(match_items)
+            elif career_item:
+                # Career-only section (no match milestones yet) — still render the career card
+                items.append(career_item)
 
             sections.append(
                 html.Div(
@@ -1133,6 +1266,14 @@ def register_player_portal_callbacks(app):
             if (!triggered || triggered.type !== 'load-more-btn') {
                 return window.dash_clientside.no_update;
             }
+
+            // Guard: only proceed on a real click (n_clicks > 0).
+            // Dash 4.0 ALL-pattern callbacks can fire spuriously on component
+            // registration with all values at 0; a real click always has at least one > 0.
+            if (!n_clicks_list || !n_clicks_list.some(function(v) { return v > 0; })) {
+                return window.dash_clientside.no_update;
+            }
+
             var year = triggered.year;
             var season = document.querySelector('.season-section[data-year="' + year + '"]');
             if (!season) return window.dash_clientside.no_update;
@@ -1168,10 +1309,11 @@ def register_player_portal_callbacks(app):
         Input({"type": "milestone-detail-btn", "index": ALL}, "n_clicks"),
         Input("selected-year-store", "data"),
         State("milestones-data-store", "data"),
+        State("timeline-context-store", "data"),
         prevent_initial_call=True,
     )
     def select_milestone(
-        milestone_clicks, detail_clicks, selected_year, milestones_data
+        milestone_clicks, detail_clicks, selected_year, milestones_data, current_context
     ):
         """Updates the context store when a milestone icon, Ver Detalle, or year chip is clicked."""
         if not ctx.triggered_id or not milestones_data:
@@ -1193,7 +1335,21 @@ def register_player_portal_callbacks(app):
             "timeline-milestone",
             "milestone-detail-btn",
         ):
+            # Guard: Dash 4 fires ALL-pattern callbacks when components are dynamically
+            # added to the DOM (n_clicks=0). Only process genuine user clicks.
+            trigger_value = ctx.triggered[0].get("value", 0) if ctx.triggered else 0
+            if not trigger_value:
+                return no_update
             milestone_id = triggered["index"]
+            # Toggle: if this milestone is already the active context, clear it → dashboard
+            if (
+                current_context
+                and current_context.get("payload", {}) == next(
+                    (item.get("payload") for item in milestones_data if item.get("id") == milestone_id),
+                    None,
+                )
+            ):
+                return None
             # Find the milestone by ID in the list
             m = next(
                 (item for item in milestones_data if item.get("id") == milestone_id),
@@ -1205,6 +1361,37 @@ def register_player_portal_callbacks(app):
         return no_update
 
     # ------------------------------------------------------------------ #
+    # milestones-data-store → Initial career overview (no card selected) #
+    # ------------------------------------------------------------------ #
+    @app.callback(
+        Output("stage-content", "children", allow_duplicate=True),
+        Input("milestones-data-store", "data"),
+        prevent_initial_call=True,
+    )
+    def render_initial_stage(milestones_data):
+        """
+        Shows the Career Overview as the default stage when milestones first load
+        and no card has been selected yet.
+        """
+        if milestones_data is None:
+            return no_update
+        try:
+            player_id   = getattr(current_user, "player_id", None)
+            user_role   = getattr(current_user, "role", "player") if current_user else "player"
+            if not player_id:
+                return no_update
+            from utils.player_index import get_player_index
+            pi          = get_player_index()
+            player_info = pi.get_player_info(player_id)
+            player_name = player_info.get("canonical_name", "") if player_info else ""
+            if not player_name:
+                return no_update
+            return render_career_overview(player_name, player_id, user_role)
+        except Exception as e:
+            logger.warning(f"render_initial_stage error: {e}")
+            return no_update
+
+    # ------------------------------------------------------------------ #
     # timeline-context-store → Stage content                              #
     # ------------------------------------------------------------------ #
     @app.callback(
@@ -1213,21 +1400,48 @@ def register_player_portal_callbacks(app):
         prevent_initial_call=True,
     )
     def update_stage(context):
-        """Dispatches rendering to the appropriate stage helper."""
+        """Dispatches rendering to the appropriate stage helper based on card type."""
         if not context:
+            # Card was closed — show career overview again
+            try:
+                player_id   = getattr(current_user, "player_id", None)
+                user_role   = getattr(current_user, "role", "player") if current_user else "player"
+                if player_id:
+                    from utils.player_index import get_player_index
+                    pi          = get_player_index()
+                    player_info = pi.get_player_info(player_id)
+                    player_name = player_info.get("canonical_name", "") if player_info else ""
+                    if player_name:
+                        return render_player_dashboard(player_name, player_id, user_role)
+            except Exception:
+                pass
             return no_update
 
         user_role = (
             getattr(current_user, "role", "player") if current_user else "player"
         )
-        m_type = context.get("type")
+        m_type  = context.get("type")
         payload = context.get("payload", {})
 
         try:
             if m_type == "post-match":
                 return render_post_match(payload)
             elif m_type == "pre-match":
-                return render_pre_match(payload)
+                # Resolve logged-in player's position for rival analysis
+                pos_group = ""
+                try:
+                    player_id   = getattr(current_user, "player_id", None)
+                    if player_id:
+                        from utils.player_index import get_player_index
+                        from utils.app_context import get_hong_kong_data_manager as _get_dm
+                        pi          = get_player_index()
+                        player_info = pi.get_player_info(player_id)
+                        player_name = player_info.get("canonical_name", "") if player_info else ""
+                        if player_name:
+                            pos_group = _get_position_group(player_name, _get_dm())
+                except Exception:
+                    pass
+                return render_pre_match(payload, player_pos_group=pos_group)
             elif m_type == "career":
                 return render_career_insights(payload, user_role)
             else:
@@ -1553,52 +1767,10 @@ def register_player_portal_callbacks(app):
             except Exception:
                 saved_draft = None
 
-        # Show spinner while agent runs (synchronous call — Dash 4 doesn't block here noticeably)
-        try:
-            from layouts.components.card_editor import create_card_studio_spinner
-            from utils.card_design_agent import run_card_design_agent
+        from utils.image_processing import get_player_album
+        album = get_player_album(player_id)
 
-            _team_colors = _get_team_colors(payload.get("home_team", ""))
-            proposals = run_card_design_agent(
-                match_payload=payload,
-                player_profile={},
-                team_colors=_team_colors,
-                player_history=[],
-                has_player_photo=False,
-                card_type=card_type,
-            )
-            ai_notice = None
-        except Exception as exc:
-            logger.error(f"handle_action_node_pill agent error: {exc}")
-            from utils.card_design_agent import _deterministic_fallback
-
-            proposals = _deterministic_fallback(
-                {
-                    "match_payload": payload,
-                    "team_colors": _get_team_colors(payload.get("home_team", "")),
-                    "has_player_photo": False,
-                    "card_type": card_type,
-                }
-            )
-            ai_notice = "IA no disponible — propuesta básica cargada."
-
-        # Build initial editor state (draft overrides AI proposal if exists)
-        first_proposal = proposals[0] if proposals else {}
-        if saved_draft:
-            editor_state = saved_draft
-        else:
-            editor_state = {
-                "milestone_id": milestone_id,
-                "card_type": card_type,
-                "template": (first_proposal.get("design") or {}).get("template", "A"),
-                "format": "1:1",
-                "ai_proposal": first_proposal,
-                "elements": (first_proposal.get("design") or {}).get("elements") or {},
-                "selected_photo_idx": None,
-                "last_saved": None,
-            }
-
-        # Render the appropriate Card Studio layout
+        # Render Studio Layout IMMEDIATELY
         try:
             from layouts.components.card_editor import (
                 create_pre_game_card_studio,
@@ -1613,40 +1785,42 @@ def register_player_portal_callbacks(app):
                 "score": payload.get("score"),
             }
 
+            if saved_draft:
+                editor_state = saved_draft
+                editor_state["needs_ai"] = False
+                editor_state["editor_active"] = True
+            else:
+                editor_state = {
+                    "milestone_id": milestone_id,
+                    "card_type": card_type,
+                    "template": "A",
+                    "format": "1:1",
+                    "ai_proposal": {},
+                    "layout_modifiers": {},
+                    "selected_photo_idx": None,
+                    "needs_ai": True,  # TRIGGER FOR ASYNC AI
+                    "last_saved": None,
+                    "editor_active": True,  # Guard: tells render_editor_updates the studio is mounted
+                }
+
             from callbacks.card_editor_callbacks import _build_preview_layout
 
-            initial_preview = _build_preview_layout(editor_state, {})
+            # Pass empty/placeholder state initially
+            initial_preview = _build_preview_layout(editor_state, {"album": album}, milestones_data)
 
             if card_type == "pre-match":
-                studio = create_pre_game_card_studio(
-                    milestone_id,
-                    match_context,
-                    proposals,
-                    initial_preview=initial_preview,
-                )
+                studio = create_pre_game_card_studio(milestone_id, match_context, [], initial_preview=initial_preview, album=album)
             else:
-                studio = create_performance_card_studio(
-                    milestone_id,
-                    match_context,
-                    proposals,
-                    initial_preview=initial_preview,
-                )
+                studio = create_performance_card_studio(milestone_id, match_context, [], initial_preview=initial_preview, album=album)
 
-            children = [studio]
-            if ai_notice:
-                children.insert(
-                    0, dbc.Alert(ai_notice, color="warning", className="small mb-2")
-                )
-            result = html.Div(children)
+            return studio, no_update, editor_state
         except Exception as exc:
             logger.error(f"handle_action_node_pill studio render error: {exc}")
             return (
-                dbc.Alert("Error abriendo el Card Studio.", color="danger"),
+                dbc.Alert("Error opening the Card Studio.", color="danger"),
                 no_update,
                 no_update,
             )
-
-        return result, no_update, editor_state
 
     # ------------------------------------------------------------------ #
     # AI Insight card click → Stage deep-dive (Task 7.1)                 #

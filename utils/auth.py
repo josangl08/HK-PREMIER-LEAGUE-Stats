@@ -6,7 +6,7 @@ from typing import Optional, List, Dict, Any
 from werkzeug.security import check_password_hash, generate_password_hash
 from sqlalchemy import select
 from sqlalchemy.orm import joinedload
-from models.db_models import User, Role, UserPlayerLink, Player
+from models.db_models import User, Role, UserPlayerLink, Player, Team
 from utils.db_engine import Session
 
 # Configurar logging
@@ -124,8 +124,34 @@ class AuthRepository:
             )
             session.add(new_user)
             
-            # 3. Si es un jugador, crear el vínculo
+            # 3. Si es un jugador, verificar/crear el registro Player y crear el vínculo
             if player_id:
+                # Ensure the Player entity exists before creating the FK link
+                existing_player = session.get(Player, player_id)
+                if existing_player is None and player_name:
+                    profile = player_profile or {}
+                    team_id = None
+                    team_name = profile.get("team")
+                    if team_name:
+                        team_obj = session.execute(
+                            select(Team).where(Team.name == team_name)
+                        ).scalars().first()
+                        if team_obj:
+                            team_id = team_obj.id
+                    new_player = Player(
+                        id=player_id,
+                        name=player_name,
+                        position_main=profile.get("position"),
+                        age=profile.get("age"),
+                        foot=profile.get("foot"),
+                        height=profile.get("height"),
+                        current_team_id=team_id,
+                    )
+                    session.add(new_player)
+                    logger.info(
+                        f"Player record created for '{player_name}' (id={player_id}) "
+                        f"during user registration."
+                    )
                 link = UserPlayerLink(user_id=username, player_id=player_id)
                 session.add(link)
             

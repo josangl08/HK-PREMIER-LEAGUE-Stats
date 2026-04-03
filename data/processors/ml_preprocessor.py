@@ -4,7 +4,7 @@
 import pandas as pd
 import numpy as np
 import logging
-from typing import List, Tuple
+from typing import List, Tuple, Dict
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +48,7 @@ class MLPreprocessor:
         """
         df = df.copy()
         df = df.sort_values(["Player", "Season"]).reset_index(drop=True)
-        new_cols = {}
+        new_cols: Dict[str, pd.Series] = {}
         for col in metrics:
             if col not in df.columns:
                 logger.warning(f"compute_temporal_features: column '{col}' not found, skipping.")
@@ -74,15 +74,20 @@ class MLPreprocessor:
             DataFrame with additional *_zscore_positional columns.
         """
         df = df.copy()
-        df["_pos_bucket"] = self._map_position_bucket(df)
+        pos_bucket = self._map_position_bucket(df)
+        new_cols: Dict[str, pd.Series] = {}
+        
         for col in metrics:
             if col not in df.columns:
                 logger.warning(f"compute_positional_zscores: column '{col}' not found, skipping.")
                 continue
-            df[f"{col}_zscore_positional"] = df.groupby("_pos_bucket")[col].transform(
+            # Store in dict to avoid fragmentation
+            new_cols[f"{col}_zscore_positional"] = df.groupby(pos_bucket)[col].transform(
                 lambda g: (g - g.mean()) / g.std() if len(g) >= 2 else pd.Series(0.0, index=g.index)
             )
-        df.drop(columns=["_pos_bucket"], inplace=True)
+            
+        if new_cols:
+            df = pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
         return df
 
     def compute_benchmark_deltas(self, df: pd.DataFrame, metrics: List[str]) -> pd.DataFrame:
@@ -97,24 +102,27 @@ class MLPreprocessor:
             DataFrame with additional delta columns.
         """
         df = df.copy()
-        df["_pos_bucket"] = self._map_position_bucket(df)
+        pos_bucket = self._map_position_bucket(df)
+        new_cols: Dict[str, pd.Series] = {}
+        
         for col in metrics:
             if col not in df.columns:
                 logger.warning(f"compute_benchmark_deltas: column '{col}' not found, skipping.")
                 continue
             league_mean = df[col].mean()
-            df[f"{col}_delta_league_avg"] = df[col] - league_mean
+            new_cols[f"{col}_delta_league_avg"] = df[col] - league_mean
 
             team_mean = df.groupby("Team")[col].transform("mean")
-            df[f"{col}_delta_team_avg"] = df[col] - team_mean
+            new_cols[f"{col}_delta_team_avg"] = df[col] - team_mean
 
-            pos_league_mean = df.groupby("_pos_bucket")[col].transform("mean")
-            df[f"{col}_delta_positional_league_avg"] = df[col] - pos_league_mean
+            pos_league_mean = df.groupby(pos_bucket)[col].transform("mean")
+            new_cols[f"{col}_delta_positional_league_avg"] = df[col] - pos_league_mean
 
-            pos_team_mean = df.groupby(["Team", "_pos_bucket"])[col].transform("mean")
-            df[f"{col}_delta_positional_team_avg"] = df[col] - pos_team_mean
+            pos_team_mean = df.groupby(["Team", pos_bucket])[col].transform("mean")
+            new_cols[f"{col}_delta_positional_team_avg"] = df[col] - pos_team_mean
 
-        df.drop(columns=["_pos_bucket"], inplace=True)
+        if new_cols:
+            df = pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
         return df
 
     def inject_composite_metrics(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -140,13 +148,14 @@ class MLPreprocessor:
             logger.warning(f"inject_composite_metrics: none of {candidates} found, using {default}.")
             return pd.Series(default, index=df.index)
 
+        # Column name aliases — match exactly what HongKongDataProcessor produces
         goals = _get_col(["Goals", "goals", "Goals_Scored"])
         assists = _get_col(["Assists", "assists"])
         xg = _get_col(["xG", "Expected_Goals", "expected_goals", "xGoals"])
-        interceptions = _get_col(["Interceptions", "interceptions"])
-        duels_won_pct = _get_col(["Duels_Won_Pct", "duels_won_pct", "Duel_Win_Pct"])
-        tackles = _get_col(["Tackles", "tackles"])
-        yellow_cards = _get_col(["Yellow_Cards", "yellow_cards", "Yellows"])
+        interceptions = _get_col(["Interceptions per 90", "Interceptions", "interceptions", "PAdj Interceptions"])
+        duels_won_pct = _get_col(["Duels won, %", "Duels_Won_Pct", "duels_won_pct", "Duel_Win_Pct"])
+        tackles = _get_col(["Sliding tackles per 90", "PAdj Sliding tackles", "Tackles per 90", "Tackles", "tackles"])
+        yellow_cards = _get_col(["Yellow cards", "Yellow_Cards", "yellow_cards", "Yellows"])
 
         # efficiency_index: clamp xG to minimum 0.1 before dividing
         xg_safe = xg.clip(lower=0.1)
