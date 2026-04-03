@@ -1965,6 +1965,7 @@ def _build_career_arc(data: Dict) -> html.Div:
             reference_values=ref_vals, reference_name="Position Avg",
         ))
         radar_fig.update_layout(
+            polar=dict(domain=dict(y=[0, 0.85])),
             legend=dict(
                 orientation="h",
                 yanchor="top",
