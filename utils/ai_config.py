@@ -7,6 +7,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
@@ -95,7 +96,7 @@ AI_DEFAULTS = {
     },
     # Track 3 — GenAI
     "gemini": {
-        "model": "gemini-3-flash",
+        "model": "gemini-3-flash-preview",
         "temperature": 0.7,
         "max_output_tokens": 2048,
     },

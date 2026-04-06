@@ -353,17 +353,40 @@ class SystemSyncLog(Base):
     details: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON)
 
 
+class PlayerRefreshState(Base):
+    __tablename__ = "player_refresh_state"
+
+    player_id: Mapped[str] = mapped_column(ForeignKey("players.id"), primary_key=True)
+    last_match_history_refresh_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    last_profile_refresh_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    last_season_stats_refresh_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    last_match_seen_date: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    tm_refresh_status: Mapped[Optional[str]] = mapped_column(String(30))  # READY, DEFERRED, BLOCKED, FAILED
+    tm_last_error: Mapped[Optional[str]] = mapped_column(Text)
+    tm_retry_after: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    details: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON)
+
+
 class MatchUpdateQueue(Base):
-    """Cola de seguimiento para actualizaciones inteligentes de partidos (Watchdog)."""
+    """Unified queue for Transfermarkt refresh jobs."""
     __tablename__ = "match_update_queue"
     
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    fixture_id: Mapped[int] = mapped_column(ForeignKey("fixtures.id"), nullable=False)
+    fixture_id: Mapped[Optional[int]] = mapped_column(ForeignKey("fixtures.id"), nullable=True)
     player_id: Mapped[str] = mapped_column(ForeignKey("players.id"), nullable=False)
-    
-    status: Mapped[str] = mapped_column(String(20), default="PENDING") # PENDING, COMPLETED, FAILED
+
+    job_type: Mapped[str] = mapped_column(String(40), default="post_match_history")  # post_match_history, current_season_bootstrap, upcoming_opponent_refresh, user_priority_refresh, season_stats_refresh
+    priority: Mapped[int] = mapped_column(Integer, default=100)
+    source: Mapped[Optional[str]] = mapped_column(String(40))  # watcher, hkfa_upcoming, weekly_refresh, manual
+    reason: Mapped[Optional[str]] = mapped_column(String(255))
+    season_id: Mapped[Optional[str]] = mapped_column(String(20))
+    details: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON)
+
+    status: Mapped[str] = mapped_column(String(20), default="PENDING") # PENDING, COMPLETED, FAILED, DEFERRED
+    tm_status: Mapped[Optional[str]] = mapped_column(String(30))  # READY, DEFERRED, BLOCKED, NOT_FOUND
     attempt_count: Mapped[int] = mapped_column(Integer, default=0)
     last_attempt: Mapped[Optional[datetime]] = mapped_column(DateTime)
     next_attempt: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    retry_after: Mapped[Optional[datetime]] = mapped_column(DateTime)
     
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

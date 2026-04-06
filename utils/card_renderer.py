@@ -1,6 +1,6 @@
-# ABOUTME: Elite Compositor Engine (Pillow) - Agency Grade.
-# ABOUTME: Implements the 12-layer sandwich: Triple Shadow, Z-Depth Typography, and Atmospheric Glue.
-# ABOUTME: Percentage-based coordinate system (0-100) for multi-format consistency.
+# ABOUTME: Elite Compositor Engine (Pillow) — V2 (12-layer archetype) + V3 (Master Image dynamic layout).
+# ABOUTME: V3 adds compose_from_master() with screen-blend atmosphere overlays and pixel-precise placement.
+# ABOUTME: V2 compose_card() preserved for backward compatibility; V3 activated via card_design_agent V3 pipeline.
 
 import logging
 import math
@@ -8,6 +8,7 @@ import os
 import random
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Union
+import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageOps
 
 from utils.image_processing import get_team_assets
@@ -289,9 +290,121 @@ class CardRenderer:
 # Public API
 # ---------------------------------------------------------------------------
 
-def compose_card(design_brief, player_photo_path=None, output_dir=".", format="1:1", 
+def _screen_blend(base: np.ndarray, overlay: np.ndarray) -> np.ndarray:
+    """Screen blend: 1 - (1 - a) * (1 - b) on RGB channels; overlay alpha preserved in base alpha."""
+    base_f = base.astype(np.float32) / 255.0
+    overlay_f = overlay.astype(np.float32) / 255.0
+    # Use overlay alpha to weight the blend
+    ov_alpha = overlay_f[:, :, 3:4]  # (h, w, 1)
+    blended_rgb = 1.0 - (1.0 - base_f[:, :, :3]) * (1.0 - overlay_f[:, :, :3] * ov_alpha)
+    blended_rgb = np.clip(blended_rgb, 0.0, 1.0)
+    result = np.copy(base_f)
+    result[:, :, :3] = blended_rgb
+    return (result * 255.0).astype(np.uint8)
+
+
+def compose_from_master(
+    master_layout: dict,
+    bg_inpainted_path: str,
+    player_photo_path: str,
+    atmosphere_overlays: List[str],
+    ui_brief: dict,
+    output_dir: str,
+    format: str = "1:1",
+) -> Path:
+    """
+    V3 Compositor: assembles the final card from Master Image assets.
+
+    Layer order:
+      0. Inpainted background (resized to format)
+      1. Player photo (rembg-cut, placed at master_layout["player_bbox"])
+      2. Atmosphere overlays (screen blend)
+      3. UI elements (player name, logos from master_layout bboxes)
+
+    Returns:
+        Path to the saved card PNG.
+    """
+    size = FORMAT_SIZES.get(format, (1080, 1080))
+    w, h = size
+
+    # --- Layer 0: Inpainted background ---
+    if bg_inpainted_path and os.path.exists(bg_inpainted_path):
+        canvas = Image.open(bg_inpainted_path).convert("RGBA").resize(size, Image.LANCZOS)
+    else:
+        canvas = Image.new("RGBA", size, (10, 10, 15, 255))
+
+    # --- Layer 1: Player photo at player_bbox ---
+    player_bbox = master_layout.get("player_bbox", {})
+    if player_photo_path and os.path.exists(player_photo_path) and player_bbox:
+        photo = Image.open(player_photo_path).convert("RGBA")
+        px, py = int(player_bbox.get("x", 0)), int(player_bbox.get("y", 0))
+        pw, ph = int(player_bbox.get("w", 540)), int(player_bbox.get("h", 700))
+        if pw > 0 and ph > 0:
+            photo = photo.resize((pw, ph), Image.LANCZOS)
+            # Position relative to the formatted canvas (master was 1080-based, scale if needed)
+            scale_x = w / 1080
+            scale_y = h / 1080
+            px_scaled = int(px * scale_x)
+            py_scaled = int(py * scale_y)
+            photo_scaled = photo.resize((int(pw * scale_x), int(ph * scale_y)), Image.LANCZOS)
+            canvas.paste(photo_scaled, (px_scaled, py_scaled), mask=photo_scaled.split()[3])
+
+    # --- Layer 2: Atmosphere overlays (screen blend) ---
+    canvas_np = np.array(canvas)
+    for overlay_path in (atmosphere_overlays or []):
+        if not overlay_path or not os.path.exists(overlay_path):
+            continue
+        try:
+            ov = Image.open(overlay_path).convert("RGBA").resize(size, Image.LANCZOS)
+            ov_np = np.array(ov)
+            canvas_np = _screen_blend(canvas_np, ov_np)
+        except Exception as e:
+            logger.warning(f"compose_from_master: failed to apply overlay {overlay_path}: {e}")
+    canvas = Image.fromarray(canvas_np, "RGBA")
+
+    # --- Layer 3: UI elements ---
+    player_name = ui_brief.get("player_name", "PLAYER")
+    match_payload = ui_brief.get("match_payload", {})
+    text_area = master_layout.get("text_safe_area", {})
+
+    # Player name bar in text_safe_area
+    if text_area and player_name:
+        tx = int(text_area.get("x", int(w * 0.05)) * w / 1080)
+        ty = int(text_area.get("y", int(h * 0.8)) * h / 1080)
+        font_size = max(40, int(h * 0.05))
+        font = _load_font(font_size)
+        draw = ImageDraw.Draw(canvas)
+        tw, th = draw.textbbox((0, 0), player_name.upper(), font=font)[2:]
+        draw.rectangle([tx - 10, ty - 8, tx + tw + 10, ty + th + 8], fill=(0, 0, 0, 200))
+        draw.text((tx, ty), player_name.upper(), font=font, fill=(255, 255, 255, 255))
+
+    # Team logos at master_layout logo bboxes
+    for key, logo_path_key in [("logo_home_bbox", "home_logo"), ("logo_away_bbox", "away_logo")]:
+        bbox = master_layout.get(key, {})
+        logo_path = match_payload.get(logo_path_key)
+        if bbox and logo_path and os.path.exists(logo_path):
+            lx = int(bbox.get("x", 0) * w / 1080)
+            ly = int(bbox.get("y", 0) * h / 1080)
+            lw = max(1, int(bbox.get("w", 80) * w / 1080))
+            lh = max(1, int(bbox.get("h", 80) * h / 1080))
+            try:
+                logo = Image.open(logo_path).convert("RGBA").resize((lw, lh), Image.LANCZOS)
+                canvas.paste(logo, (lx, ly), mask=logo.split()[3])
+            except Exception as e:
+                logger.warning(f"compose_from_master: failed to render logo {logo_path}: {e}")
+
+    # --- Save ---
+    out_path = Path(output_dir) / "card_v3.png"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    result = canvas.convert("RGB")
+    result.save(str(out_path), "PNG", quality=95)
+    return out_path
+
+
+def compose_card(design_brief, player_photo_path=None, output_dir=".", format="1:1",
                  background_image_path=None, match_payload=None, player_name: str = "PLAYER",
                  output_filename: str = "card_final.png") -> Path:
+    # V2 — preserved for backward compatibility
     out_path = Path(output_dir) / output_filename
     out_path.parent.mkdir(parents=True, exist_ok=True)
     renderer = CardRenderer(design_brief, format=format)

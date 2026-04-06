@@ -1,5 +1,5 @@
-# ABOUTME: Callbacks for the Card Editor Studio — handles template selection, live preview,
-# ABOUTME: manual layer positioning, AI insights, PNG generation, and asset management.
+# ABOUTME: Callbacks for the Card Editor Studio — handles template selection, live preview, AI generation (V2 + V3).
+# ABOUTME: V3: maps state["progress"] to 5-phase labelled progress bar when CARD_AGENCY_V3 is active.
 
 # Standard Library
 import base64
@@ -540,10 +540,30 @@ def register_card_editor_callbacks(app):
         from layouts.components.card_editor import _ai_insights_container
         
         if not state.get("ai_proposal") and state.get("needs_ai"):
+            progress = state.get("progress") or {}
+            phase_label = progress.get("phase", "Diseñando tu tarjeta...")
+            pct = progress.get("pct", 0)
+            _PHASE_ORDER = [
+                "Analizando el ADN del partido...",
+                "Diseñando la visión artística...",
+                "Deconstruyendo la obra maestra...",
+                "Preparando el escenario infinito...",
+                "Fusionando al protagonista...",
+            ]
+            phase_items = [
+                dbc.ListGroupItem(
+                    phase,
+                    className="py-1 small",
+                    color="success" if pct >= (i + 1) * 20 else ("warning" if phase == phase_label else "dark"),
+                )
+                for i, phase in enumerate(_PHASE_ORDER)
+            ]
             loading_view = html.Div([
-                dbc.Spinner(color="info", size="lg"),
-                html.P(agency_status or "We are designing your card...", className="mt-3 small text-white-50")
-            ], className="d-flex flex-column align-items-center justify-content-center", style={"height": "400px"})
+                html.P(phase_label, className="text-white fw-bold mb-2"),
+                dbc.Progress(value=pct, max=100, striped=True, animated=pct < 100, color="info",
+                             className="mb-3", style={"height": "8px"}),
+                dbc.ListGroup(phase_items, flush=True, className="text-start"),
+            ], className="d-flex flex-column align-items-center justify-content-center p-3", style={"height": "400px"})
             return [loading_view] * num_targets, _ai_insights_container(None), library_ui, agency_status
 
         preview = _build_preview_layout(state, photos_store or {}, milestones_data)

@@ -77,6 +77,76 @@ def init_db():
                 conn.commit()
                 logger.info("Migración: columna original_path ahora permite NULL.")
 
+            # Migración: modernizar match_update_queue a la cola unificada de refresh TM
+            try:
+                queue_cols = conn.execute(text("PRAGMA table_info(match_update_queue)")).fetchall()
+                if queue_cols:
+                    col_names = {c[1] for c in queue_cols}
+                    fixture_col = next((c for c in queue_cols if c[1] == "fixture_id"), None)
+                    requires_rebuild = (
+                        "job_type" not in col_names
+                        or "priority" not in col_names
+                        or "source" not in col_names
+                        or "reason" not in col_names
+                        or "season_id" not in col_names
+                        or "details" not in col_names
+                        or "tm_status" not in col_names
+                        or "retry_after" not in col_names
+                        or (fixture_col is not None and fixture_col[3] == 1)
+                    )
+                    if requires_rebuild:
+                        logger.info("Migración: reconstruyendo match_update_queue con esquema unificado.")
+                        conn.execute(text("""
+                            CREATE TABLE IF NOT EXISTS match_update_queue_new (
+                                id INTEGER NOT NULL PRIMARY KEY,
+                                fixture_id INTEGER,
+                                player_id VARCHAR(100) NOT NULL,
+                                job_type VARCHAR(40) NOT NULL DEFAULT 'post_match_history',
+                                priority INTEGER NOT NULL DEFAULT 100,
+                                source VARCHAR(40),
+                                reason VARCHAR(255),
+                                season_id VARCHAR(20),
+                                details JSON,
+                                status VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+                                tm_status VARCHAR(30),
+                                attempt_count INTEGER NOT NULL DEFAULT 0,
+                                last_attempt DATETIME,
+                                next_attempt DATETIME NOT NULL,
+                                retry_after DATETIME,
+                                created_at DATETIME NOT NULL
+                            )
+                        """))
+                        conn.execute(text("""
+                            INSERT INTO match_update_queue_new (
+                                id, fixture_id, player_id, job_type, priority, source, reason, season_id, details,
+                                status, tm_status, attempt_count, last_attempt, next_attempt, retry_after, created_at
+                            )
+                            SELECT
+                                id,
+                                fixture_id,
+                                player_id,
+                                'post_match_history',
+                                100,
+                                'watcher',
+                                NULL,
+                                NULL,
+                                NULL,
+                                status,
+                                NULL,
+                                attempt_count,
+                                last_attempt,
+                                next_attempt,
+                                NULL,
+                                created_at
+                            FROM match_update_queue
+                        """))
+                        conn.execute(text("DROP TABLE match_update_queue"))
+                        conn.execute(text("ALTER TABLE match_update_queue_new RENAME TO match_update_queue"))
+                        conn.commit()
+                        logger.info("Migración: match_update_queue actualizado.")
+            except Exception as exc:
+                logger.warning(f"⚠️ No se pudo migrar match_update_queue: {exc}")
+
 def get_session():
     """
     Generador para obtener una sesión de base de datos.

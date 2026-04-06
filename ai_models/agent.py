@@ -12,33 +12,38 @@ import logging
 import os
 from typing import Any, Dict
 
+
 logger = logging.getLogger(__name__)
 
 # Module-level cached compiled graphs (lazy-initialized)
 _compiled_flows: Dict[str, Any] = {}
+
+# Session-level quota tracker: models known to be exhausted (429)
+_EXHAUSTED_MODELS: set = set()
 
 # Flow name aliases for backward compatibility and feature naming consistency
 FLOW_ALIASES = {"player_analysis": "scouting"}
 
 
 def _get_llm_with_fallback(model_list, temperature=0):
-    """Internal helper to instantiate the first available model from a priority list."""
+    """Instantiate the first non-exhausted model from the priority list."""
     from langchain_google_genai import ChatGoogleGenerativeAI
     from utils.ai_config import GOOGLE_API_KEY
-    
+
+    available = [m for m in model_list if m and m not in _EXHAUSTED_MODELS] or model_list
     last_err = None
-    for model_name in model_list:
-        if not model_name: continue
+    for model_name in available:
+        if not model_name:
+            continue
         try:
-            llm = ChatGoogleGenerativeAI(
+            return ChatGoogleGenerativeAI(
                 model=model_name,
                 google_api_key=GOOGLE_API_KEY,
-                temperature=temperature
+                temperature=temperature,
+                max_retries=1,  # 1 = no retries (0 is a quirk that maps to SDK default of 5)
             )
-            # Test simple call or just assume it's valid if in Tier 1
-            return llm
         except Exception as e:
-            logger.warning(f"⚠️ Model {model_name} failed. Trying fallback. Error: {e}")
+            logger.warning(f"⚠️ Model {model_name} failed at init. Trying fallback. Error: {e}")
             last_err = e
     raise EnvironmentError(f"❌ All models in hierarchy failed. Last error: {last_err}")
 
@@ -155,8 +160,17 @@ def run_agent(agent: Any, query: str) -> Dict[str, Any]:
         return {"output": output, "steps": steps, "error": None}
 
     except Exception as exc:
-        logger.error("run_agent error: %s", exc)
         error_msg = str(exc)
+        if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
+            # Mark primary orchestrator exhausted and clear cached flows so next
+            # call to create_agent() rebuilds the graph with the fallback model.
+            from utils.ai_config import AI_DEFAULTS
+            primary = AI_DEFAULTS["orchestrator"]["primary"]
+            _EXHAUSTED_MODELS.add(primary)
+            _compiled_flows.clear()
+            logger.warning("run_agent: %s quota exhausted — flow cache cleared, will use fallback.", primary)
+            return {"output": "", "steps": [], "error": "quota_exhausted"}
+        logger.error("run_agent error: %s", exc)
         if "recursion_limit" in error_msg.lower() or "recursion" in error_msg.lower():
             error_msg = "Agent exceeded maximum iterations (10). Try a simpler query."
         return {"output": "", "steps": [], "error": error_msg}

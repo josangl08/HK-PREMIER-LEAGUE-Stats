@@ -77,45 +77,17 @@ def _decision_nodes_pre_match(payload: dict) -> list:
 
 
 def _decision_nodes_career(payload: dict, user_role: str) -> list:
-    """Invokes LangGraph for scouting advice + renders career Decision Nodes."""
-    player_name = payload.get("player_name", "el jugador")
-    season = payload.get("season", "")
-
-    # Invoke agent with timeout
-    query = (
-        f"Dame un consejo de scouting conciso para {player_name} "
-        f"basado en su rendimiento en la temporada {season}."
-    )
-    agent_result = _run_agent_with_timeout(query, flow="player_analysis")
-
-    if agent_result.get("timeout"):
-        scouting_text = "Análisis de scouting no disponible en este momento. Consulta las estadísticas manualmente."
-    elif agent_result.get("error"):
-        scouting_text = "No se pudo obtener el análisis de IA."
-    else:
-        scouting_text = agent_result.get("output", "Sin análisis disponible.")
-
-    scouting_card = dbc.Card([
-        dbc.CardHeader([
-            html.I(className="bi bi-robot me-2"),
-            html.Span("Scouting AI", className="fw-semibold"),
-        ], className="border-0 py-2"),
-        dbc.CardBody(html.P(scouting_text, className="small mb-0")),
-    ], className="border-0 shadow-sm mb-3", color="dark", outline=True)
-
+    """Returns career Decision Node buttons. AI scouting reserved for agent role (future)."""
     buttons = []
 
     if user_role == "agent":
         buttons.append(dbc.Button(
             [html.I(className="bi bi-file-earmark-pdf me-1"), "Exportar Dossier PDF"],
             id="dn-dossier-pdf",
-            color="danger", outline=True, size="sm", className="ms-2", n_clicks=0,
+            color="danger", outline=True, size="sm", n_clicks=0,
         ))
 
-    return [
-        scouting_card,
-        html.Div(buttons, className="d-flex flex-wrap gap-2"),
-    ]
+    return [html.Div(buttons, className="d-flex flex-wrap gap-2")]
 
 
 def register_agent_callbacks(app):

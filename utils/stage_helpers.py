@@ -812,7 +812,8 @@ def _generate_career_insight(
         if not GOOGLE_API_KEY:
             return _template_fallback()
 
-        import google.generativeai as genai  # type: ignore
+        from google import genai  # type: ignore
+        from google.genai import types as genai_types  # type: ignore
 
         # ── Build brief stats string ───────────────────────────────────────
         brief_stats = ""
@@ -838,13 +839,12 @@ def _generate_career_insight(
             f"Focus on development trajectory and transfer potential. No bullet points."
         )
 
-        genai.configure(api_key=GOOGLE_API_KEY)
+        client = genai.Client(api_key=GOOGLE_API_KEY)
         model_name = AI_DEFAULTS.get("gemini", {}).get("model", "gemini-2.5-flash")
-        model = genai.GenerativeModel(model_name)
-        response = model.generate_content(
-            prompt,
-            generation_config={"temperature": 0.6, "max_output_tokens": 150},
-            request_options={"timeout": 30},
+        response = client.models.generate_content(
+            model=model_name,
+            contents=prompt,
+            config=genai_types.GenerateContentConfig(temperature=0.6, max_output_tokens=150),
         )
         text = response.text.strip()
         if text:
@@ -1359,6 +1359,7 @@ def _get_rival_recent_form(player_name: str, team_name: str, limit: int = 5) -> 
     """
     default = {
         "label": "Stable",
+        "reason": "No recent match history available yet.",
         "minutes": 0,
         "team_points": 0,
         "goals": 0,
@@ -1422,13 +1423,17 @@ def _get_rival_recent_form(player_name: str, team_name: str, limit: int = 5) -> 
     involvement = goals + assists
     if minutes >= 300 and (involvement >= 2 or team_points >= 10):
         label = "In Form"
+        reason = f"{minutes} minutes in the last {limit}, {involvement} goal involvements, team collected {team_points} points."
     elif minutes < 90 or (team_points <= 2 and involvement == 0):
         label = "Out of Form"
+        reason = f"Limited recent involvement: {minutes} minutes, {involvement} goal involvements, team collected {team_points} points."
     else:
         label = "Stable"
+        reason = f"Steady recent profile: {minutes} minutes, {involvement} goal involvements, team collected {team_points} points."
 
     return {
         "label": label,
+        "reason": reason,
         "minutes": minutes,
         "team_points": team_points,
         "goals": goals,
@@ -1543,12 +1548,29 @@ def _get_opponent_rivals(
         if rival_df.empty:
             rival_df = team_df
 
+        position_label_overrides = {
+            "DMF": "Defensive Midfielder",
+            "AMF": "Attacking Midfielder",
+            "CMF": "Central Midfielder",
+            "LMF": "Left Midfielder",
+            "RMF": "Right Midfielder",
+            "LWF": "Left Winger",
+            "RWF": "Right Winger",
+            "GK": "Goalkeeper",
+        }
+
+        def _format_role_token(token: str) -> str:
+            token = str(token or "").upper().strip()
+            if not token:
+                return "Unknown"
+            return POSITION_FULL_NAMES.get(token) or position_label_overrides.get(token) or token.replace("_", " ").title()
+
         def _display_role(row: pd.Series) -> str:
             tokens = _row_tokens(row)
             if not tokens:
                 return str(row.get("Position_Group", "Unknown"))
             token = tokens[0]
-            return POSITION_FULL_NAMES.get(token, token.replace("_", " ").title())
+            return _format_role_token(token)
 
         def _metric_value(row: pd.Series, columns: List[str]) -> tuple[str, float]:
             for column in columns:
@@ -1635,9 +1657,10 @@ def _get_opponent_rivals(
             results.append({
                 "name": str(row.get("Player", "Unknown")),
                 "position_group": role_token,
-                "role_label": POSITION_FULL_NAMES.get(role_token, _display_role(row)),
+                "role_label": _format_role_token(role_token),
                 "matchup_tier": "Primary Matchup" if idx == 0 else "Support Matchup",
                 "form_label": form_label,
+                "form_reason": recent_form.get("reason", ""),
                 "recent_minutes": int(recent_form.get("minutes", 0) or 0),
                 "recent_goals": int(recent_form.get("goals", 0) or 0),
                 "recent_assists": int(recent_form.get("assists", 0) or 0),
@@ -2975,20 +2998,16 @@ def render_pre_match(
         accent: str = HKFATheme.ACCENT_BLUE,
         extra_style: Optional[Dict[str, Any]] = None,
         extra_class: str = "",
+        clean_variant: bool = True,
     ) -> dbc.Card:
         base_style = {
-            "background": "linear-gradient(180deg, rgba(255,255,255,0.11) 0%, rgba(255,255,255,0.05) 26%, rgba(20,24,34,0.045) 100%)",
-            "border": f"1px solid rgba({_hex_to_rgb(accent)}, 0.14)",
-            "borderRadius": "22px",
-            "boxShadow": "0 8px 16px rgba(0,0,0,0.05), 0 3px 8px rgba(0,0,0,0.03)",
-            "backdropFilter": "blur(20px)",
-            "WebkitBackdropFilter": "blur(20px)",
             "position": "relative",
-            "overflow": "hidden",
         }
         if extra_style:
             base_style.update(extra_style)
-        class_name = "border-0 mb-3 prematch-float-card"
+        class_name = "border-0 prematch-float-card"
+        if clean_variant:
+            class_name = f"{class_name} prematch-clean-card"
         if extra_class:
             class_name = f"{class_name} {extra_class}"
         return dbc.Card(children, className=class_name, style=base_style)
@@ -3012,6 +3031,9 @@ def render_pre_match(
         if href:
             return html.A(content, href=href, target="_blank", style=common_style)
         return html.Span(content, style=common_style)
+
+    def _lucide(name: str) -> html.I:
+        return html.I(**{"data-lucide": name, "className": "lucide-inline-icon me-1"})
 
     def _team_block(name: str, logo: str, align: str) -> html.Div:
         text_align = "left" if align == "left" else "right"
@@ -3089,10 +3111,8 @@ def render_pre_match(
         ]),
         accent=HKFATheme.ACCENT_GOLD,
         extra_class="prematch-fixture-card",
-        extra_style={
-            "background": "linear-gradient(180deg, rgba(29,31,44,0.68) 0%, rgba(23,26,36,0.48) 100%)",
-            "boxShadow": "0 12px 24px rgba(0,0,0,0.10), 0 6px 16px rgba(0,0,0,0.08)",
-        },
+        extra_style={},
+        clean_variant=False,
     )
 
     def _result_chip(result: Dict[str, Any]) -> html.Div:
@@ -3206,51 +3226,67 @@ def render_pre_match(
                         html.Span(rival.get("form_label", "Stable"), style={
                             "padding": "5px 10px",
                             "borderRadius": "999px",
-                            "background": "rgba(84,210,154,0.12)" if rival.get("form_label") == "In Form" else "rgba(244,195,81,0.12)",
+                            "background": "rgba(84,210,154,0.12)" if rival.get("form_label") == "In Form" else ("rgba(239,107,107,0.12)" if rival.get("form_label") == "Out of Form" else "rgba(244,195,81,0.12)"),
                             "border": "1px solid rgba(255,255,255,0.10)",
                             "color": "#eaf2f8",
                             "fontSize": "0.74rem",
                             "fontWeight": "600",
-                        }),
+                            "cursor": "help",
+                        }, title=rival.get("form_reason", "")),
                     ], style={"display": "flex", "gap": "8px", "flexWrap": "wrap", "marginBottom": "12px"}),
                     html.Div([
+                        # Minutos
                         html.Span([
-                            html.I(className="bi bi-stopwatch me-1", style={"opacity": "0.78"}),
+                            html.I(className="bi bi-stopwatch", style={"fontSize": "1.3rem", "opacity": "0.85"}),
                             html.Span(str(rival.get("recent_minutes", 0))),
-                        ], style={"display": "inline-flex", "alignItems": "center", "gap": "2px"}),
+                        ], style={"display": "inline-flex", "alignItems": "center", "gap": "8px"}),
+
+                        # Goles
                         html.Span([
-                            html.I(className="bi bi-bullseye me-1", style={"opacity": "0.78"}),
+                            html.Img(
+                                src="/assets/icons/soccer-ball.svg",
+                                style={"width": "22px", "height": "22px", "opacity": "0.9"}
+                            ),
                             html.Span(str(rival.get("recent_goals", 0))),
-                        ], style={"display": "inline-flex", "alignItems": "center", "gap": "2px"}),
+                        ], style={"display": "inline-flex", "alignItems": "center", "gap": "8px"}),
+
+                        # Asistencias
                         html.Span([
-                            html.I(className="bi bi-stars me-1", style={"opacity": "0.78"}),
+                            html.I(
+                                **{"data-lucide": "sport-shoe"},
+                                style={"width": "22px", "height": "22px", "opacity": "0.9"}
+                            ),
                             html.Span(str(rival.get("recent_assists", 0))),
-                        ], style={"display": "inline-flex", "alignItems": "center", "gap": "2px"}),
+                        ], style={"display": "inline-flex", "alignItems": "center", "gap": "8px"}),
+
+                        # Amarillas
                         html.Span([
-                            html.I(className="bi bi-square-fill me-1", style={"opacity": "0.92", "color": "#f4c351"}),
+                            html.I(className="bi bi-square", style={"fontSize": "1.2rem", "color": "#f4c351", "opacity": "0.9", "borderWidth": "2px"}),
                             html.Span(str(rival.get("recent_yellow_cards", 0))),
-                        ], style={"display": "inline-flex", "alignItems": "center", "gap": "2px"}),
+                        ], style={"display": "inline-flex", "alignItems": "center", "gap": "8px"}),
+
+                        # Rojas
                         html.Span([
-                            html.I(className="bi bi-square-fill me-1", style={"opacity": "0.92", "color": "#ef6b6b"}),
+                            html.I(className="bi bi-square", style={"fontSize": "1.2rem", "color": "#ef6b6b", "opacity": "0.9", "borderWidth": "2px"}),
                             html.Span(str(rival.get("recent_red_cards", 0))),
-                        ], style={"display": "inline-flex", "alignItems": "center", "gap": "2px"}),
+                        ], style={"display": "inline-flex", "alignItems": "center", "gap": "8px"}),
                     ], style={
                         "display": "flex",
-                        "gap": "12px",
-                        "flexWrap": "wrap",
+                        "justifyContent": "space-between",
                         "alignItems": "center",
                         "color": "#c7d0dc",
-                        "fontSize": "0.76rem",
-                        "fontWeight": "500",
-                        "marginBottom": "16px",
+                        "fontSize": "0.9rem",
+                        "fontWeight": "600",
+                        "marginBottom": "20px",
+                        "padding": "0 4px"
                     }),
                     html.Div([
-                        html.Div("Strength", style={"color": accent, "fontSize": "0.72rem", "textTransform": "uppercase", "letterSpacing": "0.08em", "fontWeight": "700"}),
-                        html.Div(rival.get("strength_text", ""), style={"color": "#eff4fa", "fontWeight": "500", "marginTop": "4px", "fontSize": "0.9rem"}),
+                        html.Div("Strength", style={"color": "#97e3b0", "fontSize": "0.72rem", "textTransform": "uppercase", "letterSpacing": "0.08em", "fontWeight": "700"}),
+                        html.Div(rival.get("strength_text", ""), style={"color": "#eff4fa", "fontWeight": "400", "marginTop": "4px", "fontSize": "0.9rem"}),
                     ], className="mb-3"),
                     html.Div([
                         html.Div("Weakness", style={"color": "#ffb3b3", "fontSize": "0.72rem", "textTransform": "uppercase", "letterSpacing": "0.08em", "fontWeight": "700"}),
-                        html.Div(rival.get("weakness_text", ""), style={"color": "#eff4fa", "fontWeight": "500", "marginTop": "4px", "fontSize": "0.9rem"}),
+                        html.Div(rival.get("weakness_text", ""), style={"color": "#eff4fa", "fontWeight": "400", "marginTop": "4px", "fontSize": "0.9rem"}),
                     ], className="mb-3"),
                     html.Div([
                         html.Div([
@@ -3263,8 +3299,8 @@ def render_pre_match(
                         ], style={"flex": "1"}),
                     ], style={"display": "flex", "gap": "12px", "marginBottom": "12px"}),
                     html.Div([
-                        html.Div("Physical", style={"color": "#b9c3cf", "fontSize": "0.72rem", "textTransform": "uppercase", "letterSpacing": "0.08em", "fontWeight": "700"}),
-                        html.Div(f"{rival.get('physical_val', 0):.1f} {rival.get('physical_label', '')}", style={"color": "#eef4fa", "fontWeight": "600", "fontSize": "0.86rem", "marginTop": "4px"}),
+                        html.Div("Physical", style={"color": HKFATheme.ACCENT_BLUE, "fontSize": "0.72rem", "textTransform": "uppercase", "letterSpacing": "0.08em", "fontWeight": "700"}),
+                        html.Div(f"{rival.get('physical_val', 0):.1f} {rival.get('physical_label', '')}", style={"color": "#eff4fa", "fontWeight": "400", "fontSize": "0.86rem", "marginTop": "4px"}),
                     ]) if rival.get("physical_label") else None,
                 ]),
                 accent=accent,

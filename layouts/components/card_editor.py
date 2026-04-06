@@ -417,6 +417,21 @@ def _save_toast():
     )
 
 
+def _progress_indicator(id_name="card-generation-status"):
+    """Labelled multi-phase progress bar for V3 generation pipeline."""
+    return html.Div([
+        html.Div(id=f"{id_name}-label", className="small text-info mb-1 font-monospace", style={"fontSize": "0.6rem", "textTransform": "uppercase"}),
+        dbc.Progress(
+            id=id_name,
+            value=0,
+            striped=True,
+            animated=True,
+            color="info",
+            style={"height": "4px", "background": "rgba(255,255,255,0.05)", "width": "200px"}
+        )
+    ], className="ms-auto d-flex flex-column align-items-end")
+
+
 # ---------------------------------------------------------------------------
 # Pre-Game Card Studio
 # ---------------------------------------------------------------------------
@@ -434,8 +449,8 @@ def create_pre_game_card_studio(milestone_id, match_context, proposals, initial_
                         html.I(className="bi bi-calendar3 me-2", style={"color": _ACCENT_CYAN}),
                         html.Span("Matchday Studio", style={"color": "white", "fontWeight": "700", "fontSize": "0.9rem"}),
                     ]),
-                    # Live Agency Feed
-                    html.Div(id="card-generation-status", className="ms-auto small text-muted font-monospace", style={"fontSize": "0.65rem"}),
+                    # Live Agency Feed (V3 Progress)
+                    _progress_indicator("card-generation-status"),
                     ], className="mb-3 d-flex align-items-center"),
 
 
@@ -492,8 +507,8 @@ def create_performance_card_studio(milestone_id, match_context, proposals, initi
                         html.I(className="bi bi-calendar3 me-2", style={"color": _ACCENT_CYAN}),
                         html.Span("Matchday Studio", style={"color": "white", "fontWeight": "700", "fontSize": "0.9rem"}),
                     ]),
-                    # Live Agency Feed
-                    html.Div(id="card-generation-status", className="ms-auto small text-muted font-monospace", style={"fontSize": "0.65rem"}),
+                    # Live Agency Feed (V3 Progress)
+                    _progress_indicator("card-generation-status"),
                     ], className="mb-3 d-flex align-items-center"),
 
 

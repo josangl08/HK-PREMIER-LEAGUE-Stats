@@ -151,6 +151,7 @@ def create_player_portal_layout(user_role: str = "player") -> html.Div:
             dcc.Store(id="active-year-store", data=None),
             dcc.Store(id="card-expand-store", data={}),
             dcc.Store(id="timeline-pagination-store", storage_type="memory"),
+            dcc.Store(id="stage-lucide-refresh-dummy"),
             dcc.Store(id="card-editor-state", storage_type="memory"),
             # Stores the player photo album (original paths, bgrm paths, selections)
             dcc.Store(id="player-photos-store", storage_type="local"),

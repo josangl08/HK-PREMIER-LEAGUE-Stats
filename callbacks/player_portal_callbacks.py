@@ -381,6 +381,8 @@ def _build_header_label(
         minutes = stats.get(
             "minutes_played", sum(int(m.get("minutes_played", 0) or 0) for m in matches)
         )
+        yellow = stats.get("yellow_cards", sum(int(m.get("yellow_cards", 0) or 0) for m in matches))
+        red = stats.get("red_cards", sum(int(m.get("red_cards", 0) or 0) for m in matches))
 
         return [
             dbc.Badge(
@@ -390,24 +392,44 @@ def _build_header_label(
             ),
             html.Div(
                 [
-                    html.Small(
-                        [_lucide("activity"), f"MP: {pj}"],
-                        className="portal-text-muted me-2",
-                    ),
-                    html.Small(
-                        [_lucide("crosshair"), f"G: {goals}"],
-                        className="portal-text-muted me-2",
-                    ),
-                    html.Small(
-                        [_lucide("trending-up"), f"A: {assists}"],
-                        className="portal-text-muted me-2",
-                    ),
-                    html.Small(
-                        [_lucide("timer"), f"Min: {minutes}"],
-                        className="portal-text-muted",
-                    ),
+                    # Partidos
+                    html.Div([
+                        html.I(className="bi bi-calendar-check me-1", style={"fontSize": "0.9rem"}),
+                        html.Span(str(pj)),
+                    ], className="portal-text-muted d-flex align-items-center me-2"),
+                    
+                    # Minutos
+                    html.Div([
+                        html.I(className="bi bi-stopwatch me-1", style={"fontSize": "0.9rem"}),
+                        html.Span(str(minutes)),
+                    ], className="portal-text-muted d-flex align-items-center me-2"),
+
+                    # Goles
+                    html.Div([
+                        html.Img(src="/assets/icons/soccer-ball.svg", style={"width": "14px", "height": "14px", "opacity": "0.85"}, className="me-1"),
+                        html.Span(str(goals)),
+                    ], className="portal-text-muted d-flex align-items-center me-2"),
+
+                    # Asistencias
+                    html.Div([
+                        html.I(**{"data-lucide": "sport-shoe"}, style={"width": "14px", "height": "14px", "opacity": "0.85"}, className="me-1"),
+                        html.Span(str(assists)),
+                    ], className="portal-text-muted d-flex align-items-center me-2"),
+
+                    # Amarillas
+                    html.Div([
+                        html.I(className="bi bi-square me-1", style={"fontSize": "0.8rem", "color": "#f4c351"}),
+                        html.Span(str(yellow)),
+                    ], className="portal-text-muted d-flex align-items-center me-2"),
+
+                    # Rojas
+                    html.Div([
+                        html.I(className="bi bi-square me-1", style={"fontSize": "0.8rem", "color": "#ef6b6b"}),
+                        html.Span(str(red)),
+                    ], className="portal-text-muted d-flex align-items-center"),
                 ],
-                className="d-flex flex-wrap gap-1",
+                className="d-flex align-items-center flex-wrap mt-1",
+                style={"gap": "4px", "marginLeft": "16px"}
             ),
         ]
 
@@ -654,25 +676,27 @@ def _build_collapse_content(
                 )
             )
 
-            # Core Stats Row
+            # Core Stats Row - Unificado con Season Cards
             stat_parts = [
-                html.Small(
-                    [_lucide("timer"), f"{minutes}'"],
-                    className="portal-text-muted me-3",
-                ),
-                html.Small(
-                    [_lucide("crosshair"), f"{goals}G"],
-                    className="portal-text-muted me-3",
-                ),
-                html.Small(
-                    [_lucide("trending-up"), f"{assists}A"],
-                    className="portal-text-muted",
-                ),
+                html.Div([
+                    html.I(className="bi bi-stopwatch me-1", style={"fontSize": "0.85rem"}),
+                    html.Span(f"{minutes}'"),
+                ], className="portal-text-muted d-flex align-items-center me-3"),
+                
+                html.Div([
+                    html.Img(src="/assets/icons/soccer-ball.svg", style={"width": "14px", "height": "14px", "opacity": "0.85"}, className="me-1"),
+                    html.Span(f"{goals}G"),
+                ], className="portal-text-muted d-flex align-items-center me-3"),
+
+                html.Div([
+                    html.I(**{"data-lucide": "sport-shoe"}, style={"width": "14px", "height": "14px", "opacity": "0.85"}, className="me-1"),
+                    html.Span(f"{assists}A"),
+                ], className="portal-text-muted d-flex align-items-center"),
             ]
             if own_goals > 0:
                 stat_parts.append(
                     html.Small(
-                        [_lucide("alert-triangle"), f"{own_goals} OG"],
+                        [html.I(className="bi bi-exclamation-triangle me-1"), f"{own_goals} OG"],
                         className="text-danger ms-3",
                     )
                 )
@@ -683,19 +707,21 @@ def _build_collapse_content(
                 )
             )
 
-            # Cards and Substitution Line
+            # Cards and Substitution Line - Unificado
             detail_parts = []
             if yellow > 0:
                 detail_parts.append(
-                    dbc.Badge(
-                        f"{yellow} Yellow",
-                        color="warning",
-                        className="me-2 small text-dark",
-                    )
+                    html.Div([
+                        html.I(className="bi bi-square me-1", style={"fontSize": "0.8rem", "color": "#f4c351"}),
+                        html.Span(f"{yellow} Yellow"),
+                    ], className="portal-text-muted d-flex align-items-center me-3", style={"fontSize": "0.8rem"})
                 )
             if red > 0:
                 detail_parts.append(
-                    dbc.Badge(f"{red} Red", color="danger", className="me-2 small")
+                    html.Div([
+                        html.I(className="bi bi-square me-1", style={"fontSize": "0.8rem", "color": "#ef6b6b"}),
+                        html.Span(f"{red} Red"),
+                    ], className="portal-text-muted d-flex align-items-center", style={"fontSize": "0.8rem"})
                 )
 
             sub_info = []
@@ -773,47 +799,85 @@ def _build_collapse_content(
 
             comp = m.get("competition", "Other")
             if comp not in comp_agg:
-                comp_agg[comp] = {"pj": 0, "goals": 0, "assists": 0}
+                comp_agg[comp] = {"pj": 0, "goals": 0, "assists": 0, "minutes": 0, "yellow": 0, "red": 0}
             
             comp_agg[comp]["pj"] += 1
             comp_agg[comp]["goals"] += int(m.get("goals", 0) or 0)
             comp_agg[comp]["assists"] += int(m.get("assists", 0) or 0)
+            comp_agg[comp]["minutes"] += mins
+            comp_agg[comp]["yellow"] += int(m.get("yellow_cards", 0) or 0)
+            comp_agg[comp]["red"] += int(m.get("red_cards", 0) or 0)
 
         rows.append(
             html.Small(
                 "Competition breakdown",
-                className="portal-text-muted text-uppercase fw-bold d-block mb-1",
-                style={"fontSize": "0.65rem"},
+                className="portal-text-muted text-uppercase fw-bold d-block mb-2",
+                style={"fontSize": "0.6rem", "letterSpacing": "0.05em"},
             )
         )
         for comp, stats in comp_agg.items():
+            # Competition Logo with Tooltip
+            logo_el = _competition_logo_img(comp)
+            
+            # Ajustamos el tamaño para el breakdown (un poco más pequeño que en el header)
+            if hasattr(logo_el, "style"):
+                logo_el.style.update({
+                    "width": "32px", 
+                    "height": "32px"
+                })
+
+            logo_container = html.Div(
+                logo_el,
+                title=comp,
+                className="me-2 flex-shrink-0"
+            )
+
             rows.append(
                 html.Div(
                     [
-                        html.Small(
-                            comp,
-                            className="text-truncate fw-semibold flex-grow-1",
-                            style={"maxWidth": "130px"},
-                        ),
+                        logo_container,
                         html.Div(
                             [
-                                html.Small(
-                                    [_lucide("hash"), f"{stats['pj']}MP"],
-                                    className="portal-text-muted me-2",
-                                ),
-                                html.Small(
-                                    [_lucide("crosshair"), f"{stats['goals']}G"],
-                                    className="portal-text-muted me-2",
-                                ),
-                                html.Small(
-                                    [_lucide("trending-up"), f"{stats['assists']}A"],
-                                    className="portal-text-muted",
-                                ),
+                                # MP
+                                html.Div([
+                                    html.I(className="bi bi-calendar-check me-1", style={"fontSize": "0.75rem"}),
+                                    html.Span(str(stats['pj'])),
+                                ], className="portal-text-muted d-flex align-items-center me-2", style={"fontSize": "0.7rem"}),
+                                
+                                # Min
+                                html.Div([
+                                    html.I(className="bi bi-stopwatch me-1", style={"fontSize": "0.75rem"}),
+                                    html.Span(str(stats['minutes'])),
+                                ], className="portal-text-muted d-flex align-items-center me-2", style={"fontSize": "0.7rem"}),
+
+                                # Goals
+                                html.Div([
+                                    html.Img(src="/assets/icons/soccer-ball.svg", style={"width": "12px", "height": "14px", "opacity": "0.8"}, className="me-1"),
+                                    html.Span(str(stats['goals'])),
+                                ], className="portal-text-muted d-flex align-items-center me-2", style={"fontSize": "0.7rem"}),
+
+                                # Assists
+                                html.Div([
+                                    html.I(**{"data-lucide": "sport-shoe"}, style={"width": "12px", "height": "12px", "opacity": "0.8"}, className="me-1"),
+                                    html.Span(str(stats['assists'])),
+                                ], className="portal-text-muted d-flex align-items-center me-2", style={"fontSize": "0.7rem"}),
+
+                                # Yellow
+                                html.Div([
+                                    html.I(className="bi bi-square me-1", style={"fontSize": "0.7rem", "color": "#f4c351"}),
+                                    html.Span(str(stats['yellow'])),
+                                ], className="portal-text-muted d-flex align-items-center me-2", style={"fontSize": "0.7rem"}),
+
+                                # Red
+                                html.Div([
+                                    html.I(className="bi bi-square me-1", style={"fontSize": "0.7rem", "color": "#ef6b6b"}),
+                                    html.Span(str(stats['red'])),
+                                ], className="portal-text-muted d-flex align-items-center", style={"fontSize": "0.7rem"}),
                             ],
-                            className="d-flex align-items-center flex-shrink-0",
+                            className="d-flex align-items-center flex-wrap flex-grow-1",
                         ),
                     ],
-                    className="d-flex align-items-center justify-content-between border-bottom border-secondary py-1",
+                    className="d-flex align-items-center border-bottom border-secondary border-opacity-25 py-2",
                 )
             )
     else:
@@ -823,7 +887,7 @@ def _build_collapse_content(
             )
         )
 
-    return html.Div(rows, className="pb-1 pt-1")
+    return html.Div(rows, className="pb-1 pt-1 px-2")
 
 
 def _render_action_node_pill(
@@ -1780,6 +1844,20 @@ def register_player_portal_callbacks(app):
         """,
         Output("active-year-store", "data"),
         Input("timeline-milestones", "children"),
+        prevent_initial_call=True,
+    )
+
+    app.clientside_callback(
+        """
+        function(children) {
+            setTimeout(function() {
+                if (window.lucide) { lucide.createIcons(); }
+            }, 150);
+            return null;
+        }
+        """,
+        Output("stage-lucide-refresh-dummy", "data"),
+        Input("stage-content", "children"),
         prevent_initial_call=True,
     )
 
