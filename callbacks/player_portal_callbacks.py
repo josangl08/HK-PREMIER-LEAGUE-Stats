@@ -278,10 +278,16 @@ _GLASS_CLASS_MAP = {
 def _get_glass_class(milestone: dict) -> str:
     """Returns the glass context modifier class for a milestone."""
     m_type = milestone.get("type", "career")
+    status = milestone.get("confirmation_status") or milestone.get(
+        "payload", {}
+    ).get("confirmation_status", "")
+    
+    if status == "LIVE":
+        return "glass-danger"
+    if status == "Pending Update":
+        return "glass-prematch" # Reuse blue for pending
+        
     if m_type == "post-match":
-        status = milestone.get("confirmation_status") or milestone.get(
-            "payload", {}
-        ).get("confirmation_status", "")
         return "glass-success" if status == "Confirmed" else "glass-prematch"
     return _GLASS_CLASS_MAP.get(m_type, "glass-career")
 
@@ -293,9 +299,32 @@ def _lucide(name: str) -> html.I:
 
 def _team_pill(name: str, logo_url, reverse: bool = False) -> html.Div:
     """Small team block: logo + name (or name + logo when reverse=True)."""
-    if logo_url:
+    
+    resolved_logo = None
+    
+    # 1. Intentar resolver localmente por nombre
+    if name:
+        # Normalización: minúsculas, guiones/espacios a _, quitar puntos
+        normalized = name.lower().replace(" ", "_").replace("-", "_").replace(".", "")
+        # Caso especial para North District
+        if "north" in normalized:
+            normalized = "north_dt"
+            
+        local_file = f"{normalized}.png"
+        # Ruta física para comprobación (ajustada relativa a este archivo)
+        from pathlib import Path
+        root_dir = Path(__file__).parent.parent
+        assets_path = root_dir / "assets" / "team_logos" / local_file
+        if assets_path.exists():
+            resolved_logo = f"/assets/team_logos/{local_file}"
+
+    # 2. Si no hay local, usar la URL proporcionada
+    if not resolved_logo and logo_url:
+        resolved_logo = logo_url
+
+    if resolved_logo:
         badge = html.Img(
-            src=logo_url,
+            src=resolved_logo,
             style={
                 "width": "28px",
                 "height": "28px",
@@ -389,9 +418,20 @@ def _build_header_label(
         away = payload.get("away_team", "Away")
         home_logo = payload.get("home_logo")
         away_logo = payload.get("away_logo")
+        status = payload.get("confirmation_status")
         badge = _comp_badge(competition)
+        
+        status_pill = None
+        if status == "LIVE":
+            status_pill = dbc.Badge("LIVE", color="danger", className="ms-2 animate-glass-pulse")
+        elif status == "Pending Update":
+            status_pill = dbc.Badge("Awaiting Stats", color="warning", className="ms-2 text-dark")
+            
         return [
-            html.Div(badge, className="card-row--competition") if badge else None,
+            html.Div([
+                html.Div(badge, className="card-row--competition") if badge else None,
+                status_pill
+            ], className="d-flex align-items-center mb-1") if (badge or status_pill) else None,
             html.Div(
                 [
                     _team_pill(home, home_logo),
@@ -464,6 +504,32 @@ def _build_collapse_content(
                 pass
 
         rows = []
+        status = payload.get("confirmation_status")
+        if status == "LIVE":
+            rows.append(
+                html.Div(
+                    [
+                        _lucide("activity"),
+                        html.Small("Match in progress. Performance data will be available after official confirmation.", 
+                                   className="text-danger fw-bold"),
+                    ],
+                    className="d-flex align-items-center gap-1 mb-2 border border-danger border-opacity-25 rounded p-1",
+                    style={"backgroundColor": "rgba(220, 53, 69, 0.05)"}
+                )
+            )
+        elif status == "Pending Update":
+            rows.append(
+                html.Div(
+                    [
+                        _lucide("clock"),
+                        html.Small("Finished. Awaiting official statistics update from Transfermarkt.", 
+                                   className="text-warning fw-bold"),
+                    ],
+                    className="d-flex align-items-center gap-1 mb-2 border border-warning border-opacity-25 rounded p-1",
+                    style={"backgroundColor": "rgba(255, 193, 7, 0.05)"}
+                )
+            )
+
         stadium = payload.get("stadium")
         streaming_url = payload.get("streaming_url")
         streaming_platform = payload.get("streaming_platform")
@@ -700,9 +766,15 @@ def _build_collapse_content(
     if matches:
         comp_agg: dict = {}
         for m in matches:
+            # ONLY count as a played match if minutes > 0
+            mins = int(m.get("minutes_played", 0) or 0)
+            if mins <= 0:
+                continue
+
             comp = m.get("competition", "Other")
             if comp not in comp_agg:
                 comp_agg[comp] = {"pj": 0, "goals": 0, "assists": 0}
+            
             comp_agg[comp]["pj"] += 1
             comp_agg[comp]["goals"] += int(m.get("goals", 0) or 0)
             comp_agg[comp]["assists"] += int(m.get("assists", 0) or 0)
@@ -805,8 +877,15 @@ def _render_milestone_item(
     lucide_icon = _ICON_MAP.get(m_type, "circle")
     payload = milestone.get("payload", {})
     matches = payload.get("matches", [])
+    
     # Timeline accent color is TYPE-based (circle, line, button border).
-    color = _COLOR_MAP.get(m_type, "secondary")
+    # Special case: LIVE status uses 'danger' color.
+    status = payload.get("confirmation_status")
+    if status == "LIVE":
+        color = "danger"
+    else:
+        color = _COLOR_MAP.get(m_type, "secondary")
+        
     glass_cls = _get_glass_class(milestone)
 
     date_str = ""
@@ -827,8 +906,10 @@ def _render_milestone_item(
 
     # ── Event Circle: Lucide icon + Action Node trigger ──────────────────
     cached_image = get_cached_image_path(milestone_id)
+    status = payload.get("confirmation_status")
+    
     circle_cls = f"event-circle event-circle-{color}"
-    if cached_image:
+    if cached_image or status == "LIVE":
         circle_cls += " animate-glass-pulse"
     event_circle = html.Div(
         html.I(**{"data-lucide": lucide_icon, "className": "lucide-event-icon"}),
@@ -996,14 +1077,63 @@ def register_player_portal_callbacks(app):
     """Registers all Player Portal callbacks."""
 
     # ------------------------------------------------------------------ #
+    # Sync-status banner + interval enable/disable                        #
+    # ------------------------------------------------------------------ #
+    @app.callback(
+        Output("sync-status-banner", "children"),
+        Output("sync-status-banner", "style"),
+        Output("sync-poll-interval", "disabled"),
+        Input("url", "pathname"),
+        Input("sync-poll-interval", "n_intervals"),
+        prevent_initial_call=False,
+    )
+    def update_sync_banner(pathname, _n):
+        """Checks player sync status and shows a subtle informational banner."""
+        hidden = {"display": "none"}
+        if pathname != "/player-portal":
+            return no_update, hidden, True
+
+        player_id = getattr(current_user, "player_id", None)
+        if not player_id:
+            return no_update, hidden, True
+
+        status = _get_player_sync_status(player_id)
+        state = status.get("state", "ready")
+
+        if state == "ready":
+            return None, hidden, True
+
+        if state == "no_data":
+            content = [
+                html.Span(className="sync-dot sync-dot--pending"),
+                html.Span("Setting up your profile — your stats will appear shortly."),
+            ]
+        elif state == "no_history":
+            content = [
+                html.Span(className="sync-dot sync-dot--loading"),
+                html.Span("Loading your match history — this may take a moment."),
+            ]
+        else:  # no_tm_link
+            content = [
+                html.I(className="bi bi-info-circle me-2", style={"fontSize": "0.8rem", "opacity": "0.6"}),
+                html.Span("League stats available. Individual match detail will be added once your profile is linked."),
+            ]
+
+        banner_style = {"display": "flex"}
+        # no_tm_link is a static state — no background process will resolve it, stop polling
+        interval_disabled = (state == "no_tm_link")
+        return content, banner_style, interval_disabled
+
+    # ------------------------------------------------------------------ #
     # ETL → milestones-data-store                                         #
     # ------------------------------------------------------------------ #
     @app.callback(
         Output("milestones-data-store", "data"),
         Input("url", "pathname"),
+        Input("sync-poll-interval", "n_intervals"),
         prevent_initial_call=False,
     )
-    def update_timeline(pathname):
+    def update_timeline(pathname, _n):
         """Fetches timeline milestones and stores serialized data."""
         if pathname != "/player-portal":
             return no_update
@@ -1154,6 +1284,23 @@ def register_player_portal_callbacks(app):
         is controlled by the is-expanded class on the season-group-container.
         """
         if not milestones_data:
+            # Show contextual empty state based on sync status
+            player_id = getattr(current_user, "player_id", None)
+            if player_id:
+                status = _get_player_sync_status(player_id)
+                state = status.get("state", "ready")
+                if state == "no_data":
+                    empty_msg = html.Div([
+                        html.Span(className="sync-dot sync-dot--pending me-2"),
+                        html.Span("Your profile is being set up. Match history will appear here shortly.", className="portal-text-muted small"),
+                    ], className="d-flex align-items-center px-3 py-4")
+                    return [empty_msg], []
+                elif state == "no_history":
+                    empty_msg = html.Div([
+                        html.Span(className="sync-dot sync-dot--loading me-2"),
+                        html.Span("Loading your match history — check back in a moment.", className="portal-text-muted small"),
+                    ], className="d-flex align-items-center px-3 py-4")
+                    return [empty_msg], []
             return no_update, no_update
 
         from collections import defaultdict
@@ -1429,19 +1576,52 @@ def register_player_portal_callbacks(app):
             elif m_type == "pre-match":
                 # Resolve logged-in player's position for rival analysis
                 pos_group = ""
+                position_main = ""
+                current_role_hint = ""
                 try:
                     player_id   = getattr(current_user, "player_id", None)
                     if player_id:
                         from utils.player_index import get_player_index
                         from utils.app_context import get_hong_kong_data_manager as _get_dm
+                        from models.db_models import Player, MatchHistory
+                        from utils.db_engine import SessionFactory
                         pi          = get_player_index()
                         player_info = pi.get_player_info(player_id)
                         player_name = player_info.get("canonical_name", "") if player_info else ""
+                        with SessionFactory() as session:
+                            player_obj = session.get(Player, player_id)
+                            position_main = str(getattr(player_obj, "position_main", "") or "").strip()
+                            recent_matches = (
+                                session.query(MatchHistory)
+                                .filter(MatchHistory.player_id == player_id)
+                                .order_by(MatchHistory.date.desc())
+                                .limit(8)
+                                .all()
+                            )
+                            weighted = {}
+                            for idx, match in enumerate(recent_matches):
+                                raw_pos = str(getattr(match, "position", "") or "").strip().upper()
+                                mapped = {
+                                    "ED": "RW", "EI": "LW", "ID": "RM", "II": "LM",
+                                    "MCO": "AMF", "CMF": "CM", "DMF": "DM",
+                                }.get(raw_pos, raw_pos)
+                                if not mapped:
+                                    continue
+                                minutes = int(getattr(match, "minutes_played", 0) or 0)
+                                weight = max(minutes, 1) + max(0, 8 - idx)
+                                weighted[mapped] = weighted.get(mapped, 0) + weight
+                            if weighted:
+                                current_role_hint = max(weighted.items(), key=lambda item: item[1])[0]
                         if player_name:
                             pos_group = _get_position_group(player_name, _get_dm())
                 except Exception:
                     pass
-                return render_pre_match(payload, player_pos_group=pos_group)
+                return render_pre_match(
+                    payload,
+                    player_pos_group=pos_group,
+                    player_position_main=position_main,
+                    player_current_role=current_role_hint,
+                )
             elif m_type == "career":
                 return render_career_insights(payload, user_role)
             else:
@@ -1451,6 +1631,31 @@ def register_player_portal_callbacks(app):
         except Exception as e:
             logger.error(f"update_stage error: {e}")
             return dbc.Alert("Error al renderizar el escenario.", color="danger")
+
+    @app.callback(
+        Output("stage-shell", "className"),
+        Input("timeline-context-store", "data"),
+        prevent_initial_call=False,
+    )
+    def update_stage_shell_class(context):
+        """Keeps the persistent stage shell while changing the glass modifier by active context."""
+        base = "glass-card stage-shell"
+        if not context:
+            return f"{base} glass-career"
+
+        m_type = context.get("type")
+        if m_type == "pre-match":
+            return f"{base} glass-prematch"
+        if m_type == "post-match":
+            payload = context.get("payload", {}) or {}
+            rating = payload.get("rating") or ((payload.get("player_stats") or {}).get("performance_stats", {}) or {}).get("rating")
+            try:
+                rating = float(rating) if rating is not None else None
+            except (TypeError, ValueError):
+                rating = None
+            modifier = "glass-danger" if (rating is not None and rating < 6.0) else "glass-success"
+            return f"{base} {modifier}"
+        return f"{base} glass-career"
 
     # ------------------------------------------------------------------ #
     # Phase 3: Clientside expand/collapse (Optimized for instant feel)   #
@@ -1877,8 +2082,7 @@ def register_player_portal_callbacks(app):
                     className="portal-text-muted small",
                     style={"lineHeight": "1.6"},
                 ),
-            ],
-            className="glass-card p-3",
+            ]
         )
         snapshot = {"type": "ai-insight", "title": title, "detail": detail}
         return stage_content, snapshot
@@ -1918,3 +2122,50 @@ def _serialize_milestones(milestones: list) -> list:
         entry["payload"] = payload
         result.append(entry)
     return result
+
+
+def _get_player_sync_status(player_id: str) -> dict:
+    """
+    Returns a dict with sync state for the given player_id.
+
+    States:
+      'no_data'    — player exists but has no season stats and no TM id (just registered)
+      'no_history' — TM id found but match-level history not yet fetched
+      'ready'      — has season stats or match history (can render the portal)
+    """
+    try:
+        from utils.db_engine import SessionFactory
+        from models.db_models import Player, MatchHistory, PlayerSeasonStat
+        from sqlalchemy import func, select
+
+        session = SessionFactory()
+        try:
+            player = session.get(Player, player_id)
+            if player is None:
+                return {"state": "ready"}
+
+            season_count = session.execute(
+                select(func.count()).where(PlayerSeasonStat.player_id == player_id)
+            ).scalar()
+
+            match_count = session.execute(
+                select(func.count()).where(MatchHistory.player_id == player_id)
+            ).scalar()
+
+            # Nothing at all — truly fresh registration, still being linked
+            if season_count == 0 and match_count == 0 and not player.tm_id:
+                return {"state": "no_data", "name": player.name}
+
+            # TM id found but individual match history not yet fetched
+            if player.tm_id and match_count == 0:
+                return {"state": "no_history", "name": player.name}
+
+            # Has league stats but no TM link → portal works but no match-level detail
+            if season_count > 0 and match_count == 0 and not player.tm_id:
+                return {"state": "no_tm_link", "name": player.name}
+
+            return {"state": "ready"}
+        finally:
+            session.close()
+    except Exception:
+        return {"state": "ready"}

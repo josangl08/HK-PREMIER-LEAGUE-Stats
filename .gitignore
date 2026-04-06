@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 *$py.class
+cache/
 
 # C extensions
 *.so
@@ -225,12 +226,16 @@ assets/team_jersey/
 assets/team_logos/
 assets/team_media/
 assets/templates
+assets/design_references/
+assets/design_trends/
 data/player_cards/
+
 
 # .claude
 .claude/
 CLAUDE.md
 GEMINI.md
+AGENTS.md
 .mcp.json
 .github/
 
@@ -255,3 +260,8 @@ models/**/*.pkl
 !models/registry.json
 
 data/users.json
+
+# Workspace and Automation
+*.code-workspace
+scripts/scheduled_jobs.sh
+temp_hkfa.html

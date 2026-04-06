@@ -10,6 +10,7 @@ from sqlalchemy import select, and_, or_, delete
 from sqlalchemy.orm import Session
 
 from data.extractors.ics_extractor import ICSExtractor
+from data.extractors.hkfa_website_extractor import HKFAWebsiteExtractor
 from models.db_models import Fixture, Team, Season
 from utils.db_engine import SessionFactory
 from utils.common import get_current_season
@@ -51,12 +52,40 @@ TEAM_MAPPING: dict[str, str] = {
 }
 
 COMPETITION_MAPPING: dict[str, str] = {
+    # HK Premier League
     "中銀人壽香港超級聯賽": "HK Premier League", "香港超級聯賽": "HK Premier League",
     "BOC Life Hong Kong Premier League": "HK Premier League", "Hong Kong Premier League": "HK Premier League",
+    # HKFA Cup
     "足總盃": "HKFA Cup", "Hong Kong FA Cup": "HKFA Cup",
+    # Sapling Cup
     "賽馬會菁英盃": "Sapling Cup", "菁英盃": "Sapling Cup", "Hong Kong Sapling Cup": "Sapling Cup",
+    # League Cup / Senior Shield
     "聯賽盃": "League Cup", "高級組銀牌": "Senior Shield", "銀牌": "Senior Shield",
-    "Hong Kong Senior Challenge Shield": "Senior Shield"
+    "Hong Kong Senior Challenge Shield": "Senior Shield",
+    # New Year Cup (賀歲盃 — all variants)
+    "猴年賀歲盃": "New Year Cup", "通海金融賀歲盃": "New Year Cup",
+    "NIKE丁酉賀歲盃": "New Year Cup", "Nike 丁酉賀歲盃": "New Year Cup",
+    "2018 狗年賀歲盃": "New Year Cup", "FWD富衛保險賀歲盃2026": "New Year Cup",
+    "賀歲盃": "New Year Cup",
+    # Community Cup (社區盃)
+    "香港賽馬會社區盃": "Community Cup", "2016香港賽馬會社區盃": "Community Cup", "社區盃": "Community Cup",
+    # Friendly matches
+    "國際友誼賽": "Friendly", "國際足球友誼賽": "Friendly", "國際A級友誼賽": "Friendly",
+    "友誼賽": "Friendly",
+    # Playoff
+    "季後附加賽": "Playoff",
+    # AFC Cup
+    "亞洲足協盃": "AFC Cup", "亞協盃": "AFC Cup", "AFC CupGroup I": "AFC Cup",
+    # AFC Champions League
+    "亞冠盃": "AFC Champions League",
+    # World Cup Qualifiers
+    "世界盃外圍賽": "World Cup Qualifiers", "世界杯外圍": "World Cup Qualifiers",
+    # HK–Macau Inter-Port / HK–Guangdong Inter-City
+    "港澳埠際賽": "HK-Macau Inter-Port",
+    "省港盃": "HK-Guangdong Inter-City",
+    # EAFF E-1
+    "東亞足球錦標賽外圍賽": "EAFF E-1 Championship Qualifiers",
+    "東亞足球錦標賽": "EAFF E-1 Championship",
 }
 
 STADIUM_MAPPING: dict[str, str] = {
@@ -81,6 +110,7 @@ class FixtureManager:
 
     def __init__(self):
         self._extractor = ICSExtractor()
+        self._web_extractor = HKFAWebsiteExtractor()
 
     def get_fixtures(self, season: str = None, limit: int = 100) -> List[Dict[str, Any]]:
         """
@@ -95,28 +125,105 @@ class FixtureManager:
         finally:
             session.close()
 
-    def get_next_fixture(self, team_id: str) -> Optional[Dict[str, Any]]:
+    def get_next_fixtures(self, team_id: str, limit: int = 1) -> List[Dict[str, Any]]:
         """
-        Gets the closest upcoming fixture for a specific team.
+        Gets upcoming fixtures for a specific team, including those started recently (up to 3h ago).
         """
         session = SessionFactory()
         try:
-            now = datetime.now(timezone.utc)
+            # We look back 3 hours to catch matches in progress (LIVE) or recently finished (PENDING)
+            threshold = datetime.now(timezone.utc) - timedelta(hours=3)
             stmt = (
                 select(Fixture)
                 .where(
                     and_(
                         or_(Fixture.home_team_id == team_id, Fixture.away_team_id == team_id),
-                        Fixture.date_utc >= now
+                        Fixture.date_utc >= threshold
                     )
                 )
                 .order_by(Fixture.date_utc.asc())
-                .limit(1)
+                .limit(limit)
             )
-            result = session.execute(stmt).scalar_one_or_none()
-            return self._to_dict(result) if result else None
+            results = session.execute(stmt).scalars().all()
+            return [self._to_dict(f) for f in results]
         finally:
             session.close()
+
+    def get_next_fixture(self, team_id: str) -> Optional[Dict[str, Any]]:
+        """Legacy compatibility: returns the single closest fixture (started <3h ago or future)."""
+        fixes = self.get_next_fixtures(team_id, limit=1)
+        return fixes[0] if fixes else None
+
+    def enrich_fixtures_from_website(self):
+        """
+        Enriches existing fixtures with metadata scraped from the HKFA website.
+        """
+        logger.info("Starting fixture enrichment from HKFA website...")
+        
+        try:
+            web_matches = self._web_extractor.fetch_enriched_data()
+            if not web_matches:
+                logger.warning("No web data found for enrichment.")
+                return
+
+            session = SessionFactory()
+            try:
+                current_season = get_current_season()
+                stmt = select(Fixture).where(Fixture.season_id == current_season)
+                db_fixtures = session.execute(stmt).scalars().all()
+                enriched_count = self._apply_web_enrichment(session, db_fixtures, web_matches)
+                
+                session.commit()
+                logger.info(f"✓ Successfully enriched {enriched_count} fixtures with web metadata.")
+                
+            finally:
+                session.close()
+
+        except Exception as e:
+            logger.error(f"Error during fixture enrichment: {e}")
+            import traceback; traceback.print_exc()
+
+    def refresh_upcoming_fixture_metadata(self, days_ahead: int = 15) -> int:
+        """
+        Refreshes HKFA metadata only for fixtures in the upcoming window.
+        Intended for scheduled runs between full ICS refreshes.
+        """
+        logger.info(f"Refreshing HKFA metadata for upcoming fixtures in next {days_ahead} days...")
+
+        try:
+            web_matches = self._web_extractor.fetch_enriched_data()
+            if not web_matches:
+                logger.warning("No web data found for incremental fixture refresh.")
+                return 0
+
+            session = SessionFactory()
+            try:
+                now_utc = datetime.now(timezone.utc)
+                horizon_utc = now_utc + timedelta(days=days_ahead)
+                stmt = (
+                    select(Fixture)
+                    .where(
+                        and_(
+                            Fixture.date_utc >= now_utc.replace(tzinfo=None),
+                            Fixture.date_utc <= horizon_utc.replace(tzinfo=None),
+                        )
+                    )
+                )
+                db_fixtures = session.execute(stmt).scalars().all()
+                if not db_fixtures:
+                    logger.info("No upcoming fixtures found in the requested refresh window.")
+                    return 0
+
+                refreshed_count = self._apply_web_enrichment(session, db_fixtures, web_matches)
+                session.commit()
+                logger.info(f"✓ Refreshed HKFA metadata for {refreshed_count} upcoming fixtures.")
+                return refreshed_count
+            finally:
+                session.close()
+        except Exception as e:
+            logger.error(f"Error during upcoming fixture metadata refresh: {e}")
+            import traceback; traceback.print_exc()
+            return 0
 
     def sync_from_ics(self):
         """
@@ -143,6 +250,10 @@ class FixtureManager:
             
             session.commit()
             logger.info(f"✓ Sync complete. Processed {len(events)} events, added/updated {count} fixtures.")
+            
+            # Enrich with web metadata (VAR, Broadcast, etc.)
+            self.enrich_fixtures_from_website()
+            
         except Exception as e:
             session.rollback()
             logger.error(f"Sync failed: {e}")
@@ -247,7 +358,6 @@ class FixtureManager:
         return name.strip()
 
     def _normalize_competition(self, raw: str) -> str:
-        if raw in STADIUM_MAPPING: return STADIUM_MAPPING[raw]
         if raw in COMPETITION_MAPPING: return COMPETITION_MAPPING[raw]
         for k, v in sorted(COMPETITION_MAPPING.items(), key=lambda x: len(x[0]), reverse=True):
             if k in raw: return v
@@ -265,6 +375,79 @@ class FixtureManager:
         pattern = re.compile(r"https?://(?:www\.)?(?:youtube\.com|youtu\.be|facebook\.com|fb\.com|on\.cc|tv\.on\.cc|now\.com)\S+")
         match = pattern.search(desc)
         return match.group(0).split('?')[0].rstrip('"').rstrip('&') if match else None
+
+    def _parse_web_match_datetime(self, web_match: Dict[str, Any]) -> Optional[datetime]:
+        try:
+            clean_date = str(web_match["date"]).strip().strip('"').strip("'")
+            clean_time = str(web_match["time"]).strip().strip('"').strip("'")
+            if clean_time == "--:--":
+                clean_time = "00:00"
+            web_dt_local = datetime.strptime(f"{clean_date} {clean_time}", "%Y-%m-%d %H:%M")
+            return (web_dt_local - timedelta(hours=8)).replace(tzinfo=timezone.utc)
+        except Exception as e:
+            logger.warning(f"Could not parse web datetime {web_match.get('date')} {web_match.get('time')}: {e}")
+            return None
+
+    def _normalize_fixture_team_name(self, name: Any) -> str:
+        normalized = str(name).lower()
+        for s in [" district", " dt.", " football club", " fc", " athletic", " association", " bc "]:
+            normalized = normalized.replace(s, " ")
+        return "".join(normalized.split())
+
+    def _find_best_web_match(self, session: Session, db_fixtures: List[Fixture], web_match: Dict[str, Any]) -> Optional[Fixture]:
+        web_dt_utc = self._parse_web_match_datetime(web_match)
+        if not web_dt_utc:
+            return None
+
+        candidates = [
+            f for f in db_fixtures
+            if abs((f.date_utc.replace(tzinfo=timezone.utc) - web_dt_utc).total_seconds()) <= 7200
+        ]
+        if not candidates:
+            web_date_only = web_dt_utc.date()
+            candidates = [f for f in db_fixtures if f.date_utc.date() == web_date_only]
+        if not candidates:
+            return None
+
+        web_home = str(web_match["home_team"]).strip('"')
+        web_away = str(web_match["away_team"]).strip('"')
+        web_home_en = TEAM_MAPPING.get(web_home, web_home)
+        web_away_en = TEAM_MAPPING.get(web_away, web_away)
+        norm_web_h = self._normalize_fixture_team_name(web_home_en)
+        norm_web_a = self._normalize_fixture_team_name(web_away_en)
+
+        for cand in candidates:
+            home_team = session.get(Team, cand.home_team_id)
+            away_team = session.get(Team, cand.away_team_id)
+            db_home = home_team.name if home_team else cand.home_team_id
+            db_away = away_team.name if away_team else cand.away_team_id
+            norm_db_h = self._normalize_fixture_team_name(db_home)
+            norm_db_a = self._normalize_fixture_team_name(db_away)
+            if (norm_web_h in norm_db_h or norm_db_h in norm_web_h) and \
+               (norm_web_a in norm_db_a or norm_db_a in norm_web_a):
+                return cand
+        return None
+
+    def _apply_web_enrichment(self, session: Session, db_fixtures: List[Fixture], web_matches: List[Dict[str, Any]]) -> int:
+        enriched_count = 0
+        for web_match in web_matches:
+            best_match = self._find_best_web_match(session, db_fixtures, web_match)
+            if not best_match:
+                continue
+
+            meta = dict(best_match.metadata_json or {})
+            meta.update({
+                "has_var": web_match.get("has_var", False),
+                "broadcast_type": web_match.get("broadcast_type"),
+                "hkfa_status": web_match.get("status_text"),
+                "hkfa_id": web_match.get("hkfa_id"),
+                "ticket_prices": web_match.get("ticket_prices"),
+                "is_tv": web_match.get("is_tv", False),
+                "last_enriched_at": datetime.now(timezone.utc).isoformat()
+            })
+            best_match.metadata_json = meta
+            enriched_count += 1
+        return enriched_count
 
 # ── Legacy Compatibility Helpers ──────────────────────────────────────────────
 

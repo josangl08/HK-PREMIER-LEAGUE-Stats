@@ -5,6 +5,7 @@ from typing import Dict, Any, Optional
 
 from dash import html
 import dash_bootstrap_components as dbc
+from utils.performance_helpers import get_streaming_label
 
 
 # Badge color per competition — distinct from type colors (primary/success/warning).
@@ -86,6 +87,10 @@ def render_past_game_card(
     competition = _normalize_comp(competition_raw)
     kickoff_display = milestone_payload.get("kickoff_display", "")
     stadium = milestone_payload.get("stadium")
+    streaming_url = milestone_payload.get("streaming_url")
+    streaming_platform = milestone_payload.get("streaming_platform")
+    broadcast_type = milestone_payload.get("broadcast_type")
+    ticket_prices = milestone_payload.get("ticket_prices")
 
     # Player stats and absence
     player_stats = milestone_payload.get("player_stats") or {}
@@ -130,6 +135,9 @@ def render_past_game_card(
         else None
     )
 
+    has_var = milestone_payload.get("has_var", False)
+    var_badge = dbc.Badge("VAR", color="dark", className="small ms-1", style={"opacity": 0.8}) if has_var else None
+
     status_badge = (
         dbc.Badge(
             confirmation_status,
@@ -149,7 +157,8 @@ def render_past_game_card(
                     html.Div(
                         [
                             comp_badge,
-                            html.Small(kickoff_display, className="portal-text-muted me-2"),
+                            var_badge,
+                            html.Small(kickoff_display, className="portal-text-muted me-2 ms-1"),
                             status_badge,
                         ],
                         className="d-flex align-items-center flex-wrap gap-1 flex-grow-1",
@@ -193,6 +202,49 @@ def render_past_game_card(
         detail_rows.append(
             html.Div(
                 [_lucide("map-pin"), html.Small(stadium, className="portal-text-muted")],
+                className="d-flex align-items-center gap-1 mb-2",
+            )
+        )
+
+    # Streaming and Tickets (Parallel to next_game_card)
+    platform_label = get_streaming_label(streaming_url, streaming_platform)
+    if streaming_url:
+        is_on_cc = "on.cc" in platform_label.lower() or "on.cc" in (streaming_url or "").lower()
+        if is_on_cc:
+            logo_content = html.Span([
+                html.Span("on.", style={"color": "#fff", "fontWeight": "900"}),
+                html.Span("cc", style={"color": "#ffee00", "fontWeight": "900"}),
+            ], className="px-2 py-0 rounded", style={"background": "#e60012", "fontSize": "0.75rem", "letterSpacing": "-0.5px"})
+        else:
+            logo_content = html.Span(platform_label, className="small fw-bold text-uppercase")
+
+        lock_icon = _lucide("lock") if broadcast_type == "PPV" else None
+        
+        detail_rows.append(
+            html.Div(
+                [
+                    _lucide("tv"),
+                    html.A(
+                        [logo_content, lock_icon] if lock_icon else logo_content,
+                        href=streaming_url,
+                        target="_blank",
+                        rel="noopener noreferrer",
+                        className="d-inline-flex align-items-center gap-1 text-decoration-none"
+                    ),
+                    dbc.Badge("PPV", color="warning", className="ms-2 text-dark", style={"fontSize": "0.6rem"}) if broadcast_type == "PPV" else None,
+                    dbc.Badge("FREE", color="success", className="ms-2", style={"fontSize": "0.6rem"}) if broadcast_type == "Free" else None,
+                ],
+                className="d-flex align-items-center gap-1 mb-2",
+            )
+        )
+
+    if ticket_prices:
+        detail_rows.append(
+            html.Div(
+                [
+                    _lucide("ticket"),
+                    html.Small(f"Tickets: {ticket_prices}", className="portal-text-muted fw-semibold"),
+                ],
                 className="d-flex align-items-center gap-1 mb-2",
             )
         )

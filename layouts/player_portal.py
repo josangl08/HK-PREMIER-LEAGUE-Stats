@@ -10,6 +10,18 @@ from utils.skeleton_components import (
 )
 
 
+def _build_sync_status_banner() -> html.Div:
+    """
+    Subtle inline banner shown while the player's Transfermarkt data is being resolved.
+    Hidden by default; shown/updated by the sync-poll callback.
+    """
+    return html.Div(
+        id="sync-status-banner",
+        style={"display": "none"},
+        className="sync-status-banner",
+    )
+
+
 def create_unified_year_navigator() -> html.Div:
     """
     Horizontally scrollable Year Navigator container.
@@ -106,8 +118,13 @@ def _build_stage_column() -> html.Div:
                 type="circle",
                 color="var(--bs-primary)",
                 children=html.Div(
-                    id="stage-content",
-                    children=[create_skeleton_stage()],
+                    id="stage-shell",
+                    className="glass-card glass-career stage-shell",
+                    children=html.Div(
+                        id="stage-content",
+                        className="stage-inner",
+                        children=[create_skeleton_stage()],
+                    ),
                 ),
                 className="mb-3",
             ),
@@ -139,9 +156,12 @@ def create_player_portal_layout(user_role: str = "player") -> html.Div:
             dcc.Store(id="player-photos-store", storage_type="local"),
             # Triggers post-generation gallery refresh or download
             dcc.Store(id="card-generation-trigger"),
+            # Polls sync status for newly registered players (stops after data is ready)
+            dcc.Interval(id="sync-poll-interval", interval=8000, n_intervals=0, max_intervals=30, disabled=True),
 
             # Full-width sticky title header (outside Container)
             _build_global_header(),
+            _build_sync_status_banner(),
 
             # Portal Viewport — no horizontal padding on container
             dbc.Container(

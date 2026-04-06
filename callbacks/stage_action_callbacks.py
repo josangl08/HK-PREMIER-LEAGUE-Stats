@@ -99,37 +99,34 @@ def caption_ai_callback(n_clicks, context):
         caption_text = agent_result.get(
             "output", f"¡Gran actuación de {player_name}! 💪⚽ #HKPremierLeague"
         )
-    return html.Div(
-        dbc.Card(
-            [
-                dbc.CardHeader(
-                    [
-                        html.I(className="bi bi-pencil-square me-2"),
-                        html.Span("Caption AI", className="fw-semibold"),
-                    ],
-                    className="border-0 py-2",
-                ),
-                dbc.CardBody(
-                    [
-                        html.P(
-                            caption_text,
-                            id="caption-text-content",
-                            className="mb-3",
-                        ),
-                        dcc.Clipboard(
-                            target_id="caption-text-content",
-                            title="Copiar",
-                            style={"display": "inline-block"},
-                            className="btn btn-sm btn-outline-secondary",
-                        ),
-                    ]
-                ),
-            ],
-            className="border-0 shadow-sm",
-            color="dark",
-            outline=True,
-        ),
-        className="glass-card",
+    return dbc.Card(
+        [
+            dbc.CardHeader(
+                [
+                    html.I(className="bi bi-pencil-square me-2"),
+                    html.Span("Caption AI", className="fw-semibold"),
+                ],
+                className="border-0 py-2",
+            ),
+            dbc.CardBody(
+                [
+                    html.P(
+                        caption_text,
+                        id="caption-text-content",
+                        className="mb-3",
+                    ),
+                    dcc.Clipboard(
+                        target_id="caption-text-content",
+                        title="Copiar",
+                        style={"display": "inline-block"},
+                        className="btn btn-sm btn-outline-secondary",
+                    ),
+                ]
+            ),
+        ],
+        className="border-0 shadow-sm",
+        color="dark",
+        outline=True,
     )
 
 
@@ -150,20 +147,17 @@ def show_proyectar_callback(n_clicks, context):
                 f"Datos de proyección no disponibles para {season}.", color="info"
             )
         return html.Div(
-            html.Div(
-                [
-                    html.H6(
-                        "Proyección de Temporada",
-                        className="fw-bold mb-3 text-success",
-                    ),
-                    dcc.Graph(
-                        figure=fig,
-                        config={"displayModeBar": False},
-                        className="w-100",
-                    ),
-                ]
-            ),
-            className="glass-card",
+            [
+                html.H6(
+                    "Proyección de Temporada",
+                    className="fw-bold mb-3 text-success",
+                ),
+                dcc.Graph(
+                    figure=fig,
+                    config={"displayModeBar": False},
+                    className="w-100",
+                ),
+            ]
         )
     except Exception as exc:
         logger.error(f"show_proyectar error: {exc}")

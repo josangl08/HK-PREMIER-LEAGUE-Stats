@@ -479,39 +479,48 @@ class TransfermarktExtractor:
             if not row:
                 continue
 
-            tds = row.find_all("td")
+            # TM search results use a 2-row layout: the name row + a sibling row
+            # that contains the club link. Collect both rows for full data extraction.
+            next_row = row.find_next_sibling("tr")
+            rows_to_search = [row] + ([next_row] if next_row else [])
 
-            # Club: td that contains a team link <a href="/(verein|club)/...">
+            # Club: check current row first, then the sibling row
             club_text = ""
-            for td in tds:
-                club_link = td.find("a", href=re.compile(r"/(verein|club)/"))
-                if club_link:
-                    club_text = club_link.get_text(strip=True)
-                    break
-                club_img = td.find("img", attrs={"class": re.compile(r"(club|vereins|logo)")})
-                if club_img and club_img.get("alt"):
-                    club_text = club_img["alt"]
+            for search_row in rows_to_search:
+                for td in search_row.find_all("td"):
+                    club_link = td.find("a", href=re.compile(r"/(verein|startseite|club)/"))
+                    if club_link:
+                        club_text = club_link.get_text(strip=True)
+                        break
+                    club_img = td.find("img", attrs={"class": re.compile(r"(club|vereins|logo)")})
+                    if club_img and club_img.get("alt"):
+                        club_text = club_img["alt"]
+                        break
+                if club_text:
                     break
 
             # Nationality: flag images on TM have "flagge" in their src URL.
             # Avoid picking up player portrait imgs whose title is the player name.
             nat_text = ""
-            for img in row.find_all("img"):
-                src = img.get("src", "") or img.get("data-src", "")
-                if "flagge" not in src:
-                    continue
-                title = img.get("title", "")
-                alt   = img.get("alt", "")
-                if title and len(title) > 1:
-                    nat_text = title
-                    break
-                if alt and len(alt) >= 2:
-                    nat_text = alt
+            for search_row in rows_to_search:
+                for img in search_row.find_all("img"):
+                    src = img.get("src", "") or img.get("data-src", "")
+                    if "flagge" not in src:
+                        continue
+                    title = img.get("title", "")
+                    alt   = img.get("alt", "")
+                    if title and len(title) > 1:
+                        nat_text = title
+                        break
+                    if alt and len(alt) >= 2:
+                        nat_text = alt
+                        break
+                if nat_text:
                     break
 
-            # Birth year: 4-digit year in the row text
-            row_text = row.get_text(" ", strip=True)
-            by_match = re.search(r"\b(19[5-9]\d|200[0-9]|201[0-9]|202[0-4])\b", row_text)
+            # Birth year: 4-digit year across both rows
+            combined_text = " ".join(r.get_text(" ", strip=True) for r in rows_to_search)
+            by_match = re.search(r"\b(19[5-9]\d|200[0-9]|201[0-9]|202[0-4])\b", combined_text)
             cand_birth_year = int(by_match.group(1)) if by_match else None
 
             candidates.append((tm_id, player_text, club_text, nat_text, cand_birth_year))
@@ -524,15 +533,25 @@ class TransfermarktExtractor:
         team_lower = team.lower().strip()
         nat_lower  = nationality.lower().strip()
 
+        # Build alternative name forms for East-Asian names stored as "Surname Given"
+        # TM often stores them as "Given-Surname" or "Given Surname" (Western order).
+        name_tokens = name_lower.split()
+        name_alternatives = [name_lower]
+        if len(name_tokens) >= 2:
+            # "Chan Ka Ho" → "Ka Ho Chan", "Ka-Ho Chan"
+            western = " ".join(name_tokens[1:]) + " " + name_tokens[0]
+            western_hyphen = "-".join(name_tokens[1:]) + " " + name_tokens[0]
+            name_alternatives += [western, western_hyphen]
+
         best_id: Optional[int] = None
         best_score = 0.0
 
         for tm_id, p_name, club, nat, by in candidates:
-            # Name score — always computed, against original name and search_name
-            p_name_lower = p_name.lower()
+            # Name score — try original name, search_name, and East-Asian order variants
+            p_name_lower = p_name.lower().replace("-", " ")
             name_score = max(
-                difflib.SequenceMatcher(None, name_lower, p_name_lower).ratio(),
-                difflib.SequenceMatcher(None, search_name.lower(), p_name_lower).ratio(),
+                difflib.SequenceMatcher(None, alt, p_name_lower).ratio()
+                for alt in name_alternatives + [search_name.lower()]
             )
             # If we searched by last name (abbreviated), treat a full last-name substring
             # match as a strong hit — the first name we don't have so we can't compare it.

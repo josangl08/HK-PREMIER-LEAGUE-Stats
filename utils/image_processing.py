@@ -1,10 +1,13 @@
 # ABOUTME: Image utility for background removal and player photo album management.
 # ABOUTME: Uses rembg for offline U2-Net processing and enforces a max-5 album constraint.
+# ABOUTME: Indexes jersey and stadium assets for the elite design agency.
 
 import os
 import io
 import shutil
+import logging
 from pathlib import Path
+from typing import Optional, Dict
 
 # Safeguard for Numba threading layer on macOS (Silicon)
 if "NUMBA_THREADING_LAYER" not in os.environ:
@@ -13,9 +16,61 @@ if "NUMBA_THREADING_LAYER" not in os.environ:
 from rembg import remove
 from PIL import Image
 
+logger = logging.getLogger(__name__)
+
 # --- Constants ---
 MAX_PHOTOS = 5
 ALBUM_ROOT = "data/player_cards"
+ASSETS_ROOT = "assets"
+
+# Mapping for team assets (prefix matches for filenames)
+TEAM_PREFIX_MAPPING = {
+    "eastern": "eastern",
+    "kitchee": "kitchee",
+    "lee_man": "leeman",
+    "tai_po": "taipo",
+    "hong_kong_football_club": "hkfc",
+    "kowloon_city": "kowloon",
+    "north_district": "northdt",
+    "southern_district": "southern",
+    "eastern_district": "easterndt",
+    "rangers": "rangers",
+    "bc_rangers": "rangers",
+    "hkfc": "hkfc"
+}
+
+# --- Asset Indexing Functions ---
+
+def get_team_assets(team_id: str) -> Dict[str, Optional[str]]:
+    """
+    Retrieves indexed assets for a specific team.
+    Returns paths to home/away jerseys and stadium thumbnail.
+    """
+    prefix = TEAM_PREFIX_MAPPING.get(team_id, team_id)
+    
+    # 1. Jerseys
+    jersey_dir = Path(ASSETS_ROOT) / "team_jersey"
+    home_j = jersey_dir / f"{prefix}_home.png"
+    away_j = jersey_dir / f"{prefix}_away.png"
+    
+    # Fallback for typos like kitche_home.png
+    if not home_j.exists() and prefix == "kitchee":
+        home_j = jersey_dir / "kitche_home.png"
+    if not away_j.exists() and prefix == "kitchee":
+        away_j = jersey_dir / "kitche_away.png"
+
+    # 2. Stadium
+    # Check assets/team_media/{team_id}/stadium_thumb.jpg
+    # and also try with prefix
+    stadium_path = Path(ASSETS_ROOT) / "team_media" / team_id / "stadium_thumb.jpg"
+    if not stadium_path.exists():
+        stadium_path = Path(ASSETS_ROOT) / "team_media" / prefix / "stadium_thumb.jpg"
+
+    return {
+        "home_jersey": str(home_j) if home_j.exists() else None,
+        "away_jersey": str(away_j) if away_j.exists() else None,
+        "stadium": str(stadium_path) if stadium_path.exists() else None
+    }
 
 # --- Core Functions ---
 

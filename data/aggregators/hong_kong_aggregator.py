@@ -1365,16 +1365,22 @@ def get_season_summary(player_id: str, season: str) -> Dict:
     # Aggregate by competition
     comp_stats: Dict[str, Dict] = {}
     for m in matches:
+        # ONLY count as a played match if minutes > 0
+        mins = int(m.get("minutes_played", 0) or 0)
+        if mins <= 0:
+            continue
+
         comp = m.get("competition", "Unknown")
         if comp not in comp_stats:
             comp_stats[comp] = {"competition": comp, "pj": 0, "goals": 0, "assists": 0}
+        
         comp_stats[comp]["pj"] += 1
         comp_stats[comp]["goals"] += int(m.get("goals", 0) or 0)
         comp_stats[comp]["assists"] += int(m.get("assists", 0) or 0)
 
     return {
         "season": season,
-        "pj": summary.get("total_matches", len(matches)),
+        "pj": sum(c["pj"] for c in comp_stats.values()),
         "goals": summary.get("goals", 0),
         "assists": summary.get("assists", 0),
         "minutes": summary.get("minutes_played", 0),

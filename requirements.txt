@@ -23,6 +23,7 @@ Flask-Login==0.6.3
 # Manipulación de datos y cálculos numéricos.
 pandas==2.2.2
 numpy==1.26.4
+pyarrow>=15.0  # Parquet serialization for processed DataFrame cache
 
 # == Extracción de Datos (Web Scraping) ==
 # Para obtener datos de fuentes web.
@@ -52,8 +53,9 @@ scikit-learn>=1.4
 umap-learn>=0.5.3
 sentence-transformers>=2.7
 rembg>=2.0
-langgraph>=0.1
-langchain-google-genai>=1.0
+google-genai>=0.3.0
+langgraph>=0.2.2
+langchain-google-genai>=2.0.1
 langchain-google-vertexai>=1.0
 
 # == Servidor de Producción ==

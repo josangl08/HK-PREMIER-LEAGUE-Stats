@@ -1,4 +1,7 @@
 import os
+from dotenv import load_dotenv
+load_dotenv()
+
 import warnings
 
 # Silence noisy UMAP/Numba warnings about n_jobs and TBB
@@ -149,13 +152,6 @@ if not is_werkzeug_reloader_process():
     set_hong_kong_data_manager(data_manager)
     logger.info("✓ DataManager registrado en app context (singleton pattern)")
 
-    # Sincronizar admin desde .env → data/users.json (Admin Safety Sync)
-    from utils.auth import AuthRepository
-    try:
-        AuthRepository.sync_admin_from_env()
-        logger.info("✓ Admin sincronizado desde .env en users.json")
-    except Exception as e:
-        logger.error(f"❌ Error en Admin Safety Sync: {e}")
 
     # ==============================================================================
     # IMPORTACIÓN DE CALLBACKS (Solo en el proceso hijo)

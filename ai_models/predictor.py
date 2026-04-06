@@ -53,7 +53,9 @@ def train_xgboost(
         X_tr, X_val = X[train_idx], X[val_idx]
         y_tr, y_val = y[train_idx], y[val_idx]
         fold_model = xgb.XGBRegressor(
-            n_estimators=200, learning_rate=0.05, random_state=42, verbosity=0
+            n_estimators=100, learning_rate=0.05, max_depth=3,
+            min_child_weight=5, subsample=0.8, colsample_bytree=0.8,
+            reg_alpha=0.1, reg_lambda=1.0, random_state=42, verbosity=0,
         )
         fold_model.fit(X_tr, y_tr)
         preds = fold_model.predict(X_val)
@@ -63,7 +65,9 @@ def train_xgboost(
 
     # Final model trained on all data
     model = xgb.XGBRegressor(
-        n_estimators=200, learning_rate=0.05, random_state=42, verbosity=0
+        n_estimators=100, learning_rate=0.05, max_depth=3,
+        min_child_weight=5, subsample=0.8, colsample_bytree=0.8,
+        reg_alpha=0.1, reg_lambda=1.0, random_state=42, verbosity=0,
     )
     model.fit(X, y)
 
@@ -110,17 +114,30 @@ def train_tabpfn(
 
     try:
         from tabpfn import TabPFNRegressor
+        from sklearn.model_selection import KFold
         from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
-        model = TabPFNRegressor(device="cpu")
+        # Honest k-fold CV — never evaluate on training data
+        n_folds = min(5, max(3, len(X) // 30))
+        kf = KFold(n_splits=n_folds, shuffle=True, random_state=42)
+        rmse_scores, mae_scores, r2_scores = [], [], []
+        for tr_idx, val_idx in kf.split(X):
+            _m = TabPFNRegressor(device="cpu", n_estimators=16)
+            _m.fit(X[tr_idx], y[tr_idx])
+            _p = _m.predict(X[val_idx])
+            rmse_scores.append(float(np.sqrt(mean_squared_error(y[val_idx], _p))))
+            mae_scores.append(float(mean_absolute_error(y[val_idx], _p)))
+            r2_scores.append(float(r2_score(y[val_idx], _p)))
+
+        model = TabPFNRegressor(device="cpu", n_estimators=32)
         model.fit(X, y)
-        preds = model.predict(X)
         metrics = {
-            "rmse": float(np.sqrt(mean_squared_error(y, preds))),
-            "mae": float(mean_absolute_error(y, preds)),
-            "r2": float(r2_score(y, preds)),
+            "rmse": float(np.mean(rmse_scores)),
+            "mae":  float(np.mean(mae_scores)),
+            "r2":   float(np.mean(r2_scores)),
+            "cv_folds": n_folds,
         }
-        logger.info(f"TabPFN [{target}] train metrics: {metrics}")
+        logger.info(f"TabPFN [{target}] CV metrics: {metrics}")
 
     except ImportError:
         logger.warning("TabPFN not installed. Falling back to XGBoost.")

@@ -2,6 +2,7 @@
 # ABOUTME: Renders pre-match milestones with a closed header (competition/date/teams) and expandable panel (stadium/streaming/AI win prob/H2H).
 
 from typing import Dict, Any, Optional
+from pathlib import Path
 
 from dash import html
 import dash_bootstrap_components as dbc
@@ -58,9 +59,29 @@ def _lucide(name: str) -> html.I:
 
 def _team_logo_block(team_name: str, logo_url: Optional[str]) -> html.Div:
     """Renders a team block: logo image (or placeholder) + name."""
-    if logo_url:
+    
+    resolved_logo = None
+    
+    # 1. Intentar resolver localmente por nombre
+    if team_name:
+        normalized = team_name.lower().replace(" ", "_").replace("-", "_").replace(".", "")
+        # Caso especial para North District
+        if "north" in normalized:
+            normalized = "north_dt"
+            
+        local_file = f"{normalized}.png"
+        # Ruta física para comprobación
+        assets_path = Path(__file__).parent.parent.parent / "assets" / "team_logos" / local_file
+        if assets_path.exists():
+            resolved_logo = f"/assets/team_logos/{local_file}"
+
+    # 2. Si no hay local, usar la URL de la DB
+    if not resolved_logo and logo_url:
+        resolved_logo = logo_url
+
+    if resolved_logo:
         logo = html.Img(
-            src=logo_url,
+            src=resolved_logo,
             className="next-game-card__team-logo",
             alt=team_name,
             style={"width": "36px", "height": "36px", "objectFit": "contain"},
@@ -136,6 +157,21 @@ def render_next_game_card(
         else None
     )
 
+    # Status badges for LIVE or Pending
+    status = milestone_payload.get("confirmation_status")
+    hkfa_status = milestone_payload.get("hkfa_status")
+    has_var = milestone_payload.get("has_var", False)
+    
+    status_badge = None
+    if status == "LIVE":
+        status_badge = dbc.Badge("LIVE", color="danger", className="small ms-1 animate-glass-pulse")
+    elif status == "Pending Update":
+        status_badge = dbc.Badge("Awaiting Statistics", color="warning", className="small ms-1 text-dark")
+    elif hkfa_status == "Delay" or hkfa_status == "Delayed":
+        status_badge = dbc.Badge("DELAYED", color="warning", className="small ms-1 animate-glass-pulse text-dark")
+
+    var_badge = dbc.Badge("VAR", color="dark", className="small ms-1", style={"opacity": 0.8}) if has_var else None
+
     # ── Closed header ──────────────────────────────────────────────────────
     header_content = html.Div(
         [
@@ -145,9 +181,11 @@ def render_next_game_card(
                     html.Div(
                         [
                             comp_badge,
+                            var_badge,
+                            status_badge,
                             html.Small(
                                 [_lucide("clock"), kickoff_display] if kickoff_display else "",
-                                className="portal-text-muted",
+                                className="portal-text-muted ms-1",
                             ),
                         ],
                         className="d-flex align-items-center flex-wrap gap-1 flex-grow-1",
@@ -190,20 +228,40 @@ def render_next_game_card(
         )
 
     platform_label = get_streaming_label(streaming_url, streaming_platform)
+    broadcast_type = milestone_payload.get("broadcast_type")
+    ticket_prices = milestone_payload.get("ticket_prices")
+    
     if streaming_url:
+        # Create a stylized on.cc logo if the platform is on.cc
+        is_on_cc = "on.cc" in platform_label.lower() or "on.cc" in (streaming_url or "").lower()
+        
+        if is_on_cc:
+            logo_content = html.Span([
+                html.Span("on.", style={"color": "#fff", "fontWeight": "900"}),
+                html.Span("cc", style={"color": "#ffee00", "fontWeight": "900"}),
+            ], className="px-2 py-0 rounded", style={"background": "#e60012", "fontSize": "0.75rem", "letterSpacing": "-0.5px"})
+        else:
+            logo_content = html.Span(platform_label, className="small fw-bold text-uppercase")
+
+        # Lock icon for PPV
+        lock_icon = _lucide("lock") if broadcast_type == "PPV" else None
+        
         detail_rows.append(
             html.Div(
                 [
                     _lucide("tv"),
                     html.A(
-                        platform_label,
+                        [logo_content, lock_icon] if lock_icon else logo_content,
                         href=streaming_url,
                         target="_blank",
                         rel="noopener noreferrer",
-                        className="small text-primary fw-semibold",
+                        className="d-inline-flex align-items-center gap-1 text-decoration-none",
+                        title=f"Watch on {platform_label} {'(Pay-Per-View)' if broadcast_type == 'PPV' else '(Free)'}"
                     ),
+                    dbc.Badge("PPV", color="warning", className="ms-2 text-dark", style={"fontSize": "0.6rem"}) if broadcast_type == "PPV" else None,
+                    dbc.Badge("FREE", color="success", className="ms-2", style={"fontSize": "0.6rem"}) if broadcast_type == "Free" else None,
                 ],
-                className="d-flex align-items-center gap-1 mb-1",
+                className="d-flex align-items-center gap-1 mb-2",
             )
         )
     else:
@@ -213,7 +271,19 @@ def render_next_game_card(
                     _lucide("tv-off"),
                     html.Small(platform_label, className="portal-text-muted"),
                 ],
-                className="d-flex align-items-center gap-1 mb-1",
+                className="d-flex align-items-center gap-1 mb-2",
+            )
+        )
+
+    # Ticket Prices Row
+    if ticket_prices:
+        detail_rows.append(
+            html.Div(
+                [
+                    _lucide("ticket"),
+                    html.Small(f"Tickets: {ticket_prices}", className="portal-text-muted fw-semibold"),
+                ],
+                className="d-flex align-items-center gap-1 mb-2",
             )
         )
 

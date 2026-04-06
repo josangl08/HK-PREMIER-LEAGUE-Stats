@@ -176,6 +176,6 @@ def fit_umap(X: np.ndarray, player_names: List[str], random_state: int = 42) -> 
     
     # Save to registry for downstream use
     registry = ModelRegistry()
-    registry.save(reducer, model_id="umap_reducer", model_type="dimensionality_reduction")
+    registry.save(reducer, model_id="umap_reducer", model_type="clustering", metrics={}, features=[])
     
     return umap_df, reducer

@@ -2,12 +2,25 @@
 # ABOUTME: Replaces the old JSON-based index with direct SQLAlchemy queries for better performance and consistency.
 
 import logging
+import re
 from typing import Dict, List, Optional
-from sqlalchemy import select
+from sqlalchemy import func, select
 from models.db_models import Player, PlayerSeasonStat
 from utils.db_engine import SessionFactory
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_team_token(value: Optional[str]) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return ""
+    raw = raw.replace("&", " and ")
+    raw = raw.replace("fc", " ")
+    raw = raw.replace("-", " ")
+    raw = raw.replace(".", " ")
+    raw = re.sub(r"[^a-z0-9]+", " ", raw)
+    return " ".join(raw.split())
 
 class PlayerIndex:
     """
@@ -22,14 +35,57 @@ class PlayerIndex:
     # Public API (Backward Compatible)
     # ------------------------------------------------------------------
 
-    def get_player_id(self, name: str) -> Optional[str]:
-        """Returns the canonical player ID for a given name from SQL."""
+    def get_player_id(
+        self,
+        name: str,
+        team_id: Optional[str] = None,
+        team_name: Optional[str] = None,
+    ) -> Optional[str]:
+        """Returns the best canonical player ID for a given player name from SQL."""
         session = SessionFactory()
         try:
-            # Match by name (case insensitive if possible, but title case is standard in DB)
-            stmt = select(Player.id).where(Player.name == name)
-            result = session.execute(stmt).scalar_one_or_none()
-            return str(result) if result else None
+            stmt = select(Player).where(Player.name == name)
+            candidates = session.execute(stmt).scalars().all()
+            if not candidates:
+                return None
+            if len(candidates) == 1:
+                return str(candidates[0].id)
+
+            team_token = _normalize_team_token(team_name)
+            best_player = None
+            best_score = -1
+            for player in candidates:
+                score = 0
+                if team_id and player.current_team_id == team_id:
+                    score += 100
+                if team_token and _normalize_team_token(player.current_team_id) == team_token:
+                    score += 80
+                if player.current_team_id:
+                    score += 10
+                if player.tm_id:
+                    score += 6
+                if player.position_main:
+                    score += 4
+
+                season_count = session.execute(
+                    select(func.count()).select_from(PlayerSeasonStat).where(PlayerSeasonStat.player_id == player.id)
+                ).scalar_one()
+                score += int(season_count)
+
+                if score > best_score:
+                    best_score = score
+                    best_player = player
+
+            if best_player:
+                logger.debug(
+                    "Resolved duplicate player name '%s' to id=%s using team_id=%s team_name=%s",
+                    name,
+                    best_player.id,
+                    team_id,
+                    team_name,
+                )
+                return str(best_player.id)
+            return None
         finally:
             session.close()
 

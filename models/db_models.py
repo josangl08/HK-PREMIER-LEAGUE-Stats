@@ -351,3 +351,19 @@ class SystemSyncLog(Base):
     last_run: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     status: Mapped[Optional[str]] = mapped_column(String(50)) # SUCCESS, FAILED
     details: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON)
+
+
+class MatchUpdateQueue(Base):
+    """Cola de seguimiento para actualizaciones inteligentes de partidos (Watchdog)."""
+    __tablename__ = "match_update_queue"
+    
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    fixture_id: Mapped[int] = mapped_column(ForeignKey("fixtures.id"), nullable=False)
+    player_id: Mapped[str] = mapped_column(ForeignKey("players.id"), nullable=False)
+    
+    status: Mapped[str] = mapped_column(String(20), default="PENDING") # PENDING, COMPLETED, FAILED
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_attempt: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    next_attempt: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

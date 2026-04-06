@@ -324,7 +324,14 @@ class HongKongDataProcessor:
         # Categoría de edad
         if 'Age' in df.columns:
             df['Age_Category'] = df['Age'].apply(self._categorize_age)
-        
+
+        # Alias 'Tackles per 90' desde columnas reales de la DB
+        if 'Tackles per 90' not in df.columns:
+            if 'Sliding tackles per 90' in df.columns:
+                df['Tackles per 90'] = df['Sliding tackles per 90']
+            elif 'PAdj Sliding tackles' in df.columns:
+                df['Tackles per 90'] = df['PAdj Sliding tackles']
+
         return df
     
     def _categorize_age(self, age):

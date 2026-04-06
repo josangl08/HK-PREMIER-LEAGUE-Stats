@@ -164,18 +164,16 @@ def create_skeleton_stage():
     """
     Create a skeleton loader for the Stage area.
     """
-    return dbc.Card([
-        dbc.CardBody([
-            html.Div(className="skeleton skeleton-title mb-3", style={"width": "40%"}),
-            html.Div(className="skeleton mb-2", style={"width": "100%", "height": "14px"}),
-            html.Div(className="skeleton mb-2", style={"width": "95%", "height": "14px"}),
-            html.Div(className="skeleton mb-4", style={"width": "80%", "height": "14px"}),
-            dbc.Row([
-                dbc.Col(html.Div(className="skeleton", style={"height": "200px"}), md=6),
-                dbc.Col(html.Div(className="skeleton", style={"height": "200px"}), md=6),
-            ])
+    return html.Div([
+        html.Div(className="skeleton skeleton-title mb-3", style={"width": "40%"}),
+        html.Div(className="skeleton mb-2", style={"width": "100%", "height": "14px"}),
+        html.Div(className="skeleton mb-2", style={"width": "95%", "height": "14px"}),
+        html.Div(className="skeleton mb-4", style={"width": "80%", "height": "14px"}),
+        dbc.Row([
+            dbc.Col(html.Div(className="skeleton", style={"height": "200px"}), md=6),
+            dbc.Col(html.Div(className="skeleton", style={"height": "200px"}), md=6),
         ])
-    ], className="border-0 shadow-sm")
+    ])
 
 
 def get_skeleton_for_view(view_level: str):

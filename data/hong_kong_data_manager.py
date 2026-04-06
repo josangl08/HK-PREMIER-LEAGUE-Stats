@@ -1,12 +1,13 @@
 # ABOUTME: Refactored DataManager using SQLAlchemy for performance and consistency.
 # ABOUTME: Maintains compatibility with existing aggregators by providing DataFrames.
 
-import pandas as pd
+import json
 import logging
+import pandas as pd
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict, List, Optional
-from datetime import datetime
-from sqlalchemy import select, and_
-from sqlalchemy.orm import Session
+from sqlalchemy import select
 
 # Importar componentes de base de datos
 from models.db_models import Player, Team, Season, PlayerSeasonStat, SystemSyncLog
@@ -21,18 +22,22 @@ from data.managers.fixture_manager import get_fixture_manager
 
 logger = logging.getLogger(__name__)
 
+_PROCESSED_CACHE_DIR = Path("cache/processed")
+
+
 class HongKongDataManager:
     """
     Gestor de datos de la Liga de Hong Kong basado en SQL.
     Sustituye la dependencia de CSVs por consultas a la base de datos relacional.
     """
-    
+
     def __init__(self, auto_load: bool = True):
         self.current_season = get_current_season()
         self.aggregator: Optional[HongKongStatsAggregator] = None
         self.advanced_cache = AdvancedCacheManager()
         self.processor = HongKongDataProcessor()
-        
+        _PROCESSED_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
         # TTLs del cache
         self.cache_ttl = {
             'league_stats': 1800,
@@ -44,35 +49,98 @@ class HongKongDataManager:
         if auto_load:
             self.refresh_data()
 
+    # ── Processed DataFrame disk cache ────────────────────────────────────────
+
+    def _cache_path(self, season: str) -> Path:
+        return _PROCESSED_CACHE_DIR / f"{season}.parquet"
+
+    def _meta_path(self, season: str) -> Path:
+        return _PROCESSED_CACHE_DIR / f"{season}.meta.json"
+
+    def _get_db_last_run(self, season: str) -> Optional[str]:
+        """Returns the ISO timestamp of the last successful HKPL sync for this season, or None."""
+        session = SessionFactory()
+        try:
+            stmt = (
+                select(SystemSyncLog.last_run)
+                .where(SystemSyncLog.task_name == f"hkpl_sync_{season}")
+                .where(SystemSyncLog.status == "SUCCESS")
+            )
+            result = session.execute(stmt).scalar_one_or_none()
+            return result.isoformat() if result else None
+        except Exception:
+            return None
+        finally:
+            session.close()
+
+    def _load_from_cache(self, season: str) -> Optional[pd.DataFrame]:
+        """Loads processed DataFrame from disk if the DB data hasn't changed since caching."""
+        cache_file = self._cache_path(season)
+        meta_file = self._meta_path(season)
+        if not cache_file.exists() or not meta_file.exists():
+            return None
+        try:
+            meta = json.loads(meta_file.read_text())
+            db_last_run = self._get_db_last_run(season)
+            if meta.get("db_last_run") == db_last_run:
+                df = pd.read_parquet(cache_file)
+                logger.info(f"✓ Datos procesados cargados desde caché de disco para {season} ({len(df)} jugadores)")
+                return df
+        except Exception as e:
+            logger.debug(f"Cache miss for {season}: {e}")
+        return None
+
+    def _save_to_cache(self, season: str, df: pd.DataFrame) -> None:
+        """Persists processed DataFrame and current DB sync timestamp to disk."""
+        try:
+            df.to_parquet(self._cache_path(season), index=False)
+            meta = {"db_last_run": self._get_db_last_run(season), "cached_at": datetime.now(timezone.utc).isoformat()}
+            self._meta_path(season).write_text(json.dumps(meta))
+        except Exception as e:
+            logger.debug(f"Could not save processed cache for {season}: {e}")
+
+    # ── Main refresh ───────────────────────────────────────────────────────────
+
     def refresh_data(self, season: Optional[str] = None, force_download: bool = False) -> bool:
         """
         Prepara el agregador con los datos de la temporada seleccionada desde SQL.
+        Usa caché de disco si los datos no han cambiado desde el último procesamiento.
         """
         target_season = season or self.current_season
-        logger.info(f"Refrescando datos para la temporada {target_season} desde SQL...")
-        
+
         try:
-            # 1. Obtener datos de la base de datos
+            # 1. Intentar cargar desde caché de disco (evita reprocesamiento)
+            if not force_download:
+                df = self._load_from_cache(target_season)
+                if df is not None:
+                    self.aggregator = HongKongStatsAggregator(df)
+                    self.current_season = target_season
+                    return True
+
+            logger.info(f"Refrescando datos para la temporada {target_season} desde SQL...")
+
+            # 2. Obtener datos de la base de datos
             df = self._load_season_dataframe(target_season)
-            
             if df.empty:
                 logger.warning(f"No hay datos en SQL para la temporada {target_season}")
                 return False
-            
-            # 2. Procesar datos (Normalización y Limpieza)
-            # Esto crea las columnas faltantes como Position_Group y Tackles per 90
+
+            # 3. Procesar datos (Normalización, métricas derivadas)
             df = self.processor.process_season_data(df, target_season)
-            
-            # 3. Inicializar el agregador usando el DataFrame procesado
+
+            # 4. Persistir en caché de disco para el próximo startup
+            self._save_to_cache(target_season, df)
+
+            # 5. Inicializar el agregador
             self.aggregator = HongKongStatsAggregator(df)
             self.current_season = target_season
-            
-            # 4. Limpiar cache de la temporada anterior
+
+            # 6. Limpiar cache de la temporada anterior
             self.advanced_cache.clear()
-            
+
             logger.info(f"✓ Agregador listo y normalizado para {target_season} ({len(df)} jugadores)")
             return True
-            
+
         except Exception as e:
             logger.error(f"Error al refrescar datos desde SQL: {e}")
             import traceback; traceback.print_exc()

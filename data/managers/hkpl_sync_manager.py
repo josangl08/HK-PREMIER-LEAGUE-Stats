@@ -17,6 +17,32 @@ from utils.player_index import get_player_index
 
 logger = logging.getLogger(__name__)
 
+_TM_TEXT_TO_ABBR = {
+    'goalkeeper': 'GK', 'portero': 'GK',
+    'centre-back': 'CB', 'central': 'CB', 'central defender': 'CB', 'defensa central': 'CB', 'defensa': 'CB',
+    'right-back': 'RB', 'lateral derecho': 'RB',
+    'left-back': 'LB', 'lateral izquierdo': 'LB',
+    'right wing-back': 'RWB', 'left wing-back': 'LWB',
+    'defensive midfield': 'DM', 'central midfield': 'CM', 'centrocampista': 'CM',
+    'attacking midfield': 'AMF', 'mediapunta': 'AMF', 'centrocampista ofensivo': 'AMF',
+    'right midfield': 'RM', 'left midfield': 'LM',
+    'interior derecho': 'RM', 'interior izquierdo': 'LM',
+    'right winger': 'RW', 'left winger': 'LW',
+    'right wing forward': 'RWF', 'left wing forward': 'LWF',
+    'centre-forward': 'CF', 'centre forward': 'CF', 'delantero centro': 'CF',
+    'striker': 'ST', 'second striker': 'SS',
+}
+
+_KNOWN_POSITION_CODES = {
+    "GK", "CB", "LCB", "RCB", "CB3", "LCB3", "RCB3",
+    "LB", "RB", "LWB", "RWB", "LB5", "RB5",
+    "DM", "DMF", "LDMF", "RDMF",
+    "CM", "LCMF", "RCMF", "CMF",
+    "AMF", "LAMF", "RAMF", "MCO",
+    "LM", "RM", "LW", "RW", "LWF", "RWF", "EI", "ED", "ID", "II",
+    "ST", "CF", "SS",
+}
+
 class HKPLSyncManager:
     """
     Manager to sync HKPL data from GitHub to SQL.
@@ -72,6 +98,7 @@ class HKPLSyncManager:
                 session.flush()
 
             count_stats = 0
+            affected_player_ids = set()
             for _, row in df.iterrows():
                 # 1. Team (Upsert)
                 team_name = str(row.get('Team', 'Unknown'))
@@ -87,12 +114,20 @@ class HKPLSyncManager:
                 
                 # USE PLAYER INDEX FOR CONSISTENT IDs
                 # Player names are already Title Case from processor
-                player_id = self.player_index.get_player_id(player_name)
+                player_id = self.player_index.get_player_id(
+                    player_name,
+                    team_id=team.id,
+                    team_name=team_name,
+                )
                 
                 if not player_id:
                     logger.warning(f"Player '{player_name}' not found in index during sync. Rebuilding index...")
                     self.player_index.build(force=True)
-                    player_id = self.player_index.get_player_id(player_name)
+                    player_id = self.player_index.get_player_id(
+                        player_name,
+                        team_id=team.id,
+                        team_name=team_name,
+                    )
                     
                 if not player_id:
                     # Fallback to name-based slug only if index failed, but log it as an error
@@ -107,14 +142,13 @@ class HKPLSyncManager:
                         id=player_id,
                         name=player_name,
                         current_team_id=team.id,
-                        position_main=row.get('Position_Clean', row.get('Position_Group', 'Unknown')),
+                        position_main=None,
                         age=int(row.get('Age', 0)) if pd.notna(row.get('Age')) else 0
                     )
                     session.add(player)
                     session.flush()
                 else:
                     player.current_team_id = team.id
-                    player.position_main = row.get('Position_Clean', row.get('Position_Group', 'Unknown'))
                     if pd.notna(row.get('Age')):
                         player.age = int(row.get('Age'))
 
@@ -167,6 +201,10 @@ class HKPLSyncManager:
                     stat.advanced_stats = advanced
                 
                 count_stats += 1
+                affected_player_ids.add(player.id)
+
+            for player_id in affected_player_ids:
+                self._reconcile_player_position(session, player_id, prefer_transfermarkt=False)
 
             session.commit()
             logger.info(f"✓ {season_id}: {count_stats} player stats synchronized.")
@@ -211,31 +249,6 @@ class HKPLSyncManager:
 
         extractor = TransfermarktExtractor()
         session = SessionFactory()
-
-        _TM_TEXT_TO_ABBR = {
-            'goalkeeper': 'GK', 'portero': 'GK',
-            'centre-back': 'CB', 'central': 'CB', 'central defender': 'CB', 'defensa central': 'CB', 'defensa': 'CB',
-            'right-back': 'RB', 'lateral derecho': 'RB',
-            'left-back': 'LB', 'lateral izquierdo': 'LB',
-            'right wing-back': 'RWB', 'left wing-back': 'LWB',
-            'defensive midfield': 'DM', 'central midfield': 'CM', 'centrocampista': 'CM',
-            'attacking midfield': 'AMF', 'mediapunta': 'AMF', 'centrocampista ofensivo': 'AMF',
-            'right midfield': 'RM', 'left midfield': 'LM',
-            'interior derecho': 'RM', 'interior izquierdo': 'LM',
-            'right winger': 'RW', 'left winger': 'LW',
-            'right wing forward': 'RWF', 'left wing forward': 'LWF',
-            'centre-forward': 'CF', 'centre forward': 'CF', 'delantero centro': 'CF',
-            'striker': 'ST', 'second striker': 'SS',
-        }
-
-        def _to_abbr(tm_text: str) -> Optional[str]:
-            key = tm_text.lower().strip()
-            if key in _TM_TEXT_TO_ABBR:
-                return _TM_TEXT_TO_ABBR[key]
-            for pattern, code in _TM_TEXT_TO_ABBR.items():
-                if pattern in key:
-                    return code
-            return None
 
         try:
             player = session.get(Player, player_id)
@@ -284,24 +297,156 @@ class HKPLSyncManager:
             except Exception as exc:
                 logger.warning(f"resolve_player_tm_data: match history sync failed for {player_name!r}: {exc}")
 
-            # Step 3: resolve position if missing
-            if not player.position_main:
-                tm_pos = extractor.get_player_main_position(tm_id_str)
-                if tm_pos:
-                    abbr = _to_abbr(tm_pos)
-                    if abbr:
-                        player.position_main = abbr
-                        session.commit()
-                        logger.info(
-                            f"resolve_player_tm_data: position_main={abbr} set for {player_name!r}"
-                        )
-                    else:
-                        logger.warning(
-                            f"resolve_player_tm_data: unrecognised TM position '{tm_pos}' for {player_name!r}"
-                        )
+            # Step 3: reconcile position using Transfermarkt as the authoritative source when available
+            resolved = self._reconcile_player_position(session, player_id, prefer_transfermarkt=True, extractor=extractor)
+            if resolved:
+                session.commit()
+                logger.info(f"resolve_player_tm_data: position_main={resolved} set for {player_name!r}")
 
         except Exception as e:
             logger.error(f"resolve_player_tm_data error for {player_name!r}: {e}", exc_info=True)
             session.rollback()
         finally:
             session.close()
+
+    def reconcile_all_player_positions(self, prefer_transfermarkt: bool = True) -> Dict[str, int]:
+        """Recomputes canonical player positions across the whole DB."""
+        from data.extractors.transfermarkt_extractor import TransfermarktExtractor
+
+        session = SessionFactory()
+        extractor = TransfermarktExtractor() if prefer_transfermarkt else None
+        updated = 0
+        scanned = 0
+        try:
+            players = session.execute(select(Player)).scalars().all()
+            for player in players:
+                scanned += 1
+                previous = player.position_main
+                resolved = self._reconcile_player_position(
+                    session,
+                    player.id,
+                    prefer_transfermarkt=prefer_transfermarkt,
+                    extractor=extractor,
+                )
+                if resolved and resolved != previous:
+                    updated += 1
+            session.commit()
+            return {"scanned": scanned, "updated": updated}
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def _reconcile_player_position(
+        self,
+        session,
+        player_id: str,
+        prefer_transfermarkt: bool = False,
+        extractor=None,
+    ) -> Optional[str]:
+        player = session.get(Player, player_id)
+        if not player:
+            return None
+
+        resolved = self._resolve_position_from_latest_stats(session, player_id)
+
+        if not resolved and prefer_transfermarkt and player.tm_id:
+            resolved = self._resolve_position_from_transfermarkt(player.tm_id, extractor)
+
+        if not resolved:
+            resolved = self._resolve_position_from_match_history(session, player_id)
+
+        if resolved:
+            player.position_main = resolved
+        return resolved
+
+    def _resolve_position_from_latest_stats(self, session, player_id: str) -> Optional[str]:
+        stmt = (
+            select(PlayerSeasonStat)
+            .where(PlayerSeasonStat.player_id == player_id)
+            .order_by(PlayerSeasonStat.season_id.desc())
+        )
+        stats = session.execute(stmt).scalars().all()
+        for stat in stats:
+            advanced = stat.advanced_stats or {}
+            raw_primary = str(advanced.get("Primary position") or "").strip()
+            raw_position = str(advanced.get("Position_Clean") or advanced.get("Position") or "").strip()
+
+            # If the latest available season lists multiple roles, treat it as ambiguous
+            # and delegate the tie-break to Transfermarkt / recent match history.
+            if raw_primary and "," in raw_primary:
+                return None
+            if raw_position and "," in raw_position:
+                return None
+
+            primary = self._normalize_position_text(raw_primary)
+            if primary:
+                return primary
+
+            clean = self._normalize_position_text(raw_position)
+            if clean:
+                return clean
+
+            # If the most recent season exists but is not resolvable, stop here so older
+            # seasons do not overwrite the player with stale historical roles.
+            return None
+        return None
+
+    def _resolve_position_from_match_history(self, session, player_id: str) -> Optional[str]:
+        from models.db_models import MatchHistory
+
+        stmt = (
+            select(MatchHistory)
+            .where(MatchHistory.player_id == player_id)
+            .order_by(MatchHistory.date.desc())
+            .limit(12)
+        )
+        matches = session.execute(stmt).scalars().all()
+        weighted: Dict[str, int] = {}
+        for idx, match in enumerate(matches):
+            code = self._normalize_position_text(getattr(match, "position", None))
+            if not code:
+                continue
+            minutes = int(getattr(match, "minutes_played", 0) or 0)
+            weight = max(minutes, 1) + max(0, 12 - idx)
+            weighted[code] = weighted.get(code, 0) + weight
+        if not weighted:
+            return None
+        return max(weighted.items(), key=lambda item: item[1])[0]
+
+    def _resolve_position_from_transfermarkt(self, tm_id: int, extractor=None) -> Optional[str]:
+        from data.extractors.transfermarkt_extractor import TransfermarktExtractor
+
+        extractor = extractor or TransfermarktExtractor()
+        tm_pos = extractor.get_player_main_position(str(tm_id))
+        return self._normalize_position_text(tm_pos)
+
+    def _normalize_position_text(self, raw: Any) -> Optional[str]:
+        value = str(raw or "").strip()
+        if not value or value.lower() in {"unknown", "nan", "none", "0.0"}:
+            return None
+
+        if "," in value:
+            return None
+
+        upper = value.upper()
+        if upper in _KNOWN_POSITION_CODES:
+            mapped = {
+                "ED": "RW",
+                "EI": "LW",
+                "ID": "RM",
+                "II": "LM",
+                "MCO": "AMF",
+                "CMF": "CM",
+                "DMF": "DM",
+            }
+            return mapped.get(upper, upper)
+
+        key = value.lower()
+        if key in _TM_TEXT_TO_ABBR:
+            return _TM_TEXT_TO_ABBR[key]
+        for pattern, code in _TM_TEXT_TO_ABBR.items():
+            if pattern in key:
+                return code
+        return None

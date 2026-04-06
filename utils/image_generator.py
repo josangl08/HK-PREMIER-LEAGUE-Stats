@@ -241,7 +241,7 @@ class CompositionMotor:
             with open(path) as f:
                 return json.load(f)
         except Exception as e:
-            logger.warning(f"Could not load template config '{filename}': {e}")
+            logger.debug(f"Template config '{filename}' not found, using defaults: {e}")
             return {}
 
     def _dims(self, cfg: dict, size: str) -> tuple:

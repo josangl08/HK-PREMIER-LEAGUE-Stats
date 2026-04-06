@@ -74,46 +74,98 @@ class TimelineAggregator:
             
             deduped_history = list(unique_matches.values())
 
-            # 2. Add Next Fixture (pre-match)
+            # 2. Add Next Fixtures (pre-match, live, or pending)
             if current_team_id:
-                next_fix = self.fixture_manager.get_next_fixture(current_team_id)
-                if next_fix:
-                    home_team = session.get(Team, next_fix["home_team"])
-                    away_team = session.get(Team, next_fix["away_team"])
-                    home_name = home_team.name if home_team else next_fix["home_team"]
-                    away_name = away_team.name if away_team else next_fix["away_team"]
+                # Fetch up to 2 fixtures (current/recent one + the next future one)
+                next_fixes = self.fixture_manager.get_next_fixtures(current_team_id, limit=2)
+                for fix in next_fixes:
+                    # Check if this fixture is already in MatchHistory
+                    fix_date_str = fix["date_utc"].strftime("%Y-%m-%d")
+                    is_in_history = any(
+                        m.date.strftime("%Y-%m-%d") == fix_date_str 
+                        and (fix["home_team"] in m.opponent or fix["away_team"] in m.opponent)
+                        for m in deduped_history
+                    )
+                    
+                    if is_in_history:
+                        continue # Skip fixtures already confirmed in history
+
+                    home_team = session.get(Team, fix["home_team"])
+                    away_team = session.get(Team, fix["away_team"])
+                    home_name = home_team.name if home_team else fix["home_team"]
+                    away_name = away_team.name if away_team else fix["away_team"]
                     home_logo = home_team.logo_url if home_team else None
                     away_logo = away_team.logo_url if away_team else None
-                    opponent_name = away_name if next_fix["home_team"] == current_team_id else home_name
+                    opponent_name = away_name if fix["home_team"] == current_team_id else home_name
                     
+                    kickoff = fix["date_utc"].replace(tzinfo=timezone.utc)
+                    
+                    # Categorization logic
+                    m_type = "pre-match"
+                    status = "Scheduled"
+                    label = f"Next: vs {opponent_name}"
+                    icon = "calendar-plus"
+                    
+                    meta = fix.get("metadata") or {}
+                    
+                    # LIVE: Started < 115 minutes ago
+                    if kickoff <= now_utc <= kickoff + timedelta(minutes=115):
+                        status = "LIVE"
+                        label = f"LIVE: vs {opponent_name}"
+                        icon = "activity"
+                    # PENDING: Started > 115 minutes ago but not in history
+                    elif kickoff < now_utc:
+                        status = "Pending Update"
+                        label = f"Finished: vs {opponent_name}"
+                        icon = "clock"
+
                     timeline.append({
-                        "type": "pre-match",
-                        "label": f"Next: vs {opponent_name}",
-                        "icon": "calendar-plus",
-                        "date": next_fix["date_utc"].replace(tzinfo=timezone.utc),
-                        "group_year": get_season_from_date(next_fix["date_utc"]),
+                        "type": m_type,
+                        "label": label,
+                        "icon": icon,
+                        "date": kickoff,
+                        "group_year": get_season_from_date(fix["date_utc"]),
                         "payload": {
-                            **next_fix,
-                            "team": home_name if next_fix["home_team"] == current_team_id else away_name,
+                            **fix,
+                            "date_utc": fix["date_utc"].isoformat() if hasattr(fix["date_utc"], "isoformat") else fix["date_utc"],
+                            "kickoff_utc": fix["kickoff_utc"].isoformat() if hasattr(fix["kickoff_utc"], "isoformat") else fix["kickoff_utc"],
+                            "kickoff_hkt": fix["kickoff_hkt"].isoformat() if hasattr(fix["kickoff_hkt"], "isoformat") else fix["kickoff_hkt"],
+                            "team": home_name if fix["home_team"] == current_team_id else away_name,
                             "home_team": home_name,
                             "away_team": away_name,
                             "home_logo": home_logo,
                             "away_logo": away_logo,
                             "opponent": opponent_name,
-                            "streaming_url": next_fix.get("stream_url"),
-                            "streaming_platform": next_fix.get("stream_platform") or ("Youtube" if next_fix.get("stream_url") and "youtube" in next_fix.get("stream_url").lower() else None),
-                            "confirmation_status": "Scheduled",
+                            "streaming_url": fix.get("stream_url"),
+                            "streaming_platform": fix.get("stream_platform") or ("Youtube" if fix.get("stream_url") and "youtube" in fix.get("stream_url").lower() else None),
+                            "confirmation_status": status,
+                            "has_var": meta.get("has_var", False),
+                            "broadcast_type": meta.get("broadcast_type"),
+                            "ticket_prices": meta.get("ticket_prices"),
+                            "hkfa_status": meta.get("hkfa_status"),
+                            "is_tv": meta.get("is_tv", False)
                         }
                     })
 
             # 3. Add Career Milestones (career)
             matches_by_season = {}
+            
+            # Fetch fixtures once to enrich historical matches
+            fixtures_stmt = select(Fixture).where(
+                or_(Fixture.home_team_id == current_team_id, Fixture.away_team_id == current_team_id)
+            )
+            all_team_fixtures = session.execute(fixtures_stmt).scalars().all() if current_team_id else []
+
             for m in deduped_history:
                 sid = get_season_from_date(m.date)
                 if sid not in matches_by_season:
                     matches_by_season[sid] = []
                 
                 raw = m.raw_data or {}
+                # Attempt to find fixture metadata for enrichment
+                fixture = next((f for f in all_team_fixtures if abs((f.date_utc.replace(tzinfo=timezone.utc) - m.date.replace(tzinfo=timezone.utc)).total_seconds()) <= 43200), None)
+                meta = fixture.metadata_json if fixture else {}
+
                 matches_by_season[sid].append({
                     "date": m.date.replace(tzinfo=timezone.utc),
                     "opponent": m.opponent,
@@ -125,10 +177,12 @@ class TimelineAggregator:
                     "own_goals": raw.get("own_goals", 0),
                     "yellow_cards": m.yellow_cards,
                     "red_cards": m.red_cards,
-                    "position": m.position,
-                    "status": m.status,
-                    "subbed_in": raw.get("subbed_in"),
-                    "subbed_out": raw.get("subbed_out")
+                    "absence_reason": m.status if m.status != "Jugado" else None,
+                    "player_stats": raw,
+                    "has_var": meta.get("has_var", False),
+                    "broadcast_type": meta.get("broadcast_type"),
+                    "ticket_prices": meta.get("ticket_prices"),
+                    "is_tv": meta.get("is_tv", False)
                 })
 
             all_season_ids = {s.season_id for s in player.season_stats}
@@ -161,10 +215,10 @@ class TimelineAggregator:
                         "matches": season_matches,
                         "stats": (
                         {
-                            "matches_played": sum(1 for m in season_matches if (m['minutes_played'] or 0) > 0),
-                            "goals":          sum(m['goals'] or 0 for m in season_matches),
-                            "assists":        sum(m['assists'] or 0 for m in season_matches),
-                            "minutes_played": sum(m['minutes_played'] or 0 for m in season_matches),
+                            "matches_played": sum(1 for m in season_matches if int(m.get('minutes_played', 0) or 0) > 0),
+                            "goals":          sum(int(m.get('goals', 0) or 0) for m in season_matches),
+                            "assists":        sum(int(m.get('assists', 0) or 0) for m in season_matches),
+                            "minutes_played": sum(int(m.get('minutes_played', 0) or 0) for m in season_matches),
                         } if season_matches else {
                             # Fallback: solo HKPL cuando no hay historial de TM scrapeado
                             "matches_played": stat.matches_played if stat else 0,

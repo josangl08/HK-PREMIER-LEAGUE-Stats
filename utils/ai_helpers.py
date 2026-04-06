@@ -1,11 +1,14 @@
 # ABOUTME: Helper functions for AI/LLM operations and AI Insights visualizations.
 # ABOUTME: Provides chart builders (SHAP, UMAP, similarity, trend) and gcloud utilities.
+# ABOUTME: Implements trend injection logic for the elite design agency.
 
 # Standard Library
 import subprocess
 import logging
 import os
-from typing import List, Optional
+import json
+from pathlib import Path
+from typing import List, Optional, Dict
 
 # Safeguard for Numba threading layer on macOS (Silicon)
 if "NUMBA_THREADING_LAYER" not in os.environ:
@@ -535,3 +538,54 @@ def trend_chart(
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
     return apply_hkfa_theme(fig)
+
+
+# ── Design Trend Injection (RAG-lite) ────────────────────────────────────────
+
+def get_all_design_trends() -> List[Dict]:
+    """
+    Loads all design trends from assets/design_trends/*.json.
+    """
+    trends_dir = Path("assets/design_trends")
+    if not trends_dir.exists():
+        return []
+
+    trends = []
+    for f in sorted(trends_dir.glob("*.json")):
+        try:
+            with open(f, "r") as jf:
+                trends.append(json.load(jf))
+        except Exception as e:
+            logger.error(f"Error loading trend {f.name}: {e}")
+    return trends
+
+
+def get_trend_by_name(name: str) -> Optional[Dict]:
+    """Retrieves a specific design trend by its 'name' field."""
+    trends = get_all_design_trends()
+    for t in trends:
+        if t.get("name") == name:
+            return t
+    return None
+
+
+def format_trends_for_prompt(trends: List[Dict]) -> str:
+    """
+    Formats a list of design trends into a structured string for LLM injection.
+    """
+    if not trends:
+        return "No specific design trends available."
+
+    output = "## AVAILABLE DESIGN TRENDS & MOODBOARDS:\n"
+    for t in trends:
+        output += f"\n### Trend: {t.get('name')}\n"
+        output += f"- Description: {t.get('description')}\n"
+
+        vi = t.get("visual_identity", {})
+        output += f"- Typography: {vi.get('typography', {}).get('primary')} ({vi.get('typography', {}).get('style')})\n"
+        color_p = vi.get('color_palette', {})
+        output += f"- Colors: Base: {color_p.get('base')}, Accents: {', '.join(color_p.get('accents', []))}\n"
+        output += f"- Composition: {vi.get('elements', {}).get('composition')}\n"
+        output += f"- Nanobana Keywords: {t.get('nanobana_prompt_injection')}\n"
+
+    return output

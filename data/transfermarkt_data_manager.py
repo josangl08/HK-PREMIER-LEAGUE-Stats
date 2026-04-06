@@ -67,6 +67,35 @@ class TransfermarktDataManager:
             import traceback; traceback.print_exc()
             return False
 
+    def refresh_player_data(self, player_id: str) -> bool:
+        """Sincroniza el historial de un solo jugador para todas las temporadas disponibles."""
+        from models.db_models import Season
+        session = SessionFactory()
+        try:
+            player = session.get(Player, player_id)
+            if not player or not player.tm_id:
+                logger.warning(f"Jugador {player_id} no encontrado o sin tm_id.")
+                return False
+            
+            # Obtener temporadas de forma segura
+            seasons_stmt = select(Season.id)
+            seasons = session.execute(seasons_stmt).scalars().all()
+            
+            updated = False
+            for season_id in seasons:
+                try:
+                    logger.info(f"Scraping TM para {player.name} en {season_id}...")
+                    raw_matches = self.extractor.get_match_history(str(player.tm_id), season_id)
+                    if raw_matches:
+                        self._upsert_history_to_sql(player.id, raw_matches)
+                        updated = True
+                except Exception as e:
+                    logger.error(f"Error en refresh_player_data para {player.name} ({season_id}): {e}")
+            
+            return updated
+        finally:
+            session.close()
+
     def _perform_full_etl(self):
         """Ejecuta el ciclo de extracción, procesamiento y carga en DB."""
         # Obtener todos los jugadores representados o vinculados para sincronizar su historial

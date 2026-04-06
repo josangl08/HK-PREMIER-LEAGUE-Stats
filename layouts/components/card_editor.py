@@ -107,7 +107,7 @@ def _editor_toolbar(show_repropose=True):
     if show_repropose:
         buttons.append(
             dbc.Button(
-                [html.I(className="bi bi-arrow-clockwise me-1"), "Retry"],
+                [html.I(className="bi bi-arrow-clockwise me-1"), "Redesign"],
                 id="card-repropose-btn",
                 style={**_SECONDARY_BTN_STYLE, "fontSize": "0.65rem", "width": "100%"},
                 n_clicks=0,
@@ -115,7 +115,7 @@ def _editor_toolbar(show_repropose=True):
         )
     buttons.append(
         dbc.Button(
-            [html.I(className="bi bi-floppy me-1"), "Save"],
+            [html.I(className="bi bi-floppy me-1"), "Save Style"],
             id="card-save-draft-btn",
             style={**_SECONDARY_BTN_STYLE, "fontSize": "0.65rem", "width": "100%"},
             n_clicks=0,
@@ -123,7 +123,7 @@ def _editor_toolbar(show_repropose=True):
     )
     buttons.append(
         dbc.Button(
-            [html.I(className="bi bi-download me-1"), "PNG"],
+            [html.I(className="bi bi-download me-1"), "Export"],
             id="card-generate-btn",
             color="success",
             style={**_GENERATE_BTN_STYLE, "padding": "4px 12px", "fontSize": "0.65rem", "width": "100%"},
@@ -134,23 +134,26 @@ def _editor_toolbar(show_repropose=True):
 
 
 def _template_format_row():
-    """Optimized row: Templates on left, Format on right with proper justification."""
+    """Optimized row: AI Proposals and Format switching. Base Style is hidden as it's set by the AI Proposal."""
     return html.Div([
         dbc.Row([
             dbc.Col([
-                html.P("TEMPLATE", style={**_SECTION_LABEL_STYLE, "marginBottom": "5px"}),
-                dbc.Tabs(
-                    [
-                        dbc.Tab(label="A", tab_id="A", label_style=_TAB_STYLE, active_label_style=_TAB_ACTIVE_STYLE),
-                        dbc.Tab(label="B", tab_id="B", label_style=_TAB_STYLE, active_label_style=_TAB_ACTIVE_STYLE),
-                        dbc.Tab(label="C", tab_id="C", label_style=_TAB_STYLE, active_label_style=_TAB_ACTIVE_STYLE),
-                    ],
-                    id="card-template-tabs",
-                    active_tab="A",
-                ),
-            ], width=6),
+                html.P("AI PROPOSALS", style={**_SECTION_LABEL_STYLE, "marginBottom": "5px"}),
+                dbc.ButtonGroup([
+                    dbc.Button("OPTION 1", id={"type": "card-concept-btn", "index": 0}, size="sm", style=_SECONDARY_BTN_STYLE),
+                    dbc.Button("OPTION 2", id={"type": "card-concept-btn", "index": 1}, size="sm", style=_SECONDARY_BTN_STYLE),
+                    dbc.Button("OPTION 3", id={"type": "card-concept-btn", "index": 2}, size="sm", style=_SECONDARY_BTN_STYLE),
+                ], className="w-100"),
+            ], width=12, className="mb-3"),
+        ]),
+        dbc.Row([
+            # Base Style tabs are now hidden but kept in the DOM for internal state tracking if needed
+            html.Div([
+                dbc.Tabs(id="card-template-tabs", active_tab="A"),
+            ], style={"display": "none"}),
+            
             dbc.Col([
-                html.P("FORMAT", style={**_SECTION_LABEL_STYLE, "marginBottom": "5px", "textAlign": "right"}),
+                html.P("FORMAT", style={**_SECTION_LABEL_STYLE, "marginBottom": "5px", "textAlign": "left"}),
                 html.Div([
                     dbc.Tabs(
                         [
@@ -160,22 +163,22 @@ def _template_format_row():
                         ],
                         id="card-format-tabs",
                         active_tab="1:1",
-                        className="justify-content-end",
+                        className="justify-content-start",
                     ),
                 ]),
-            ], width=6),
+            ], width=12),
         ], className="align-items-end mb-3")
     ])
 
 
 def _template_library_section():
-    """Section for reusable saved designs."""
+    """Section for visual reusable designs."""
     return html.Div([
-        html.P("TEMPLATES LIBRARY", style=_SECTION_LABEL_STYLE),
+        html.P("MY SAVED STYLES", style=_SECTION_LABEL_STYLE),
         html.Div(
             id="card-templates-library",
             className="d-flex gap-2 overflow-auto pb-2",
-            style={"minHeight": "40px"}
+            style={"minHeight": "100px"}
         ),
     ], className="mb-3")
 
@@ -230,14 +233,14 @@ def _advanced_element_editor():
         dbc.DropdownMenu(
             label=[
                 html.I(className="bi bi-layers me-2"),
-                html.Span("Select & Toggle Layers", id="card-element-current-label")
+                html.Span("Select Layer", id="card-element-current-label")
             ],
             children=dropdown_items,
             id="card-element-dropdown",
             color="dark",
             menu_variant="dark",
             className="mb-3 w-100",
-            style={"width": "100%"}, # Ensure the wrapper is full width
+            style={"width": "100%"}, 
             toggle_style={
                 "background": "rgba(255,255,255,0.06)",
                 "border": f"1px solid {_GLASS_BORDER}",
@@ -248,7 +251,7 @@ def _advanced_element_editor():
                 "fontSize": "0.82rem",
                 "borderRadius": "8px",
                 "padding": "10px 15px",
-                "width": "100%" # Force toggle to be full width
+                "width": "100%" 
             },
             toggleClassName="w-100 custom-dropdown-toggle",
         ),
@@ -309,7 +312,7 @@ def _advanced_element_editor():
 def _photo_album_section(album=None):
     from callbacks.card_editor_callbacks import _build_album_grid
     return html.Div([
-        html.P("ASSET LIBRARY", style=_SECTION_LABEL_STYLE),
+        html.P("MY ASSETS (PHOTOS)", style=_SECTION_LABEL_STYLE),
         html.Div(
             _build_album_grid(album) if album else "No assets.",
             id="card-photo-album",
@@ -320,7 +323,7 @@ def _photo_album_section(album=None):
             id="card-photo-upload",
             children=html.Div([
                 html.I(className="bi bi-cloud-arrow-up me-2"),
-                "Upload Photo",
+                "Upload Cutout",
             ]),
             style=_UPLOAD_STYLE,
             multiple=False,
@@ -329,39 +332,84 @@ def _photo_album_section(album=None):
     ])
 
 
-def _ai_insights_container(insights=None):
-    """Dedicated stylized container for AI Match Insights (Scouting AI style)."""
-    # Placeholder if none provided yet
-    if not insights:
+def _ai_insights_container(report_data=None):
+    """Dedicated stylized container for Agency Match Intelligence (Report, Caption, Hashtags)."""
+    if not report_data or not isinstance(report_data, dict):
         return dbc.Card([
             dbc.CardHeader([
-                html.I(className="bi bi-robot me-2", style={"color": _ACCENT_CYAN}),
-                html.Span("SCOUTING AI", className="fw-bold", style={"fontSize": "0.7rem", "letterSpacing": "1px"}),
+                html.I(className="bi bi-shield-shaded me-2", style={"color": _ACCENT_CYAN}),
+                html.Span("AGENCY MATCH INTELLIGENCE", className="fw-bold", style={"fontSize": "0.7rem", "letterSpacing": "1px"}),
             ], className="border-0 bg-transparent py-2"),
             dbc.CardBody([
-                html.P("Analyzing match context...", className="text-white-50 small mb-0")
+                html.P("Waiting for Agency Analyst...", className="text-white-50 small mb-0")
             ]),
         ], className="border-0 shadow-lg", style={"background": "rgba(0,242,255,0.03)", "borderLeft": f"3px solid {_ACCENT_CYAN}"})
         
+    report = report_data.get("report", "No report available.")
+    caption = report_data.get("instagram_caption", "No caption generated.")
+    hashtags = report_data.get("hashtags", [])
+
     return dbc.Card([
         dbc.CardHeader([
-            html.I(className="bi bi-robot me-2", style={"color": _ACCENT_CYAN}),
-            html.Span("SCOUTING AI", className="fw-bold", style={"fontSize": "0.7rem", "letterSpacing": "1px"}),
-        ], className="border-0 bg-transparent py-2"),
+            html.I(className="bi bi-shield-shaded me-2", style={"color": _ACCENT_CYAN}),
+            html.Span("AGENCY MATCH INTELLIGENCE", className="fw-bold", style={"fontSize": "0.7rem", "letterSpacing": "1px"}),
+        ], className="border-0 bg-transparent py-2 d-flex align-items-center"),
+        
         dbc.CardBody([
-            html.Ul([
-                html.Li(ins, className="mb-2 text-white-50", style={"fontSize": "0.75rem"}) 
-                for ins in insights
-            ], className="ps-3 mb-0")
+            # 1. Technical Report
+            html.Div([
+                html.P("TECHNICAL REPORT", style={**_SECTION_LABEL_STYLE, "fontSize": "0.6rem", "marginBottom": "5px"}),
+                html.P(report, className="text-white-50 mb-3", style={"fontSize": "0.75rem", "lineHeight": "1.4"}),
+            ]),
+            
+            html.Div(style=_DIVIDER_STYLE),
+
+            # 2. Instagram Copy
+            html.Div([
+                html.Div([
+                    html.P("INSTAGRAM CAPTION", style={**_SECTION_LABEL_STYLE, "fontSize": "0.6rem", "marginBottom": "0"}),
+                    dbc.Button(
+                        [html.I(className="bi bi-clipboard me-1"), "Copy"], 
+                        id="copy-caption-btn", 
+                        size="sm", 
+                        color="link", 
+                        className="p-0 text-info text-decoration-none",
+                        style={"fontSize": "0.65rem"}
+                    ),
+                ], className="d-flex justify-content-between align-items-center mb-2"),
+                
+                html.Div(caption, className="p-2 mb-2", style={
+                    "background": "rgba(0,0,0,0.2)", 
+                    "borderRadius": "6px", 
+                    "fontSize": "0.7rem",
+                    "color": _TEXT_LIGHT,
+                    "whiteSpace": "pre-wrap"
+                }),
+            ]),
+
+            # 3. Hashtags
+            html.Div([
+                html.Div([
+                    html.Span(tag, className="badge me-1 mb-1", style={
+                        "background": "rgba(255,255,255,0.05)",
+                        "color": _ACCENT_CYAN,
+                        "fontWeight": "400",
+                        "fontSize": "0.6rem",
+                        "border": f"1px solid {_ACCENT_CYAN_BORDER}"
+                    }) for tag in hashtags
+                ], className="d-flex flex-wrap")
+            ], className="mt-2"),
         ]),
+        dcc.Clipboard(target_id="instagram-caption-text", id="instagram-caption-clipboard"),
+        html.Div(caption, id="instagram-caption-text", style={"display": "none"})
     ], className="border-0 shadow-lg", style={"background": "rgba(0,242,255,0.03)", "borderLeft": f"3px solid {_ACCENT_CYAN}"})
 
 
 def _save_toast():
     return dbc.Toast(
-        "Template saved to your library.",
+        "Design saved to your personal library.",
         id="card-save-toast",
-        header="Design Archived",
+        header="Style Archived",
         icon="success",
         duration=3000,
         is_open=False,
@@ -383,15 +431,18 @@ def create_pre_game_card_studio(milestone_id, match_context, proposals, initial_
             dbc.Col([
                 html.Div([
                     html.Div([
-                        html.I(className="bi bi-palette2 me-2", style={"color": _ACCENT_CYAN}),
-                        html.Span("Design Studio", style={"color": "white", "fontWeight": "700", "fontSize": "0.9rem"}),
+                        html.I(className="bi bi-calendar3 me-2", style={"color": _ACCENT_CYAN}),
+                        html.Span("Matchday Studio", style={"color": "white", "fontWeight": "700", "fontSize": "0.9rem"}),
                     ]),
-                ], className="mb-3"),
+                    # Live Agency Feed
+                    html.Div(id="card-generation-status", className="ms-auto small text-muted font-monospace", style={"fontSize": "0.65rem"}),
+                    ], className="mb-3 d-flex align-items-center"),
+
 
                 html.Div(
                     initial_preview or html.Div([
                         dbc.Spinner(color="info"),
-                        html.P("We are designing your card...", className="mt-3 small text-white-50")
+                        html.P("Designing elite proposals...", className="mt-3 small text-white-50")
                     ], className="d-flex flex-column align-items-center justify-content-center", style={"height": "450px"}),
                     id={"type": "studio-element", "index": "preview-container"},
                     style={
@@ -438,15 +489,18 @@ def create_performance_card_studio(milestone_id, match_context, proposals, initi
             dbc.Col([
                 html.Div([
                     html.Div([
-                        html.I(className="bi bi-trophy me-2", style={"color": _ACCENT_CYAN}),
-                        html.Span("Performance Studio", style={"color": "white", "fontWeight": "700", "fontSize": "0.9rem"}),
+                        html.I(className="bi bi-calendar3 me-2", style={"color": _ACCENT_CYAN}),
+                        html.Span("Matchday Studio", style={"color": "white", "fontWeight": "700", "fontSize": "0.9rem"}),
                     ]),
-                ], className="mb-3"),
+                    # Live Agency Feed
+                    html.Div(id="card-generation-status", className="ms-auto small text-muted font-monospace", style={"fontSize": "0.65rem"}),
+                    ], className="mb-3 d-flex align-items-center"),
+
 
                 html.Div(
                     initial_preview or html.Div([
                         dbc.Spinner(color="info"),
-                        html.P("We are designing your card...", className="mt-3 small text-white-50")
+                        html.P("Analyzing stats and designing...", className="mt-3 small text-white-50")
                     ], className="d-flex flex-column align-items-center justify-content-center", style={"height": "450px"}),
                     id={"type": "studio-element", "index": "preview-container"},
                     style={
@@ -472,12 +526,12 @@ def create_performance_card_studio(milestone_id, match_context, proposals, initi
                     html.Div(style=_DIVIDER_STYLE),
 
                     # AI Caption
-                    html.P("AI CAPTION", style=_SECTION_LABEL_STYLE),
+                    html.P("AI COPYWRITING", style=_SECTION_LABEL_STYLE),
                     dbc.InputGroup([
                         dbc.Select(id="card-caption-tone", options=[
-                            {"label": "Pro", "value": "pro"},
-                            {"label": "Hype", "value": "hype"},
-                        ], value="pro", style={**_SELECT_STYLE, "maxWidth": "80px"}),
+                            {"label": "Professional", "value": "pro"},
+                            {"label": "Hype / Fan", "value": "hype"},
+                        ], value="pro", style={**_SELECT_STYLE, "maxWidth": "120px"}),
                         dbc.Button(html.I(className="bi bi-magic"), id="card-caption-btn", style=_SECONDARY_BTN_STYLE),
                     ]),
                     dbc.Textarea(id="card-caption-preview", className="mt-2", rows=2, style={**_SELECT_STYLE, "fontSize": "0.7rem"}),

@@ -20,11 +20,16 @@ from sqlalchemy import select
 # Internal
 from models.db_models import Player, UserPlayerLink, MatchHistory
 from utils.db_engine import SessionFactory
+from utils.card_design_agent import DesignBrief # Added import
 
 logger = logging.getLogger(__name__)
 
 _CARD_DATA_ROOT = Path("data/player_cards")
 _ALLOWED_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
+
+# Style Constants for Library UI
+_GLASS_BORDER = "rgba(255,255,255,0.10)"
+_TEXT_MUTED = "rgba(255,255,255,0.45)"
 
 
 # ---------------------------------------------------------------------------
@@ -99,7 +104,14 @@ def _get_player_history(player_id: str) -> list:
                 "date": m.date.strftime("%Y-%m-%d"),
                 "opponent": m.opponent,
                 "type": "post-match",
-                "payload": m.performance_stats or {}
+                "payload": {
+                    "minutes_played": m.minutes_played,
+                    "goals": m.goals,
+                    "assists": m.assists,
+                    "yellow_cards": m.yellow_cards,
+                    "red_cards": m.red_cards,
+                    **(m.raw_data or {})
+                }
             } for m in matches
         ]
     finally:
@@ -175,10 +187,18 @@ def _build_preview_layout(editor_state: dict, photos_store: dict, milestones_dat
 
     proposal = editor_state.get("ai_proposal") or {}
     design = proposal.get("design") or {}
-    narrative = proposal.get("narrative") or {}
+    
+    # Robust narrative extraction
+    raw_narrative = proposal.get("narrative") or {}
+    narrative = raw_narrative if isinstance(raw_narrative, dict) else {}
+    
     fmt = editor_state.get("format", "1:1")
     tmpl = editor_state.get("template", "A") 
     layers = design.get("layers") or {}
+    
+    # NEW: Agency Depth Controls
+    headline_depth = editor_state.get("headline_depth") or proposal.get("headline_depth", "behind")
+    glow_color = layers.get("glow_color", "var(--accent-cyan)")
     
     milestone_id = editor_state.get("milestone_id")
     match_payload = _get_match_payload(milestone_id, milestones_data) if milestones_data else {}
@@ -186,31 +206,19 @@ def _build_preview_layout(editor_state: dict, photos_store: dict, milestones_dat
     # Background Logic
     bg_style = {}
     nanobana_bg = editor_state.get("nanobana_background_path")
-    
-    if tmpl == "C":
-        # Brutalist: Stark black background, simple border
-        bg_style = {"background": "#050505", "border": "2px solid rgba(255,255,255,0.1)"}
-    elif tmpl == "B":
-        # High Contrast / Industrial: Gradient with noise
-        c1 = layers.get("gradient", {}).get("color1", "#1a1a2e")
-        bg_style = {"background": f"linear-gradient(180deg, {c1}, #000)"}
-    elif nanobana_bg and Path(nanobana_bg).exists():
+    if nanobana_bg and Path(nanobana_bg).exists():
         with open(nanobana_bg, "rb") as f:
             src = "data:image/png;base64," + base64.b64encode(f.read()).decode()
             bg_style = {"backgroundImage": f"url({src})", "backgroundSize": "cover", "backgroundPosition": "center"}
     else:
-        c1 = layers.get("gradient", {}).get("color1", "#1a1a2e")
-        c2 = layers.get("gradient", {}).get("color2", "#000000")
-        bg_style = {"background": f"linear-gradient(135deg, {c1}, {c2})"}
+        c1 = layers.get("base_color", ["#1a1a2e"])[0] if isinstance(layers.get("base_color"), list) else "#1a1a2e"
+        bg_style = {"background": f"linear-gradient(135deg, {c1}, #000)"}
 
     aspect_style = {"1:1": "100%", "9:16": "177.77%", "16:9": "56.25%"}.get(fmt, "100%")
-    modifiers = editor_state.get("layout_modifiers") or {}
+    modifiers = editor_state.get("layout_modifiers") or proposal.get("layout_modifiers", {})
     
-    def get_style(key, default_x=50, default_y=50, default_scale=100):
+    def get_style(key, default_x=50, default_y=50, default_scale=100, zIndex="10"):
         m = modifiers.get(key, {})
-        if not m and proposal.get("layout_modifiers"):
-            m = proposal["layout_modifiers"].get(key, {})
-            
         if not m.get("visible", True): return {"display": "none"}
         
         x = m.get("x", default_x)
@@ -222,21 +230,12 @@ def _build_preview_layout(editor_state: dict, photos_store: dict, milestones_dat
             "left": f"{x}%",
             "top": f"{y}%",
             "transform": f"translate(-50%, -50%) scale({scale})",
-            "zIndex": "10", # Elements in front
-            "transition": "all 0.2s ease-out"
+            "zIndex": zIndex, 
+            "transition": "all 0.3s cubic-bezier(0.23, 1, 0.32, 1)"
         }
-        
-        if tmpl == "C":
-            # Brutalist effects
-            style["mixBlendMode"] = "difference"
-            style["filter"] = "contrast(1.5) brightness(1.2)"
-        elif tmpl == "B":
-            # Industrial effects
-            style["filter"] = "drop-shadow(0 0 10px rgba(0,242,255,0.3))"
-            
         return style
 
-    # Selected photo
+    # Photo logic
     photo_src = None
     selected_idx = editor_state.get("selected_photo_idx")
     if selected_idx is not None:
@@ -249,79 +248,67 @@ def _build_preview_layout(editor_state: dict, photos_store: dict, milestones_dat
                         photo_src = "data:image/png;base64," + base64.b64encode(f.read()).decode()
                 break
 
-    # Match Assets
-    home_logo = match_payload.get("home_logo")
-    away_logo = match_payload.get("away_logo")
-    comp_logo = match_payload.get("competition_logo")
-    stream_logo = match_payload.get("streaming_logo")
-    stadium = match_payload.get("stadium", "")
-    kickoff = match_payload.get("kickoff_display", "")
-    player_name_display = str(_get_player_display_name()).upper()
-    subtitle = str(narrative.get("supporting_story") or "MATCHDAY READY").upper()
-
-    def img_el(src, key, def_x, def_y, def_sc, width="140px"):
-        if not src: return None
-        return html.Img(src=src, style={**get_style(key, def_x, def_y, def_sc), "width": width, "objectFit": "contain"})
-
-    # Typography & Elements logic based on template
     headline_text = str(narrative.get("headline", "MATCHDAY")).upper()
-    
+    player_name_display = str(_get_player_display_name()).upper()
+
+    def img_el(src, key, def_x, def_y, def_sc, width="140px", zIndex="10"):
+        if not src: return None
+        return html.Img(src=src, style={**get_style(key, def_x, def_y, def_sc, zIndex=zIndex), "width": width, "objectFit": "contain"})
+
+    # BUILD THE SANDWICH (Match CSS to Pillow Layers)
     inner_children = [
-        # Base Texture
-        html.Div(style={"position": "absolute", "inset": "0", "opacity": "0.1" if tmpl=="C" else "0.2", 
+        # 1. Background Grain
+        html.Div(style={"position": "absolute", "inset": "0", "opacity": "0.1", 
                         "backgroundImage": "url('https://www.transparenttextures.com/patterns/asfalt-dark.png')",
-                        "zIndex": "1"}), # Background at zIndex 1
+                        "zIndex": "1"}),
         
-        # Headline
+        # 2. BG Typography (Behind Player)
         html.Div(headline_text, 
-                 style={**get_style("headline", 50, 20, 100), 
-                        "color": "white", 
-                        "fontWeight": "900", 
-                        "fontSize": "3.5rem" if tmpl=="A" else "5rem" if tmpl=="B" else "7rem",
-                        "width": "100%", "textAlign": "center", 
-                        "textShadow": "4px 4px 0px rgba(0,0,0,0.8)" if tmpl=="A" else "none",
-                        "fontStyle": "italic" if tmpl=="B" else "normal",
-                        "letterSpacing": "-4px" if tmpl=="C" else "normal"}),
-        
-        # Subtitle
-        html.Div(subtitle, 
-                 style={**get_style("subtitle", 50, 30, 100), 
-                        "color": "var(--accent-cyan)", "fontWeight": "700", "fontSize": "1.2rem", 
-                        "letterSpacing": "3px", "width": "100%", "textAlign": "center"}),
+                 style={**get_style("headline", 50, 35, 200, zIndex="5"), 
+                        "display": "none" if headline_depth == "front" else "block",
+                        "color": "white", "fontWeight": "900", "fontSize": "6rem",
+                        "opacity": "0.3" if headline_depth == "sandwich" else "0.8",
+                        "textAlign": "center", "width": "100%", "fontFamily": "Impact, sans-serif"}),
+
+        # 3. Player Shadow Pass
+        html.Div(style={**get_style("player_photo", 50, 95, 100, zIndex="7"), 
+                        "width": "40%", "height": "10%", "background": "radial-gradient(ellipse, rgba(0,0,0,0.6) 0%, transparent 70%)",
+                        "filter": "blur(15px)", "transform": "translate(-50%, 0) scale(1.5)"}) if photo_src else None,
+
+        # 4. The Player Hero
+        html.Img(src=photo_src, 
+                 style={**get_style("player_photo", 50, 95, 100, zIndex="10"), 
+                        "maxHeight": "95%", "maxWidth": "none", 
+                        "filter": f"drop-shadow(0 0 20px {glow_color}44)"}) if photo_src else None,
+
+        # 5. FG Typography (Front Pass - Sandwich Effect)
+        html.Div(headline_text, 
+                 style={**get_style("headline", 50, 35, 200, zIndex="15"), 
+                        "display": "block" if headline_depth in ["front", "sandwich"] else "none",
+                        "color": "transparent" if headline_depth == "sandwich" else "white",
+                        "WebkitTextStroke": f"2px white" if headline_depth == "sandwich" else "none",
+                        "fontWeight": "900", "fontSize": "6rem", "textAlign": "center", "width": "100%", "fontFamily": "Impact, sans-serif"}),
+
+        # 6. Atmospheric Glue (Front Smoke)
+        html.Div(style={"position": "absolute", "bottom": "0", "left": "0", "right": "0", "height": "30%",
+                        "background": "linear-gradient(to top, rgba(0,0,0,0.8), transparent)", "zIndex": "20", "filter": "blur(20px)"}),
+
+        # 7. UI Elements (Logos & Name Plate)
+        html.Div(player_name_display, 
+                 style={**get_style("player_name", 50, 85, 100, zIndex="30"), 
+                        "color": "white", "fontWeight": "800", "fontSize": "1.5rem", 
+                        "background": "black", "padding": "5px 25px", "borderRadius": "4px", 
+                        "borderLeft": f"5px solid {glow_color}"}),
 
         # Logos
-        img_el(home_logo, "home_logo", 15, 12, 100, width="140px"),
-        img_el(away_logo, "away_logo", 85, 12, 100, width="140px"),
-        
-        # Comp & Stream Logos
-        img_el(comp_logo, "comp_badge", 88, 88, 80, width="80px"),
-        img_el(stream_logo, "stream_logo", 12, 88, 80, width="80px"),
-
-        # Player Name (Plate style)
-        html.Div(player_name_display, 
-                 style={**get_style("player_name", 50, 85, 100), 
-                        "color": "white", "fontWeight": "800", "fontSize": "1.5rem", 
-                        "background": "rgba(0,0,0,0.7)" if tmpl!="C" else "white", 
-                        "color": "white" if tmpl!="C" else "black",
-                        "padding": "4px 20px", "borderRadius": "4px", 
-                        "borderLeft": "4px solid var(--accent-cyan)"}),
-
-        # Match Info
-        html.Div(f"{stadium} • {kickoff}".upper(), 
-                 style={**get_style("match_info", 50, 95, 100), 
-                        "color": "rgba(255,255,255,0.6)", "fontSize": "0.8rem", 
-                        "fontWeight": "600", "width": "100%", "textAlign": "center"}),
-        
-        # Player (Main)
-        html.Img(src=photo_src, 
-                 style={**get_style("player_photo", 50, 95, 100), 
-                        "maxHeight": "95%", "maxWidth": "none", 
-                        "filter": "drop-shadow(0 20px 40px rgba(0,0,0,0.8))" if tmpl!="C" else "grayscale(1) contrast(1.2)"}) if photo_src else None
+        img_el(match_payload.get("home_logo"), "home_logo", 15, 15, 100, width="120px", zIndex="30"),
+        img_el(match_payload.get("away_logo"), "away_logo", 85, 15, 100, width="120px", zIndex="30"),
+        img_el(match_payload.get("competition_logo"), "comp_badge", 88, 88, 80, width="80px", zIndex="30"),
     ]
 
     return html.Div(
         html.Div(inner_children, style={"position": "absolute", "inset": "0", **bg_style, "overflow": "hidden"}),
-        style={"position": "relative", "width": "100%", "paddingTop": aspect_style, "borderRadius": "12px", "overflow": "hidden"}
+        style={"position": "relative", "width": "100%", "paddingTop": aspect_style, "borderRadius": "16px", "overflow": "hidden", "boxShadow": "0 30px 60px rgba(0,0,0,0.5)"}
     )
 
 
@@ -367,18 +354,34 @@ def register_card_editor_callbacks(app):
         Input({"type": "card-photo-thumb", "index": ALL}, "n_clicks"),
         Input({"type": "card-element-toggle", "index": ALL}, "value"),
         Input({"type": "card-user-template", "index": ALL}, "n_clicks"),
+        Input({"type": "card-concept-btn", "index": ALL}, "n_clicks"),
         State("card-element-selector", "data"),
         State("card-editor-state", "data"),
         prevent_initial_call=True,
     )
     def update_card_editor_state(active_tab, format_tab, x_val, y_val, scale_val, 
                                  preset_val, photo_clicks, toggle_values, 
-                                 template_clicks, selected_element, current_state):
+                                 template_clicks, concept_clicks, selected_element, current_state):
         state = dict(current_state or {})
         triggered_id = ctx.triggered_id
 
         if active_tab: state["template"] = active_tab
         if format_tab: state["format"] = format_tab
+
+        # Handle Concept Switching
+        if isinstance(triggered_id, dict) and triggered_id.get("type") == "card-concept-btn":
+            idx = triggered_id.get("index")
+            proposals = state.get("ai_proposals", [])
+            if idx < len(proposals):
+                state["ai_proposal_idx"] = idx
+                state["ai_proposal"] = proposals[idx]
+                # Reset layout modifiers to the proposal's defaults
+                state["layout_modifiers"] = proposals[idx].get("layout_modifiers", {})
+                state["template"] = proposals[idx].get("design", {}).get("template", "A")
+                
+                # Regenerate background if needed (optional optimization: cache backgrounds)
+                state["needs_background_refresh"] = True 
+            return state
 
         # Handle Photo Selection
         if isinstance(triggered_id, dict) and triggered_id.get("type") == "card-photo-thumb":
@@ -455,26 +458,56 @@ def register_card_editor_callbacks(app):
         return mods.get("x", 50), mods.get("y", 50), mods.get("scale", 100)
 
     # ------------------------------------------------------------------ #
-    # Save Template to Library                                           #
+    # Save Template to Library with Thumbnail                            #
     # ------------------------------------------------------------------ #
     @app.callback(
         Output("card-save-toast", "is_open"),
         Output("card-templates-library", "children"),
         Input("card-save-draft-btn", "n_clicks"),
         State("card-editor-state", "data"),
+        State("player-photos-store", "data"),
+        State("milestones-data-store", "data"),
         prevent_initial_call=True,
     )
-    def save_template_to_library(n_clicks, state):
+    def save_template_to_library(n_clicks, state, photos_store, milestones_data):
         if not n_clicks or not state: return no_update, no_update
         
         player_id = _get_player_id()
-        # Save as template with unique timestamp
+        milestone_id = state.get("milestone_id", "unknown")
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        tmpl_id = f"template_{ts}"
         tmpl_dir = _CARD_DATA_ROOT / player_id / "templates"
         tmpl_dir.mkdir(parents=True, exist_ok=True)
         
-        with open(tmpl_dir / f"template_{ts}.json", "w", encoding="utf-8") as f:
+        # 1. Save JSON
+        with open(tmpl_dir / f"{tmpl_id}.json", "w", encoding="utf-8") as f:
             json.dump(state, f, indent=4)
+            
+        # 2. Generate Thumbnail (Pillow)
+        try:
+            from utils.card_renderer import compose_card
+            photo_path = None
+            sel_idx = state.get("selected_photo_idx")
+            if sel_idx is not None:
+                album = (photos_store or {}).get("album") or []
+                for entry in album:
+                    if entry.get("idx") == sel_idx:
+                        photo_path = entry.get("bg_removed") or entry.get("original")
+                        break
+            
+            # Render a smaller version for the library
+            compose_card(
+                design_brief=state.get("ai_proposal", {}),
+                player_photo_path=photo_path,
+                output_dir=str(tmpl_dir),
+                format=state.get("format", "1:1"),
+                background_image_path=state.get("nanobana_background_path"),
+                match_payload=_get_match_payload(milestone_id, milestones_data),
+                player_name=str(_get_player_display_name()),
+                output_filename=f"{tmpl_id}.png" # Name it same as JSON
+            )
+        except Exception as e:
+            logger.error(f"Thumbnail generation failed: {e}")
             
         return True, _build_template_library_ui(player_id)
 
@@ -485,6 +518,7 @@ def register_card_editor_callbacks(app):
         Output({"type": "studio-element", "index": ALL}, "children"),
         Output("stage-decision-nodes", "children", allow_duplicate=True),
         Output("card-templates-library", "children", allow_duplicate=True),
+        Output("card-generation-status", "children"),
         Input("card-editor-state", "data"),
         State("player-photos-store", "data"),
         State("milestones-data-store", "data"),
@@ -492,35 +526,49 @@ def register_card_editor_callbacks(app):
     )
     def render_editor_updates(editor_state, photos_store, milestones_data):
         state = editor_state or {}
-        # Guard: raise PreventUpdate when the card editor panel is not mounted.
-        # card-templates-library only exists in the DOM while the studio is open.
-        # Using PreventUpdate (not no_update) so the JS renderer never validates
-        # the outputs — avoids "nonexistent object" errors from session store reloads.
         if not state.get("editor_active"):
             raise PreventUpdate
+            
         num_targets = len(ctx.outputs_list[0]) if ctx.outputs_list and len(ctx.outputs_list) > 0 else 0
         player_id = _get_player_id()
+        agency_status = state.get("agency_status", "")
         
         # 1. Templates UI
         library_ui = _build_template_library_ui(player_id)
         
         # 2. Preview UI
+        from layouts.components.card_editor import _ai_insights_container
+        
         if not state.get("ai_proposal") and state.get("needs_ai"):
             loading_view = html.Div([
                 dbc.Spinner(color="info", size="lg"),
-                html.P("We are designing your card...", className="mt-3 small text-white-50")
+                html.P(agency_status or "We are designing your card...", className="mt-3 small text-white-50")
             ], className="d-flex flex-column align-items-center justify-content-center", style={"height": "400px"})
-            from layouts.components.card_editor import _ai_insights_container
-            return [loading_view] * num_targets, _ai_insights_container(None), library_ui
+            return [loading_view] * num_targets, _ai_insights_container(None), library_ui, agency_status
 
         preview = _build_preview_layout(state, photos_store or {}, milestones_data)
         proposal = state.get("ai_proposal") or {}
-        insights = (proposal.get("narrative") or {}).get("match_insights") or []
-        from layouts.components.card_editor import _ai_insights_container
-        return [preview] * num_targets, _ai_insights_container(insights), library_ui
+        
+        # Pass the full narrative (report, caption, hashtags) to the intelligence container
+        narrative = proposal.get("narrative") or {}
+        
+        return [preview] * num_targets, _ai_insights_container(narrative), library_ui, agency_status
 
     # ------------------------------------------------------------------ #
-    # Async AI Generation                                                #
+    # Copy Instagram Caption to Clipboard                                #
+    # ------------------------------------------------------------------ #
+    @app.callback(
+        Output("instagram-caption-clipboard", "content"),
+        Input("copy-caption-btn", "n_clicks"),
+        State("instagram-caption-text", "children"),
+        prevent_initial_call=True,
+    )
+    def copy_instagram_caption(n_clicks, caption):
+        if not n_clicks: return no_update
+        return caption
+
+    # ------------------------------------------------------------------ #
+    # Async AI Generation & Background Refresh                           #
     # ------------------------------------------------------------------ #
     @app.callback(
         Output("card-editor-state", "data", allow_duplicate=True),
@@ -529,7 +577,12 @@ def register_card_editor_callbacks(app):
         prevent_initial_call=True,
     )
     def trigger_background_ai(state, milestones_data):
-        if not state or not state.get("needs_ai"): return no_update
+        if not state: return no_update
+        
+        needs_full_ai = state.get("needs_ai")
+        needs_bg_only = state.get("needs_background_refresh")
+        
+        if not needs_full_ai and not needs_bg_only: return no_update
 
         milestone_id = state.get("milestone_id")
         card_type = state.get("card_type", "pre-match")
@@ -537,39 +590,70 @@ def register_card_editor_callbacks(app):
         
         new_state = dict(state)
         new_state["needs_ai"] = False
+        new_state["needs_background_refresh"] = False
 
         try:
-            from utils.card_design_agent import run_card_design_agent
             from utils.nanobana_service import generate_nanobana_background, save_nanobana_background
-            from callbacks.player_portal_callbacks import _get_team_colors
             
-            match_payload = _get_match_payload(milestone_id, milestones_data)
-            match_payload["player_id"] = player_id
-            
-            home_colors = _get_team_colors(match_payload.get("home_team", ""))
-            away_colors = _get_team_colors(match_payload.get("away_team", ""))
-            team_colors = {"home": home_colors, "away": away_colors, "player_team": home_colors}
-
-            profile = _get_player_profile(player_id)
-            history = _get_player_history(player_id)
-
-            proposals = run_card_design_agent(
-                match_payload=match_payload, player_profile=profile,
-                team_colors=team_colors, player_history=history,
-                has_player_photo=False, card_type=card_type
-            )
-            
-            if proposals:
-                first = proposals[0]
-                new_state["ai_proposal"] = first
-                if new_state.get("selected_photo_idx") is None:
-                    new_state["selected_photo_idx"] = first.get("selected_photo_idx")
+            # 1. Full AI Agency Run (Proposals + Initial BG)
+            if needs_full_ai:
+                from utils.card_design_agent import run_card_design_agent
+                from callbacks.player_portal_callbacks import _get_team_colors
                 
-                prompt = first.get("nanobana_background_prompt")
+                match_payload = _get_match_payload(milestone_id, milestones_data)
+                match_payload["player_id"] = player_id
+                
+                home_colors = _get_team_colors(match_payload.get("home_team", ""))
+                away_colors = _get_team_colors(match_payload.get("away_team", ""))
+                team_colors = {"home": home_colors, "away": away_colors, "player_team": home_colors}
+
+                profile = _get_player_profile(player_id)
+                history = _get_player_history(player_id)
+
+                # Detect if player has photos for the agent
+                album_data = (state.get("context") or {}).get("available_photos", [])
+                if not album_data:
+                    from utils.image_processing import get_player_album
+                    album_data = get_player_album(player_id)
+                
+                has_photos = len(album_data) > 0
+
+                proposals = run_card_design_agent(
+                    match_payload=match_payload, player_profile=profile,
+                    team_colors=team_colors, player_history=history,
+                    has_player_photo=has_photos, card_type=card_type
+                )
+                
+                if proposals:
+                    new_state["ai_proposals"] = proposals
+                    new_state["ai_proposal_idx"] = 0
+                    new_state["ai_proposal"] = proposals[0]
+                    
+                    # CRITICAL FIX: Sync the UI state with the agent's first proposal
+                    new_state["layout_modifiers"] = proposals[0].get("layout_modifiers", {})
+                    new_state["template"] = proposals[0].get("design", {}).get("template", "A")
+                    
+                    if new_state.get("selected_photo_idx") is None:
+                        # Ensure we auto-select the photo the agent suggests
+                        new_state["selected_photo_idx"] = proposals[0].get("selected_photo_idx", 0)
+                    
+                    prompt = proposals[0].get("nanobana_background_prompt")
+                    if prompt:
+                        bg_bytes = generate_nanobana_background(prompt)
+                        if bg_bytes:
+                            bg_path = save_nanobana_background(milestone_id, bg_bytes)
+                            new_state["nanobana_background_path"] = bg_path
+
+            # 2. Background-only Refresh (on concept switch)
+            elif needs_bg_only:
+                proposal = state.get("ai_proposal", {})
+                prompt = proposal.get("nanobana_background_prompt")
                 if prompt:
                     bg_bytes = generate_nanobana_background(prompt)
                     if bg_bytes:
-                        bg_path = save_nanobana_background(milestone_id, bg_bytes)
+                        # Append index to avoid cache collisions
+                        idx = state.get("ai_proposal_idx", 0)
+                        bg_path = save_nanobana_background(f"{milestone_id}_{idx}", bg_bytes)
                         new_state["nanobana_background_path"] = bg_path
 
             return new_state
@@ -611,6 +695,45 @@ def register_card_editor_callbacks(app):
             return no_update, no_update, dbc.Alert(f"Upload failed: {e}", color="danger"), no_update
 
     # ------------------------------------------------------------------ #
+    # AI Caption Regeneration                                            #
+    # ------------------------------------------------------------------ #
+    @app.callback(
+        Output("card-caption-preview", "value"),
+        Input("card-caption-btn", "n_clicks"),
+        State("card-caption-tone", "value"),
+        State("card-editor-state", "data"),
+        prevent_initial_call=True,
+    )
+    def regenerate_ai_caption(n_clicks, tone, state):
+        if not n_clicks: return no_update
+        
+        try:
+            from langchain_google_genai import ChatGoogleGenerativeAI
+            model_name = "gemini-2.0-flash"
+            llm = ChatGoogleGenerativeAI(model=model_name, temperature=0.9)
+            
+            proposal = state.get("ai_proposal", {})
+            narrative = proposal.get("narrative", {})
+            headline = narrative.get("headline", "MATCHDAY")
+            story = narrative.get("supporting_story", "")
+            
+            prompt = f"""
+            Write a single, highly engaging Instagram caption for a professional football match card.
+            HEADLINE: {headline}
+            STORY: {story}
+            TONE: {tone} (pro = elite & focused, hype = energetic & fan-centric)
+            
+            Include relevant emojis. Keep it under 200 characters. No hashtags (they will be added separately).
+            """
+            
+            response = llm.invoke(prompt)
+            return response.content if hasattr(response, "content") else str(response)
+            
+        except Exception as e:
+            logger.error(f"Caption regeneration failed: {e}")
+            return "Caption generation unavailable. Try again later."
+
+    # ------------------------------------------------------------------ #
     # Generate PNG                                                       #
     # ------------------------------------------------------------------ #
     @app.callback(
@@ -645,7 +768,8 @@ def register_card_editor_callbacks(app):
                 output_dir=str(_CARD_DATA_ROOT / player_id / milestone_id),
                 format=state.get("format", "1:1"),
                 background_image_path=state.get("nanobana_background_path"),
-                match_payload=_get_match_payload(milestone_id, milestones_data)
+                match_payload=_get_match_payload(milestone_id, milestones_data),
+                player_name=str(_get_player_display_name())
             )
             store = dict(pagination_store or {})
             generated = dict(store.get("generated", {}))
@@ -676,33 +800,44 @@ def _build_album_grid(album: list) -> html.Div:
 
 
 def _build_template_library_ui(player_id: str) -> list:
-    """Reads saved JSON templates and returns a list of clickable buttons."""
+    """Reads saved JSON templates and returns a list of visual thumbnails."""
     tmpl_dir = _CARD_DATA_ROOT / player_id / "templates"
     if not tmpl_dir.exists():
         return [html.P("No saved templates.", className="text-muted small")]
     
+    # Get all .json files
     files = sorted(tmpl_dir.glob("*.json"), reverse=True)
     if not files:
         return [html.P("No saved templates.", className="text-muted small")]
     
-    buttons = []
+    thumbs = []
     for f in files:
         tmpl_id = f.stem
-        # Show a small box with the template ID (or timestamp)
-        display_name = tmpl_id.split("_")[-1] # Show just the HHMMSS or similar
-        buttons.append(
-            dbc.Button(
-                display_name,
-                id={"type": "card-user-template", "index": tmpl_id},
-                size="sm",
-                style={
-                    "background": "rgba(255,255,255,0.05)",
-                    "border": "1px solid rgba(255,255,255,0.1)",
-                    "color": "white",
-                    "fontSize": "0.6rem",
-                    "minWidth": "60px"
-                },
-                className="me-1"
-            )
+        img_path = tmpl_dir / f"{tmpl_id}.png"
+        
+        # Default source if image doesn't exist
+        src = "https://via.placeholder.com/100x100?text=No+Preview"
+        if img_path.exists():
+            with open(img_path, "rb") as img_f:
+                src = "data:image/png;base64," + base64.b64encode(img_f.read()).decode()
+        
+        thumbs.append(
+            html.Div([
+                html.Img(
+                    src=src,
+                    id={"type": "card-user-template", "index": tmpl_id},
+                    style={
+                        "width": "80px",
+                        "height": "80px",
+                        "objectFit": "cover",
+                        "borderRadius": "8px",
+                        "border": f"2px solid {_GLASS_BORDER}",
+                        "cursor": "pointer",
+                        "transition": "transform 0.2s"
+                    },
+                    className="hover-scale"
+                ),
+                html.P(tmpl_id.split("_")[-1], style={"fontSize": "0.55rem", "textAlign": "center", "marginTop": "4px", "color": _TEXT_MUTED})
+            ], className="d-flex flex-column align-items-center me-2")
         )
-    return buttons
+    return thumbs
