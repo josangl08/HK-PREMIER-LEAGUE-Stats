@@ -8,6 +8,7 @@ from flask_login import current_user
 
 from data.aggregators.timeline_aggregator import TimelineAggregator
 from data.aggregators.hong_kong_aggregator import get_h2h_record
+from data.managers.transfermarkt_runtime_manager import TransfermarktRuntimeManager
 from utils.stage_helpers import (
     render_post_match,
     render_pre_match,
@@ -1163,9 +1164,36 @@ def register_player_portal_callbacks(app):
 
         status = _get_player_sync_status(player_id)
         state = status.get("state", "ready")
+        tm_runtime = TransfermarktRuntimeManager().get_status()
+        tm_mode = tm_runtime.mode or "NORMAL"
 
-        if state == "ready":
+        if state == "ready" and tm_mode == "NORMAL":
             return None, hidden, True
+
+        if tm_mode == "BLOCKED" and state in {"ready", "no_history"}:
+            content = [
+                html.I(className="bi bi-shield-exclamation me-2", style={"fontSize": "0.8rem", "opacity": "0.65"}),
+                html.Span(
+                    "Your recent match details may be delayed while Transfermarkt refresh is temporarily blocked."
+                    if state == "no_history"
+                    else "Recent rival and season updates may be delayed."
+                ),
+            ]
+            return content, {"display": "flex"}, True
+
+        if tm_mode == "ASSISTED_ACTIVE" and state in {"ready", "no_history"}:
+            content = [
+                html.I(className="bi bi-arrow-repeat me-2", style={"fontSize": "0.8rem", "opacity": "0.65"}),
+                html.Span("Your recent match details are being refreshed." if state == "no_history" else "Recent rival data is being refreshed."),
+            ]
+            return content, {"display": "flex"}, False
+
+        if tm_mode in {"DEGRADED", "RECOVERING"} and state == "ready":
+            content = [
+                html.I(className="bi bi-info-circle me-2", style={"fontSize": "0.8rem", "opacity": "0.6"}),
+                html.Span("Some recent opponent updates may still be catching up."),
+            ]
+            return content, {"display": "flex"}, True
 
         if state == "no_data":
             content = [

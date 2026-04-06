@@ -686,6 +686,35 @@ background: radial-gradient(circle,rgba(147, 49, 42, 1) 0%, rgba(10, 0, 0, 0.74)
     color: var(--text-secondary);
 }
 
+.home-system-shell {
+    margin-bottom: 0;
+    background-color: #93312a !important;
+    border-color: rgba(0, 0, 0, 0.08) !important;
+    color: var(--text-primary) !important;
+}
+
+.home-status-card {
+    background: rgba(255, 255, 255, 0.08) !important;
+    border: 1px solid rgba(255, 255, 255, 0.16) !important;
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+    box-shadow: 0 10px 24px -16px rgba(0, 0, 0, 0.32);
+    margin-bottom: 0;
+}
+
+.home-status-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 14px 28px -18px rgba(0, 0, 0, 0.36);
+}
+
+.home-status-card .card-header {
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.home-status-card .card-body {
+    padding: 1rem 1.1rem;
+}
+
 /* Dashboard específico - Versión HKFA */
 .dashboard-header {
     background-color: var(--background-secondary);

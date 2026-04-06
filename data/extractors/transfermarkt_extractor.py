@@ -2,6 +2,7 @@
 # ABOUTME: Provides get_match_history(), get_player_photo_url(), fetch_and_store_player_photo() with blob storage in DB.
 
 import requests
+import cloudscraper
 from bs4 import BeautifulSoup, Tag
 import pandas as pd
 import time
@@ -14,6 +15,7 @@ from typing import Dict, List, Optional, Tuple, Union, Sequence
 from bs4.element import PageElement
 from pathlib import Path
 import json
+from requests.cookies import create_cookie
 
 class TransfermarktExtractor:
     """
@@ -32,6 +34,15 @@ class TransfermarktExtractor:
         self.historical_records_dir = Path("data/historical_records")
         self.competition_logos_dir = Path("assets/competition_logos")
         self.logger = logging.getLogger(__name__)
+        self.last_http_status: Optional[int] = None
+        self.last_block_type: Optional[str] = None
+        self.last_block_reason: Optional[str] = None
+        self.last_result_source: Optional[str] = None
+        self.last_cache_fresh: bool = False
+        self.session = cloudscraper.create_scraper(
+            browser={"browser": "chrome", "platform": "darwin", "mobile": False}
+        )
+        self.session.headers.update(self.headers)
 
         # Whitelist ampliada: Todo lo que juegue un equipo de HK
         self.ALLOWED_COMPETITIONS = {
@@ -53,13 +64,53 @@ class TransfermarktExtractor:
         try:
             self._wait_rate_limit()
             self.logger.info(f"Scraping: {url}")
-            response = requests.get(url, headers=self.headers, timeout=15)
-            response.raise_for_status()
+            self.last_block_type = None
+            self.last_block_reason = None
+            self.last_result_source = "network"
+            self.last_cache_fresh = False
+            response = self.session.get(url, timeout=15)
+            self.last_http_status = response.status_code
             self.last_request_time = time.time()
+            protection_reason = self._detect_protection_page(response.text)
+            if protection_reason:
+                self.last_block_type = "AWS_WAF_HUMAN_VERIFICATION"
+                self.last_block_reason = protection_reason
+                self.logger.warning("Transfermarkt protection page detected for %s: %s", url, protection_reason)
+                return None
+            response.raise_for_status()
             return BeautifulSoup(response.content, 'html.parser')
-        except Exception as e:
+        except requests.HTTPError as e:
+            self.last_http_status = e.response.status_code if e.response is not None else None
             self.logger.error(f"Error en {url}: {e}")
             return None
+        except Exception as e:
+            self.last_http_status = None
+            self.logger.error(f"Error en {url}: {e}")
+            return None
+
+    def _detect_protection_page(self, html: str) -> Optional[str]:
+        text = (html or "").lower()
+        if not text:
+            return None
+        if "human verification" in text and ("awswaf" in text or "gokuprops" in text):
+            return "Human Verification (AWS WAF challenge)"
+        if "captcha" in text and ("bot" in text or "human verification" in text):
+            return "Captcha / bot challenge"
+        return None
+
+    def load_cookie_jar(self, cookie_items: Sequence[Dict]) -> None:
+        if not cookie_items:
+            return
+        for item in cookie_items:
+            name = item.get("name")
+            value = item.get("value")
+            if not name or value is None:
+                continue
+            domain = item.get("domain") or ".transfermarkt.com"
+            path = item.get("path") or "/"
+            secure = bool(item.get("secure", True))
+            cookie = create_cookie(name=name, value=value, domain=domain, path=path, secure=secure)
+            self.session.cookies.set_cookie(cookie)
 
     def get_match_history(self, player_id: str, season_id: str) -> List[Dict]:
         """
@@ -81,6 +132,11 @@ class TransfermarktExtractor:
                     
                     # Si la temporada ya terminó, o si se actualizó HOY, usar cache
                     if is_completed or last_updated == datetime.now().date():
+                        self.last_result_source = "cache"
+                        self.last_cache_fresh = True
+                        self.last_http_status = 200
+                        self.last_block_type = None
+                        self.last_block_reason = None
                         self.logger.info(f"✓ Usando cache de Transfermarkt para {player_id} ({season_key}) - Actualizado: {last_updated}")
                         return records["seasons"][season_key].get("matches", [])
                 except Exception as e:

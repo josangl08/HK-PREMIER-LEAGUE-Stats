@@ -73,10 +73,74 @@ layout = html.Div([
                                     id="refresh-data-button",
                                     color="primary",
                                     className="mt-2 w-100"
-                                )
+                                ),
+                                html.Hr(),
+                                html.H6("Transfermarkt Assisted Mode", className="mt-2"),
+                                html.Div(id="tm-assisted-session-indicator", className="mb-2"),
+                                dcc.Upload(
+                                    id="tm-assisted-cookies-upload",
+                                    children=dbc.Button("Upload cookies.json", color="light", className="w-100 mb-2"),
+                                    multiple=False,
+                                ),
+                                dcc.Textarea(
+                                    id="tm-assisted-cookies-input",
+                                    placeholder='Paste Transfermarkt cookies JSON here',
+                                    style={
+                                        "width": "100%",
+                                        "minHeight": "120px",
+                                        "fontFamily": "monospace",
+                                        "fontSize": "0.85rem",
+                                        "backgroundColor": "#f8f9fa",
+                                        "color": "#18181A",
+                                        "caretColor": "#18181A",
+                                        "border": "1px solid rgba(0,0,0,0.14)",
+                                        "borderRadius": "0.5rem",
+                                        "padding": "0.75rem",
+                                    },
+                                ),
+                                html.Div(id="tm-assisted-json-status", className="mt-2"),
+                                dcc.Store(id="tm-assisted-normalized-payload"),
+                                dbc.Row([
+                                    dbc.Col(
+                                        dcc.Dropdown(
+                                            id="tm-assisted-scope",
+                                            options=[
+                                                {"label": "Priority", "value": "priority"},
+                                                {"label": "Users", "value": "users"},
+                                                {"label": "Post-match", "value": "post-match"},
+                                                {"label": "All", "value": "all"},
+                                            ],
+                                            value="priority",
+                                            clearable=False,
+                                        ),
+                                        md=6,
+                                        className="mt-2",
+                                    ),
+                                    dbc.Col(
+                                        dbc.Input(
+                                            id="tm-assisted-expires-hours",
+                                            type="number",
+                                            min=1,
+                                            max=72,
+                                            step=1,
+                                            value=12,
+                                            placeholder="Hours",
+                                        ),
+                                        md=6,
+                                        className="mt-2",
+                                    ),
+                                ], className="g-2"),
+                                dbc.Row([
+                                    dbc.Col(dbc.Button("Load Assisted Session", id="tm-assisted-load-btn", color="primary", className="w-100 mt-2"), md=3),
+                                    dbc.Col(dbc.Button("Run Assisted Refresh", id="tm-assisted-run-btn", color="warning", className="w-100 mt-2"), md=3),
+                                    dbc.Col(dbc.Button("Requeue Failed Jobs", id="tm-assisted-requeue-btn", color="info", className="w-100 mt-2"), md=3),
+                                    dbc.Col(dbc.Button("Clear Session", id="tm-assisted-clear-btn", color="secondary", className="w-100 mt-2"), md=3),
+                                ], className="g-2"),
+                                html.Div(id="tm-admin-action-status", className="mt-2"),
+                                dcc.Store(id="tm-admin-refresh-trigger"),
                             ])
-                        ])
-                    ], width=12, md=8, className="mx-auto")
+                        ], className="home-system-shell")
+                    ], width=12, className="mb-4")
                 ])
                 
             ], className="p-4 bg-primary-subtle rounded shadow")

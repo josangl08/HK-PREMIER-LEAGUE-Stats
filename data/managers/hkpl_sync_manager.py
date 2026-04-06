@@ -244,70 +244,24 @@ class HKPLSyncManager:
 
         Safe to call from a daemon thread — opens its own DB session.
         """
-        from data.extractors.transfermarkt_extractor import TransfermarktExtractor
-        from data.processors.hong_kong_processor import POSITION_FULL_NAMES
-
-        extractor = TransfermarktExtractor()
-        session = SessionFactory()
+        from data.managers.transfermarkt_refresh_manager import TransfermarktRefreshManager
 
         try:
-            player = session.get(Player, player_id)
-            if player is None:
-                logger.warning(f"resolve_player_tm_data: player_id={player_id!r} not found in DB.")
-                return
-
-            # Step 1: resolve tm_id if missing
-            if not player.tm_id:
-                birth_year = player.birth_date.year if player.birth_date else (
-                    (datetime.now().year - player.age) if player.age else None
-                )
-                found = extractor.search_player_by_name(
-                    player_name,
-                    team=team,
-                    nationality=player.nationality or player.birth_country or "",
-                    birth_year=birth_year,
-                    position=player.position_main or "",
-                )
-                if found:
-                    player.tm_id = found
-                    session.commit()
-                    logger.info(f"resolve_player_tm_data: tm_id={found} resolved for {player_name!r}")
-                else:
-                    logger.warning(f"resolve_player_tm_data: could not find TM id for {player_name!r}")
-                    return
-
-            tm_id_str = str(player.tm_id)
-
-            # Step 2: fetch and store photo
-            try:
-                extractor.fetch_and_store_player_photo(player_id, tm_id_str, session)
-            except Exception as exc:
-                logger.warning(f"resolve_player_tm_data: photo fetch failed for {player_name!r}: {exc}")
-
-            # Step 2.5: Sincronizar Historial de Partidos (TM Data Manager)
-            try:
-                from data.transfermarkt_data_manager import TransfermarktDataManager
-                tm_dm = TransfermarktDataManager(auto_load=False)
-                # Sincronizamos historial de las últimas temporadas
-                for season_id in [get_current_season(), "2024-25", "2023-24"]:
-                    raw_matches = tm_dm.extractor.get_match_history(tm_id_str, season_id)
-                    if raw_matches:
-                        tm_dm._upsert_history_to_sql(player_id, raw_matches)
-                logger.info(f"resolve_player_tm_data: Match history synced for {player_name!r}")
-            except Exception as exc:
-                logger.warning(f"resolve_player_tm_data: match history sync failed for {player_name!r}: {exc}")
-
-            # Step 3: reconcile position using Transfermarkt as the authoritative source when available
-            resolved = self._reconcile_player_position(session, player_id, prefer_transfermarkt=True, extractor=extractor)
-            if resolved:
-                session.commit()
-                logger.info(f"resolve_player_tm_data: position_main={resolved} set for {player_name!r}")
-
+            manager = TransfermarktRefreshManager()
+            ok = manager.refresh_player(
+                player_id,
+                mode="new_user_bootstrap",
+                player_name=player_name,
+                team=team,
+                fetch_photo=True,
+                reconcile_position=self._reconcile_player_position,
+            )
+            if ok:
+                logger.info(f"resolve_player_tm_data: unified TM bootstrap completed for {player_name!r}")
+            else:
+                logger.warning(f"resolve_player_tm_data: no TM history synced for {player_name!r}")
         except Exception as e:
             logger.error(f"resolve_player_tm_data error for {player_name!r}: {e}", exc_info=True)
-            session.rollback()
-        finally:
-            session.close()
 
     def reconcile_all_player_positions(self, prefer_transfermarkt: bool = True) -> Dict[str, int]:
         """Recomputes canonical player positions across the whole DB."""

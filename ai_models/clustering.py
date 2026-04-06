@@ -112,6 +112,8 @@ def label_archetypes(
     feature_names_lower = [str(f).lower() for f in feature_names]
     # Filter out derived/technical noise for cleaner labeling
     NOISE_FOR_DNA = {"red card", "yellow card", "foul", "conceded", "loss", "lost", "as gk", "exits", "lag_1", "roll_3"}
+    # Words that invert or change the meaning of a metric (e.g., 'xg' vs 'xg against')
+    INVERSION_WORDS = {"against", "conceded", "received"}
 
     labels = []
     for i, z_row in enumerate(z_scores):
@@ -126,7 +128,18 @@ def label_archetypes(
         best_overlap = 0 # Must have at least one match
 
         for pattern_keywords, archetype_label in _ARCHETYPE_PATTERNS:
-            overlap = sum(any(kw in feat for kw in pattern_keywords) for feat in top5_features)
+            overlap = 0
+            for kw in pattern_keywords:
+                # Check if keyword exists in any of the top features, but NOT with inversion words
+                for feat in top5_features:
+                    # Use word-boundary-like check: kw must be in feat AND not accompanied by inversion words
+                    if kw in feat:
+                        # If the keyword is 'xg' or 'shots', it shouldn't be 'against'
+                        if kw in ("xg", "shots", "goals") and any(iw in feat for iw in INVERSION_WORDS):
+                            continue
+                        overlap += 1
+                        break # Move to next keyword
+
             if overlap > best_overlap:
                 best_overlap = overlap
                 best_label = archetype_label

@@ -699,20 +699,27 @@ def _build_career_cluster_evolution(data: Dict) -> html.Div:
         from ai_models.model_registry import ModelRegistry
         from ai_models.clustering import label_archetypes
 
-        km = ModelRegistry().load("kmeans_overall_k5")
+        registry = ModelRegistry()
+        km = registry.load("kmeans_overall_k5")
         if km is None:
             return html.Span()
+
+        # LOAD metadata to sync features and avoid warnings
+        reg_data = registry._load_registry()
+        feature_cols_e = reg_data.get("kmeans_overall_k5", {}).get("latest", {}).get("features")
 
         dm_e = get_hong_kong_data_manager()
         df_e = dm_e.processed_data
         if df_e is None or df_e.empty:
             return html.Span()
 
-        meta_cols_e = {"Player", "Season", "Team", "Position"}
-        feature_cols_e = [
-            c for c in df_e.columns
-            if c not in meta_cols_e and pd.api.types.is_numeric_dtype(df_e[c])
-        ]
+        if not feature_cols_e:
+            meta_cols_e = {"Player", "Season", "Team", "Position"}
+            feature_cols_e = [
+                c for c in df_e.columns
+                if c not in meta_cols_e and pd.api.types.is_numeric_dtype(df_e[c])
+            ]
+        
         archetype_labels_e = label_archetypes(km, feature_cols_e)
 
         timeline_items = []
@@ -3615,11 +3622,29 @@ def get_umap_figure(player_id: str) -> go.Figure:
         try:
             from ai_models.model_registry import ModelRegistry
             from ai_models.clustering import label_archetypes
-            km_u = ModelRegistry().load("kmeans_overall_k5")
+            registry = ModelRegistry()
+            km_u = registry.load("kmeans_overall_k5")
             if km_u is not None:
-                cluster_labels_umap = km_u.predict(X_scaled)
-                archetype_labels_umap = label_archetypes(km_u, feature_cols)
-        except Exception:
+                # LOAD metadata to sync features
+                reg_data = registry._load_registry()
+                expected_features = reg_data.get("kmeans_overall_k5", {}).get("latest", {}).get("features")
+                
+                if expected_features:
+                    available_cols = [c for c in expected_features if c in df_plot.columns]
+                    X_u_df = df_plot[available_cols].fillna(0).copy()
+                    for mc in expected_features:
+                        if mc not in X_u_df.columns: X_u_df[mc] = 0.0
+                    X_u = X_u_df[expected_features].values
+                    # Re-standardize for this specific model's expected features
+                    X_u_scaled = (X_u - X_u.mean(axis=0)) / (X_u.std(axis=0) + 1e-6)
+                    
+                    cluster_labels_umap = km_u.predict(X_u_scaled)
+                    archetype_labels_umap = label_archetypes(km_u, expected_features)
+                else:
+                    cluster_labels_umap = km_u.predict(X_scaled)
+                    archetype_labels_umap = label_archetypes(km_u, feature_cols)
+        except Exception as e:
+            logger.debug(f"UMAP figure clustering error: {e}")
             pass
 
         knn_edges = _build_knn_edges(umap_df, k=4)

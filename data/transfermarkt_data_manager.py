@@ -67,31 +67,111 @@ class TransfermarktDataManager:
             import traceback; traceback.print_exc()
             return False
 
+    def supports_injuries_scraping(self) -> bool:
+        return hasattr(self.extractor, "extract_all_injuries")
+
+    def get_injuries_runtime_status(self) -> Dict:
+        """Returns truthful injuries-system status for admin/home."""
+        session = SessionFactory()
+        try:
+            injuries_count = session.execute(select(Injury)).scalars().all()
+            injury_total = len(injuries_count)
+            log = session.get(SystemSyncLog, "transfermarkt_injuries")
+            supported = self.supports_injuries_scraping()
+            return {
+                "supported": supported,
+                "available": injury_total > 0,
+                "records": injury_total,
+                "last_update": log.last_run.isoformat() if log else None,
+                "sync_status": log.status if log else None,
+                "message": (
+                    "Transfermarkt injuries scraper is not implemented in the current extractor."
+                    if not supported
+                    else ("Injuries data available." if injury_total > 0 else "No injuries stored yet.")
+                ),
+            }
+        finally:
+            session.close()
+
+    def _should_update_data(self) -> bool:
+        """Legacy compatibility for home callbacks."""
+        if not self.supports_injuries_scraping():
+            return False
+        status = self.get_injuries_runtime_status()
+        last_update = status.get("last_update")
+        if not last_update:
+            return True
+        try:
+            last_dt = datetime.fromisoformat(last_update)
+        except Exception:
+            return True
+        return (datetime.now() - last_dt).days >= 7
+
+    def _save_manual_update_timestamp(self, dt: datetime) -> None:
+        """Legacy compatibility hook used by home callbacks."""
+        session = SessionFactory()
+        try:
+            log = session.get(SystemSyncLog, "transfermarkt_injuries")
+            if not log:
+                log = SystemSyncLog(task_name="transfermarkt_injuries", last_run=dt, status="MANUAL_REQUEST")
+                session.add(log)
+            else:
+                log.last_run = dt
+                log.status = "MANUAL_REQUEST"
+            session.commit()
+        finally:
+            session.close()
+
     def refresh_player_data(self, player_id: str) -> bool:
-        """Sincroniza el historial de un solo jugador para todas las temporadas disponibles."""
+        """Legacy wrapper. Prefer TransfermarktRefreshManager for scoped refresh policies."""
+        return self.refresh_player_data_for_seasons(player_id, self._get_valid_season_ids())
+
+    def _get_valid_season_ids(self, min_start_year: int = 2018) -> List[str]:
         from models.db_models import Season
+        current_season = get_current_season()
+        try:
+            current_start = int(str(current_season).split("-")[0])
+        except Exception:
+            current_start = datetime.now().year
+        session = SessionFactory()
+        try:
+            seasons_stmt = select(Season.id)
+            seasons = session.execute(seasons_stmt).scalars().all()
+            valid = []
+            for season_id in seasons:
+                try:
+                    start_year = int(str(season_id).split("-")[0])
+                except Exception:
+                    continue
+                if min_start_year <= start_year <= current_start + 1:
+                    valid.append(season_id)
+            return sorted(set(valid))
+        finally:
+            session.close()
+
+    def refresh_player_data_for_seasons(self, player_id: str, season_ids: List[str]) -> bool:
+        from models.db_models import Player
         session = SessionFactory()
         try:
             player = session.get(Player, player_id)
             if not player or not player.tm_id:
                 logger.warning(f"Jugador {player_id} no encontrado o sin tm_id.")
                 return False
-            
-            # Obtener temporadas de forma segura
-            seasons_stmt = select(Season.id)
-            seasons = session.execute(seasons_stmt).scalars().all()
-            
+
             updated = False
-            for season_id in seasons:
+            for season_id in season_ids:
                 try:
                     logger.info(f"Scraping TM para {player.name} en {season_id}...")
                     raw_matches = self.extractor.get_match_history(str(player.tm_id), season_id)
+                    if self.extractor.last_http_status == 405:
+                        logger.warning(f"TM returned 405 for {player.name} ({season_id}); stopping early.")
+                        break
                     if raw_matches:
                         self._upsert_history_to_sql(player.id, raw_matches)
                         updated = True
                 except Exception as e:
                     logger.error(f"Error en refresh_player_data para {player.name} ({season_id}): {e}")
-            
+
             return updated
         finally:
             session.close()
@@ -106,7 +186,7 @@ class TransfermarktDataManager:
             
             # Obtener temporadas disponibles
             from models.db_models import Season
-            seasons = session.execute(select(Season.id)).scalars().all()
+            seasons = self._get_valid_season_ids()
             
             for player in players:
                 logger.info(f"Sincronizando historial TM para: {player.name}...")
@@ -338,7 +418,7 @@ class TransfermarktDataManager:
         if isinstance(date_val, datetime):
             return date_val
         try:
-            return pd.to_datetime(date_val).to_pydatetime()
+            return pd.to_datetime(date_val, dayfirst=True).to_pydatetime()
         except:
             return None
 

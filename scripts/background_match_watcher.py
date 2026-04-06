@@ -6,7 +6,7 @@ import os
 import logging
 import time
 import argparse
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from sqlalchemy import select, and_, or_
 
 # Add root to path
@@ -23,6 +23,8 @@ from models.db_models import (
 )
 from utils.db_engine import SessionFactory, init_db
 from data.transfermarkt_data_manager import TransfermarktDataManager
+from data.managers.transfermarkt_refresh_manager import TransfermarktRefreshManager
+from data.managers.transfermarkt_runtime_manager import TransfermarktRuntimeManager
 
 # Configurar logging
 logging.basicConfig(
@@ -37,6 +39,20 @@ RETRY_INTERVALS = [10, 30, 60, 120, 180, 240, 300, 360, 420, 480, 540, 600] # up
 class MatchWatcher:
     def __init__(self):
         self.tm_manager = TransfermarktDataManager(auto_load=False)
+        self.runtime = TransfermarktRuntimeManager()
+        self.refresh_manager = TransfermarktRefreshManager()
+
+    @staticmethod
+    def _utcnow() -> datetime:
+        return datetime.utcnow()
+
+    @staticmethod
+    def _to_naive_utc(value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is not None:
+            return value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value
 
     def _enqueue_job(
         self,
@@ -107,29 +123,30 @@ class MatchWatcher:
         error: str | None = None,
         defer_until: datetime | None = None,
         include_profile: bool = False,
+        status_override: str | None = None,
     ) -> None:
         state = self._get_refresh_state(session, player_id)
-        now = datetime.now(timezone.utc)
+        now = self._utcnow()
         if ok:
             state.last_match_history_refresh_at = now
             if include_profile:
                 state.last_profile_refresh_at = now
                 state.last_season_stats_refresh_at = now
             if last_match_seen_date is not None:
-                state.last_match_seen_date = last_match_seen_date
+                state.last_match_seen_date = self._to_naive_utc(last_match_seen_date)
             state.tm_refresh_status = "READY"
             state.tm_last_error = None
             state.tm_retry_after = None
         else:
-            state.tm_refresh_status = "DEFERRED" if defer_until else "FAILED"
+            state.tm_refresh_status = status_override or ("DEFERRED" if defer_until else "FAILED")
             state.tm_last_error = (error or "")[:500] or None
-            state.tm_retry_after = defer_until
+            state.tm_retry_after = self._to_naive_utc(defer_until)
 
     def enqueue_current_season_bootstrap(self, days_ahead: int = 7) -> int:
         """Queue active current-season squad players, prioritising teams with upcoming fixtures."""
         session = SessionFactory()
         try:
-            now = datetime.now(timezone.utc)
+            now = self._utcnow()
             horizon = now + timedelta(days=days_ahead)
             upcoming_fixtures = session.execute(
                 select(Fixture).where(and_(Fixture.date_utc >= now, Fixture.date_utc <= horizon))
@@ -161,7 +178,8 @@ class MatchWatcher:
             added = 0
             for player in players:
                 state = session.get(PlayerRefreshState, player.id)
-                if state and state.last_match_history_refresh_at and state.last_match_history_refresh_at >= now - timedelta(days=7):
+                last_refresh = self._to_naive_utc(state.last_match_history_refresh_at) if state else None
+                if last_refresh and last_refresh >= now - timedelta(days=7):
                     continue
                 priority = 80 if player.current_team_id in priority_team_ids else 40
                 if self._enqueue_job(
@@ -184,7 +202,7 @@ class MatchWatcher:
         """Queue players from teams with upcoming fixtures for scouting coverage."""
         session = SessionFactory()
         try:
-            now = datetime.now(timezone.utc)
+            now = self._utcnow()
             horizon = now + timedelta(days=days_ahead)
             fixtures = session.execute(
                 select(Fixture).where(and_(Fixture.date_utc >= now, Fixture.date_utc <= horizon))
@@ -199,7 +217,8 @@ class MatchWatcher:
             added = 0
             for player in players:
                 state = session.get(PlayerRefreshState, player.id)
-                if state and state.last_match_history_refresh_at and state.last_match_history_refresh_at >= now - timedelta(days=5):
+                last_refresh = self._to_naive_utc(state.last_match_history_refresh_at) if state else None
+                if last_refresh and last_refresh >= now - timedelta(days=5):
                     continue
                 if self._enqueue_job(
                     session,
@@ -220,7 +239,7 @@ class MatchWatcher:
         """Queue refreshes for players linked to users or agents."""
         session = SessionFactory()
         try:
-            now = datetime.now(timezone.utc)
+            now = self._utcnow()
             players_stmt = (
                 select(Player)
                 .outerjoin(UserPlayerLink)
@@ -237,7 +256,8 @@ class MatchWatcher:
             added = 0
             for player in players:
                 state = session.get(PlayerRefreshState, player.id)
-                if state and state.last_profile_refresh_at and state.last_profile_refresh_at >= now - timedelta(days=3):
+                last_profile_refresh = self._to_naive_utc(state.last_profile_refresh_at) if state else None
+                if last_profile_refresh and last_profile_refresh >= now - timedelta(days=3):
                     continue
                 if self._enqueue_job(
                     session,
@@ -261,7 +281,7 @@ class MatchWatcher:
         """
         session = SessionFactory()
         try:
-            now = datetime.now(timezone.utc)
+            now = self._utcnow()
             # Matches that started between 48h ago and 2h ago (assumed finished)
             lookback = now - timedelta(hours=48)
             min_finish = now - timedelta(minutes=115) 
@@ -325,7 +345,7 @@ class MatchWatcher:
                             session,
                             fixture_id=fix.id,
                             player_id=player.id,
-                            next_attempt=fix.date_utc + timedelta(minutes=125),
+                            next_attempt=self._to_naive_utc(fix.date_utc) + timedelta(minutes=125),
                             job_type="post_match_history",
                             priority=150,
                             source="watcher",
@@ -344,53 +364,118 @@ class MatchWatcher:
         """
         Finds pending tasks whose next_attempt time has passed and tries to update them.
         """
+        if self.runtime.should_skip_automatic_refresh():
+            logger.warning("Transfermarkt is currently BLOCKED. Automatic refresh cycle skipped.")
+            return
         session = SessionFactory()
         try:
-            now = datetime.now(timezone.utc)
-            stmt = select(MatchUpdateQueue).where(
-                and_(
-                    MatchUpdateQueue.status.in_(("PENDING", "DEFERRED")),
-                    MatchUpdateQueue.next_attempt <= now,
-                    or_(MatchUpdateQueue.retry_after.is_(None), MatchUpdateQueue.retry_after <= now),
+            runtime_status = self.runtime.get_status()
+            assisted_active = runtime_status.mode == "ASSISTED_ACTIVE"
+            now = self._utcnow()
+            base_conditions = and_(
+                MatchUpdateQueue.status.in_(("PENDING", "DEFERRED")),
+                MatchUpdateQueue.next_attempt <= now,
+                or_(MatchUpdateQueue.retry_after.is_(None), MatchUpdateQueue.retry_after <= now),
+            )
+            task_limit = 1 if assisted_active else 10
+            stmt = None
+            if assisted_active:
+                assisted_priority_stmt = (
+                    select(MatchUpdateQueue)
+                    .where(
+                        and_(
+                            base_conditions,
+                            MatchUpdateQueue.job_type.in_(("post_match_history", "user_priority_refresh")),
+                        )
+                    )
+                    .order_by(MatchUpdateQueue.priority.desc(), MatchUpdateQueue.next_attempt.asc())
+                    .limit(task_limit)
                 )
-            ).order_by(MatchUpdateQueue.priority.desc(), MatchUpdateQueue.next_attempt.asc()).limit(10)
-            
-            tasks = session.execute(stmt).scalars().all()
-            
+                tasks = session.execute(assisted_priority_stmt).scalars().all()
+                if not tasks:
+                    stmt = (
+                        select(MatchUpdateQueue)
+                        .where(
+                            and_(
+                                base_conditions,
+                                MatchUpdateQueue.job_type != "current_season_bootstrap",
+                            )
+                        )
+                        .order_by(MatchUpdateQueue.priority.desc(), MatchUpdateQueue.next_attempt.asc())
+                        .limit(task_limit)
+                    )
+            else:
+                stmt = (
+                    select(MatchUpdateQueue)
+                    .where(base_conditions)
+                    .order_by(MatchUpdateQueue.priority.desc(), MatchUpdateQueue.next_attempt.asc())
+                    .limit(task_limit)
+                )
+
+            if stmt is not None:
+                tasks = session.execute(stmt).scalars().all()
             if not tasks:
                 return
-                
-            logger.info(f"Processing {len(tasks)} pending refresh tasks...")
+
+            logger.info(
+                "Processing %s pending refresh tasks%s...",
+                len(tasks),
+                " in conservative assisted mode" if assisted_active else "",
+            )
             
-            # To avoid redundant scraping, group by player.
+            # To avoid redundant scraping, group by Transfermarkt profile first.
             player_tasks = {}
             for t in tasks:
-                if t.player_id not in player_tasks:
-                    player_tasks[t.player_id] = []
-                player_tasks[t.player_id].append(t)
+                player = session.get(Player, t.player_id)
+                group_key = str(player.tm_id) if player and player.tm_id else t.player_id
+                if group_key not in player_tasks:
+                    player_tasks[group_key] = []
+                player_tasks[group_key].append(t)
             
-            for p_id, p_tasks in player_tasks.items():
-                logger.info(f"Refreshing Transfermarkt for player {p_id}...")
-                success = self.tm_manager.refresh_player_data(p_id)
+            consecutive_hard_blocks = 0
+            hard_block_limit = 1 if assisted_active else 3
+            for group_key, p_tasks in player_tasks.items():
+                seed_task = p_tasks[0]
+                p_id = seed_task.player_id
                 player = session.get(Player, p_id)
+                logger.info(f"Refreshing Transfermarkt for player {p_id} (group={group_key})...")
+                job_types = {t.job_type for t in p_tasks}
+                if "user_priority_refresh" in job_types:
+                    mode = "user_priority_refresh"
+                elif "current_season_bootstrap" in job_types:
+                    mode = "current_season_bootstrap"
+                elif "upcoming_opponent_refresh" in job_types:
+                    mode = "upcoming_opponent_refresh"
+                else:
+                    mode = "post_match_history"
+                success = self.refresh_manager.refresh_player(
+                    p_id,
+                    mode=mode,
+                    player_name=player.name if player else "",
+                    team=getattr(getattr(player, "current_team", None), "name", "") if player else "",
+                )
+                hard_http_status = self.refresh_manager.last_http_status
+                hard_block_reason = self.refresh_manager.last_block_reason
+                fresh_cache_hit = self.refresh_manager.last_result_source == "cache" and self.refresh_manager.last_cache_fresh
                 latest_match = session.execute(
                     select(MatchHistory)
                     .where(MatchHistory.player_id == p_id)
                     .order_by(MatchHistory.date.desc())
                     .limit(1)
                 ).scalar_one_or_none()
-                latest_seen = latest_match.date if latest_match else None
+                latest_seen = self._to_naive_utc(latest_match.date) if latest_match else None
                 
                 # Update task statuses
                 for t in p_tasks:
                     if t.job_type == "post_match_history" and t.fixture_id:
                         fix = session.get(Fixture, t.fixture_id)
+                        fixture_date_utc = self._to_naive_utc(fix.date_utc) if fix else None
                         history_exists = session.execute(
                             select(MatchHistory).where(
                                 and_(
                                     MatchHistory.player_id == t.player_id,
-                                    MatchHistory.date >= fix.date_utc - timedelta(hours=12),
-                                    MatchHistory.date <= fix.date_utc + timedelta(hours=12)
+                                    MatchHistory.date >= fixture_date_utc - timedelta(hours=12),
+                                    MatchHistory.date <= fixture_date_utc + timedelta(hours=12)
                                 )
                             )
                         ).scalar_one_or_none()
@@ -402,6 +487,9 @@ class MatchWatcher:
                         t.status = "COMPLETED"
                         t.tm_status = "READY"
                         logger.info(f"✓ Task completed for {t.player_id} ({t.job_type})")
+                        self.runtime.record_success(
+                            metadata={"player_id": t.player_id, "job_type": t.job_type}
+                        )
                         self._mark_refresh_state(
                             session,
                             t.player_id,
@@ -409,6 +497,39 @@ class MatchWatcher:
                             last_match_seen_date=latest_seen,
                             include_profile=t.job_type in {"user_priority_refresh", "season_stats_refresh"},
                         )
+                    elif hard_http_status == 405:
+                        t.status = "FAILED"
+                        t.tm_status = "BLOCKED"
+                        t.last_attempt = now
+                        t.retry_after = now + timedelta(hours=24)
+                        self._mark_refresh_state(
+                            session,
+                            t.player_id,
+                            ok=False,
+                            error=hard_block_reason or f"HTTP 405 on {t.job_type}",
+                            defer_until=t.retry_after,
+                            status_override="BLOCKED",
+                        )
+                        self.runtime.record_failure(
+                            reason=hard_block_reason or f"HTTP 405 on {t.job_type}",
+                            hard_block=True,
+                        )
+                        logger.warning(f"❌ Hard TM failure (405) for {t.player_id} ({t.job_type}); not retrying in this cycle.")
+                    elif fresh_cache_hit:
+                        t.last_attempt = now
+                        t.status = "DEFERRED"
+                        t.tm_status = "READY"
+                        t.next_attempt = now + timedelta(hours=12)
+                        t.retry_after = t.next_attempt
+                        self._mark_refresh_state(
+                            session,
+                            t.player_id,
+                            ok=False,
+                            error=f"Fresh cache hit for {t.job_type}",
+                            defer_until=t.next_attempt,
+                            status_override="READY",
+                        )
+                        logger.info(f"Fresh Transfermarkt cache already checked today for {t.player_id}; deferring until {t.next_attempt}.")
                     else:
                         t.attempt_count += 1
                         t.last_attempt = now
@@ -434,8 +555,15 @@ class MatchWatcher:
                             logger.info(f"TM data not ready for {t.player_id}. Retry {t.attempt_count} scheduled at {t.next_attempt}")
                 
                 session.commit()
-                # Sleep briefly between players to be polite to TM
-                time.sleep(2)
+                if hard_http_status == 405:
+                    consecutive_hard_blocks += 1
+                    if consecutive_hard_blocks >= hard_block_limit:
+                        logger.warning("Transfermarkt circuit breaker opened after %s consecutive hard blocks. Stopping this cycle early.", consecutive_hard_blocks)
+                        break
+                else:
+                    consecutive_hard_blocks = 0
+                # Sleep longer during assisted mode to reduce WAF pressure.
+                time.sleep(6 if assisted_active else 2)
                 
         finally:
             session.close()

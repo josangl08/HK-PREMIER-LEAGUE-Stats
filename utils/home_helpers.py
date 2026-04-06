@@ -9,6 +9,93 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
+def _status_card(title, children, *, badge=None, color="light"):
+    header_children = [html.Span(title)]
+    if badge is not None:
+        header_children.append(html.Span(badge, className="ms-auto"))
+    return dbc.Card(
+        [
+            dbc.CardHeader(
+                html.Div(header_children, className="d-flex align-items-center"),
+                className="bg-transparent",
+            ),
+            dbc.CardBody(children),
+        ],
+        color=color,
+        outline=False,
+        className="h-100 glass-card home-status-card",
+    )
+
+
+def create_transfermarkt_runtime_section(tm_runtime_status, queue_summary=None):
+    """Detailed Transfermarkt runtime state for admin/home."""
+    if not tm_runtime_status:
+        return None
+
+    mode = tm_runtime_status.get("mode", "NORMAL")
+    status = tm_runtime_status.get("status", "READY")
+    failure_count = tm_runtime_status.get("failure_count", 0)
+    color_map = {
+        "NORMAL": "success",
+        "RECOVERING": "info",
+        "ASSISTED_ACTIVE": "primary",
+        "DEGRADED": "warning",
+        "BLOCKED": "danger",
+    }
+    badge_color = color_map.get(mode, "secondary")
+    show_block_history = mode in {"BLOCKED", "DEGRADED"}
+
+    queue_lines = []
+    if queue_summary:
+        for label, value in queue_summary:
+            queue_lines.append(html.Small(f"• {label}: {value}"))
+            queue_lines.append(html.Br())
+        if queue_lines:
+            queue_lines.pop()
+
+    return _status_card(
+        "Transfermarkt Runtime",
+        [
+            html.Div(
+                [
+                    html.Div(
+                        [
+                            html.Small("Mode", className="text-muted d-block mb-1"),
+                            dbc.Badge(mode, color=badge_color),
+                        ],
+                        className="me-4",
+                    ),
+                    html.Div(
+                        [
+                            html.Small("Status", className="text-muted d-block mb-1"),
+                            dbc.Badge(status or "UNKNOWN", color="secondary"),
+                        ]
+                    ),
+                ],
+                className="d-flex align-items-start mb-3",
+            ),
+            html.Small(f"Failures: {failure_count}"),
+            html.Br(),
+            html.Small(f"Last success: {format_datetime(tm_runtime_status.get('last_success_at'))}"),
+            html.Br(),
+            html.Small(f"Last failure: {format_datetime(tm_runtime_status.get('last_failure_at'))}"),
+            html.Br(),
+            html.Small(f"Blocked at: {format_datetime(tm_runtime_status.get('blocked_at')) if show_block_history else '—'}"),
+            html.Br(),
+            html.Small(f"Cooldown until: {format_datetime(tm_runtime_status.get('cooldown_until'))}"),
+            html.Br(),
+            html.Small(f"Assisted loaded: {format_datetime(tm_runtime_status.get('assisted_session_loaded_at'))}"),
+            html.Br(),
+            html.Small(f"Assisted expires: {format_datetime(tm_runtime_status.get('assisted_session_expires_at'))}"),
+            html.Br(),
+            html.Small(f"Reason: {tm_runtime_status.get('block_reason') or '—'}"),
+            html.Hr(className="my-3"),
+            html.Div([html.Strong("Queue")], className="mb-2"),
+            *(queue_lines or [html.Small("• No queued jobs")]),
+        ],
+    )
+
 def create_performance_section(performance_status):
     """
     Crea la sección de información de performance.
@@ -30,17 +117,15 @@ def create_performance_section(performance_status):
         for s in available_seasons
     ]
     
-    return dbc.ListGroupItem([
-        html.Div([
-            html.Strong("⚽ PERFORMANCE DATA"),
-            html.Hr(className="my-2"),
-            html.Strong("🗓️ Temporada actual: "),
-            dbc.Badge(format_season_short(current_season), color="primary", className="ms-1 mb-2"),
-            html.Br(),
-            html.Small("Disponibles: ", className="me-1"),
-            html.Span(available_seasons_badges)
-        ])
-    ])
+    return _status_card(
+        "Performance Data",
+        [
+            html.Small("Current season"),
+            html.Div(dbc.Badge(format_season_short(current_season), color="primary", className="mt-1"), className="mb-3"),
+            html.Small("Available seasons"),
+            html.Div(available_seasons_badges, className="mt-1"),
+        ],
+    )
 
 def create_performance_status_section(performance_status):
     """
@@ -70,18 +155,14 @@ def create_performance_status_section(performance_status):
     else:
         performance_info = [html.Small("⚠️ Sin datos de performance")]
     
-    return dbc.ListGroupItem([
-        html.Div([
-            html.Strong("📋 Estado Performance: "),
-            dbc.Badge(
-                "Disponible" if performance_data_available else "No disponible", 
-                color="success" if performance_data_available else "danger",
-                className="ms-2"
-            ),
-            html.Br(),
-            *performance_info
-        ])
-    ])
+    return _status_card(
+        "Performance Status",
+        performance_info,
+        badge=dbc.Badge(
+            "Available" if performance_data_available else "Unavailable",
+            color="success" if performance_data_available else "danger",
+        ),
+    )
 
 def create_injuries_section(injuries_data, injuries_stats, transfermarkt_manager):
     """
@@ -95,6 +176,7 @@ def create_injuries_section(injuries_data, injuries_stats, transfermarkt_manager
     Returns:
         dbc.ListGroupItem: Item con información de lesiones
     """
+    runtime = transfermarkt_manager.get_injuries_runtime_status() if hasattr(transfermarkt_manager, "get_injuries_runtime_status") else {}
     injuries_available = len(injuries_data) > 0
     injuries_teams = transfermarkt_manager.get_teams_with_injuries() if injuries_available else []
     
@@ -103,7 +185,15 @@ def create_injuries_section(injuries_data, injuries_stats, transfermarkt_manager
     formatted_date_injuries = format_datetime(last_update_injuries)
     
     injuries_info = []
-    if injuries_available:
+    if not runtime.get("supported", True):
+        injuries_info = [
+            html.Small("⚠️ Scraper unavailable in current extractor"),
+            html.Br(),
+            html.Small("Stored records: 0"),
+            html.Br(),
+            html.Small("Status: monitoring disabled"),
+        ]
+    elif injuries_available:
         active_injuries = injuries_stats.get('active_injuries', 0)
         injuries_info = [
             html.Small(f"📊 {len(injuries_data)} lesiones registradas"),
@@ -118,23 +208,27 @@ def create_injuries_section(injuries_data, injuries_stats, transfermarkt_manager
         injuries_info = [
             html.Small("⚠️ Sin datos de lesiones"),
             html.Br(),
-            html.Small(f"🕐 Último intento: {formatted_date_injuries}")
+            html.Small(f"🕐 Último intento: {formatted_date_injuries}"),
+            html.Br(),
+            html.Small(runtime.get("message", "No injuries data available")),
         ]
     
-    return dbc.ListGroupItem([
-        html.Div([
-            html.Strong("🏥 INJURIES DATA"),
-            html.Hr(className="my-2"),
-            html.Strong("📋 Estado Lesiones: "),
-            dbc.Badge(
-                "Disponible" if injuries_available else "No disponible", 
-                color="success" if injuries_available else "danger",
-                className="ms-2"
+    return _status_card(
+        "Injuries",
+        injuries_info,
+        badge=dbc.Badge(
+            (
+                "Unavailable"
+                if not runtime.get("supported", True)
+                else ("Available" if injuries_available else "No data")
             ),
-            html.Br(),
-            *injuries_info
-        ])
-    ])
+            color=(
+                "secondary"
+                if not runtime.get("supported", True)
+                else ("success" if injuries_available else "warning")
+            ),
+        ),
+    )
 
 def create_overall_status_section(performance_data_available, injuries_available, data_manager=None, transfermarkt_manager=None):
     """
@@ -190,9 +284,7 @@ def create_overall_status_section(performance_data_available, injuries_available
             html.Small("✅ All data is up to date", className="text-success")
         ])
     
-    return dbc.ListGroupItem([
-        html.Div(status_content)
-    ], color="light")
+    return _status_card("Overall Status", status_content)
 
 def create_update_results_section(performance_updated, injuries_updated, data_manager, transfermarkt_manager, update_errors):
     """
@@ -235,22 +327,28 @@ def create_update_results_section(performance_updated, injuries_updated, data_ma
         # Determinar si fue manual o automático basado en el contexto
         update_type = "Manual" if any("manual" in str(result).lower() for result in update_results) else "Automatic"
         
-        return dbc.ListGroupItem([
-            dbc.Alert([
-                html.Strong(f"✅ {update_type} Data Update Completed"),
-                html.Br(),
-                *[html.Div([html.Small(result)]) for result in update_results]
-            ], color="success", className="mb-0")
-        ])                                                                
+        return _status_card(
+            "Update Results",
+            [
+                dbc.Alert([
+                    html.Strong(f"✅ {update_type} Data Update Completed"),
+                    html.Br(),
+                    *[html.Div([html.Small(result)]) for result in update_results]
+                ], color="success", className="mb-0")
+            ],
+        )
     elif update_errors:
-        return dbc.ListGroupItem([
-            dbc.Alert([
-                html.Strong("⚠️ Partial Update"),
-                html.Br(),
-                html.Small("Some systems could not be updated"),
-                html.Br(),
-                *[html.Div([html.Small(f"• {error}")]) for error in update_errors]
-            ], color="warning", className="mb-0")
-        ])
+        return _status_card(
+            "Update Results",
+            [
+                dbc.Alert([
+                    html.Strong("⚠️ Partial Update"),
+                    html.Br(),
+                    html.Small("Some systems could not be updated"),
+                    html.Br(),
+                    *[html.Div([html.Small(f"• {error}")]) for error in update_errors]
+                ], color="warning", className="mb-0")
+            ],
+        )
     
     return None

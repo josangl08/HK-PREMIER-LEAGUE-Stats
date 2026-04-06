@@ -2,7 +2,10 @@
 Callbacks para la página home.
 Versión simplificada y modularizada.
 """
-from dash import Input, Output, callback
+import base64
+import json
+import re
+from dash import Input, Output, State, callback, ctx, no_update
 import dash_bootstrap_components as dbc
 from dash import html
 from utils.app_context import (
@@ -18,11 +21,17 @@ from utils.home_helpers import (
     create_performance_status_section,
     create_injuries_section,
     create_overall_status_section,
-    create_update_results_section
+    create_update_results_section,
+    create_transfermarkt_runtime_section,
 )
+from data.managers.transfermarkt_runtime_manager import TransfermarktRuntimeManager
+from models.db_models import MatchUpdateQueue
+from scripts.background_match_watcher import MatchWatcher
 import logging
 from datetime import datetime
 import time
+from sqlalchemy import func, select
+from utils.db_engine import SessionFactory
 
 # Configurar logging
 logger = logging.getLogger(__name__)
@@ -96,6 +105,8 @@ def update_injuries_data(transfermarkt_manager, force_update=False):
         tuple: (success, error_message)
     """
     try:
+        if hasattr(transfermarkt_manager, "supports_injuries_scraping") and not transfermarkt_manager.supports_injuries_scraping():
+            return False, "Transfermarkt injuries scraper is not implemented in the current extractor"
         if force_update:
             transfermarkt_manager._save_manual_update_timestamp(datetime.now())
         
@@ -117,10 +128,11 @@ def update_injuries_data(transfermarkt_manager, force_update=False):
 @callback(
     Output('system-status-info', 'children'),
     [Input('refresh-data-button', 'n_clicks'),
-    Input('url', 'pathname')],
+    Input('url', 'pathname'),
+    Input('tm-admin-refresh-trigger', 'data')],
     prevent_initial_call=False
 )
-def update_system_status(n_clicks, pathname):
+def update_system_status(n_clicks, pathname, _tm_refresh_trigger):
     """
     Callback principal que actualiza la información del estado del sistema.
     Versión optimizada sin verificaciones duplicadas.
@@ -211,32 +223,72 @@ def update_system_status(n_clicks, pathname):
         performance_data_available = len(cached_seasons) > 0
         injuries_available = len(injuries_data) > 0
         
-        # Crear secciones usando las funciones auxiliares
-        status_items = []
-        
-        # Sección de performance
-        status_items.append(create_performance_section(performance_status))
-        status_items.append(create_performance_status_section(performance_status))
-        
-        # Sección de injuries
-        status_items.append(create_injuries_section(injuries_data, injuries_stats, tm))
-        
-        # Estado general
-        status_items.append(create_overall_status_section(
+        performance_card = create_performance_section(performance_status)
+        performance_status_card = create_performance_status_section(performance_status)
+        injuries_card = create_injuries_section(injuries_data, injuries_stats, tm)
+        runtime = TransfermarktRuntimeManager()
+        tm_runtime = runtime.get_status()
+        with get_transfermarkt_runtime_queue_session() as session:
+            queue_rows = session.execute(
+                select(MatchUpdateQueue.job_type, MatchUpdateQueue.status, func.count())
+                .group_by(MatchUpdateQueue.job_type, MatchUpdateQueue.status)
+                .order_by(MatchUpdateQueue.job_type, MatchUpdateQueue.status)
+            ).all()
+        queue_summary = [(f"{row[0]} / {row[1]}", row[2]) for row in queue_rows]
+        tm_runtime_card = create_transfermarkt_runtime_section({
+            "mode": tm_runtime.mode,
+            "status": tm_runtime.status,
+            "failure_count": tm_runtime.failure_count,
+            "last_success_at": tm_runtime.last_success_at,
+            "last_failure_at": tm_runtime.last_failure_at,
+            "blocked_at": tm_runtime.blocked_at,
+            "cooldown_until": tm_runtime.cooldown_until,
+            "assisted_session_loaded_at": tm_runtime.assisted_session_loaded_at,
+            "assisted_session_expires_at": tm_runtime.assisted_session_expires_at,
+            "block_reason": tm_runtime.block_reason,
+        }, queue_summary=queue_summary)
+        overall_card = create_overall_status_section(
             performance_data_available, 
             injuries_available, 
             dm,  # data_manager
             tm   # transfermarkt_manager    
-        ))
+        )
         
         # Resultados de actualización (manual o automática)
         update_results_item = create_update_results_section(
             performance_updated, injuries_updated, dm, tm, update_errors
         )
+        left_column = dbc.Col(
+            [
+                html.Div(performance_card, className="mb-3"),
+                html.Div(performance_status_card, className="mb-3"),
+                html.Div(injuries_card, className="mb-3"),
+                html.Div(overall_card, className="mb-3"),
+            ],
+            md=6,
+        )
+        right_column = dbc.Col(
+            [
+                html.Div(tm_runtime_card, className="mb-3"),
+            ],
+            md=6,
+        )
+
+        rows = [
+            dbc.Row(
+                [left_column, right_column],
+                className="g-3 align-items-start",
+            ),
+        ]
         if update_results_item:
-            status_items.append(update_results_item)
+            rows.append(
+                dbc.Row(
+                    [dbc.Col(update_results_item, md=12, className="mb-3")],
+                    className="g-3",
+                )
+            )
         
-        return dbc.ListGroup(status_items, flush=True)
+        return html.Div(rows)
         
     except Exception as e:
         # Error handler simplificado
@@ -250,3 +302,223 @@ def update_system_status(n_clicks, pathname):
             ],
             color="danger"
         )
+
+
+def get_transfermarkt_runtime_queue_session():
+    return SessionFactory()
+
+
+def _requeue_failed_tm_jobs() -> int:
+    with SessionFactory() as session:
+        failed_jobs = session.execute(
+            select(MatchUpdateQueue).where(MatchUpdateQueue.status == "FAILED")
+        ).scalars().all()
+        now = datetime.utcnow()
+        count = 0
+        for job in failed_jobs:
+            job.status = "PENDING"
+            job.tm_status = "READY"
+            job.retry_after = None
+            job.last_attempt = None
+            job.next_attempt = now
+            job.reason = (job.reason or "").strip() or "Requeued from admin"
+            count += 1
+        session.commit()
+        return count
+
+
+def _requeue_failed_tm_jobs_by_type(job_types: set[str]) -> int:
+    with SessionFactory() as session:
+        failed_jobs = session.execute(
+            select(MatchUpdateQueue).where(
+                MatchUpdateQueue.status == "FAILED",
+                MatchUpdateQueue.job_type.in_(tuple(job_types)),
+            )
+        ).scalars().all()
+        now = datetime.utcnow()
+        count = 0
+        for job in failed_jobs:
+            job.status = "PENDING"
+            job.tm_status = "READY"
+            job.retry_after = None
+            job.last_attempt = None
+            job.next_attempt = now
+            job.reason = (job.reason or "").strip() or "Requeued from admin"
+            count += 1
+        session.commit()
+        return count
+
+
+def _normalize_tm_cookie_payload(raw_value: str):
+    raw = (raw_value or "").strip()
+    if not raw:
+        return None, 0, "Paste a cookies payload to enable assisted mode."
+
+    # Try JSON first
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            if all(isinstance(v, str) for v in parsed.values()):
+                normalized = [{"name": k, "value": v} for k, v in parsed.items()]
+                return json.dumps(normalized), len(normalized), None
+            return json.dumps(parsed), len(parsed), None
+        if isinstance(parsed, list):
+            normalized = []
+            for item in parsed:
+                if isinstance(item, dict) and item.get("name") and item.get("value") is not None:
+                    normalized.append(
+                        {
+                            "name": item.get("name"),
+                            "value": item.get("value"),
+                            "domain": item.get("domain"),
+                            "path": item.get("path", "/"),
+                            "secure": bool(item.get("secure", True)),
+                        }
+                    )
+            if normalized:
+                return json.dumps(normalized), len(normalized), None
+            return None, 0, "JSON parsed, but no valid cookie items were found."
+    except json.JSONDecodeError:
+        pass
+
+    # Fallback: document.cookie / header style
+    pairs = []
+    for chunk in re.split(r";\s*", raw.replace("\n", ";")):
+        if not chunk or "=" not in chunk:
+            continue
+        name, value = chunk.split("=", 1)
+        name = name.strip()
+        value = value.strip()
+        if name:
+            pairs.append({"name": name, "value": value})
+    if pairs:
+        return json.dumps(pairs), len(pairs), None
+
+    return None, 0, "Unsupported cookie format. Use JSON export or a name=value cookie string."
+
+
+@callback(
+    Output("tm-assisted-cookies-input", "value"),
+    Input("tm-assisted-cookies-upload", "contents"),
+    State("tm-assisted-cookies-upload", "filename"),
+    prevent_initial_call=True,
+)
+def load_tm_cookie_file(contents, filename):
+    if not contents:
+        return no_update
+    try:
+        _, encoded = contents.split(",", 1)
+        decoded = base64.b64decode(encoded).decode("utf-8")
+        return decoded
+    except Exception as e:
+        logger.error(f"Could not decode uploaded TM cookies file {filename}: {e}")
+        return no_update
+
+
+@callback(
+    Output("tm-assisted-json-status", "children"),
+    Output("tm-assisted-normalized-payload", "data"),
+    Input("tm-assisted-cookies-input", "value"),
+    State("url", "pathname"),
+    prevent_initial_call=False,
+)
+def validate_tm_cookie_json(cookies_value, pathname):
+    if pathname != "/":
+        return None, None
+    normalized, count, error = _normalize_tm_cookie_payload(cookies_value or "")
+    if error:
+        cls = "text-muted" if not cookies_value else "text-warning"
+        return html.Small(error, className=cls), None
+    return html.Small(f"Valid cookies payload detected ({count} cookies).", className="text-success"), normalized
+
+
+@callback(
+    Output("tm-assisted-session-indicator", "children"),
+    Input("url", "pathname"),
+    Input("tm-admin-refresh-trigger", "data"),
+    prevent_initial_call=False,
+)
+def update_tm_assisted_indicator(pathname, _refresh):
+    if pathname != "/":
+        return None
+    runtime = TransfermarktRuntimeManager()
+    status = runtime.get_status()
+    has_cookies = bool(runtime.get_cookie_payload())
+    if has_cookies:
+        expiry = format_datetime(status.assisted_session_expires_at)
+        return html.Div([
+            html.Small("Assisted session: "),
+            dbc.Badge("Loaded", color="success", className="ms-1"),
+            html.Small(f"Expires: {expiry}", className="ms-2 text-muted"),
+        ])
+    return html.Div([
+        html.Small("Assisted session: "),
+        dbc.Badge("Not loaded", color="secondary", className="ms-1"),
+    ])
+
+
+@callback(
+    Output("tm-admin-action-status", "children"),
+    Output("tm-admin-refresh-trigger", "data"),
+    Input("tm-assisted-load-btn", "n_clicks"),
+    Input("tm-assisted-run-btn", "n_clicks"),
+    Input("tm-assisted-requeue-btn", "n_clicks"),
+    Input("tm-assisted-clear-btn", "n_clicks"),
+    State("tm-assisted-cookies-input", "value"),
+    State("tm-assisted-normalized-payload", "data"),
+    State("tm-assisted-scope", "value"),
+    State("tm-assisted-expires-hours", "value"),
+    State("url", "pathname"),
+    prevent_initial_call=True,
+)
+def handle_tm_admin_actions(load_clicks, run_clicks, requeue_clicks, clear_clicks, cookies_value, normalized_payload, scope, expires_hours, pathname):
+    if pathname != "/":
+        return no_update, no_update
+
+    action = ctx.triggered_id
+    runtime = TransfermarktRuntimeManager()
+
+    try:
+        if action == "tm-assisted-load-btn":
+            if not normalized_payload:
+                return dbc.Alert("Paste or upload a valid cookies payload first.", color="warning", className="mb-0"), no_update
+            runtime.store_cookie_payload(normalized_payload, created_by="admin-ui")
+            runtime.activate_assisted_mode(expires_in_hours=int(expires_hours or 12))
+            return dbc.Alert("Transfermarkt assisted session loaded.", color="success", className="mb-0"), datetime.now().isoformat()
+
+        if action == "tm-assisted-clear-btn":
+            runtime.clear_cookie_payload()
+            runtime.deactivate_assisted_mode()
+            return dbc.Alert("Transfermarkt assisted session cleared.", color="secondary", className="mb-0"), datetime.now().isoformat()
+
+        if action == "tm-assisted-requeue-btn":
+            requeued = _requeue_failed_tm_jobs()
+            return dbc.Alert(f"Requeued {requeued} failed Transfermarkt jobs.", color="info", className="mb-0"), datetime.now().isoformat()
+
+        if action == "tm-assisted-run-btn":
+            if not runtime.get_cookie_payload():
+                return dbc.Alert("No assisted cookies loaded. Load a valid session first.", color="warning", className="mb-0"), no_update
+            runtime.activate_assisted_mode(expires_in_hours=int(expires_hours or 12))
+            watcher = MatchWatcher()
+            if scope in {"priority", "all"}:
+                requeued = _requeue_failed_tm_jobs_by_type({"post_match_history", "user_priority_refresh"})
+                watcher.discover_finished_matches()
+                watcher.enqueue_user_priority_refresh()
+            if scope in {"users", "all"}:
+                watcher.enqueue_user_priority_refresh()
+            if scope in {"post-match", "all"}:
+                watcher.discover_finished_matches()
+            if scope == "all":
+                watcher.enqueue_upcoming_opponents()
+            if scope == "all":
+                watcher.enqueue_current_season_bootstrap()
+            watcher.process_queue()
+            message = f"Assisted refresh executed for scope '{scope}'."
+            if scope == "priority":
+                message += f" Requeued {requeued} failed priority jobs."
+            return dbc.Alert(message, color="info", className="mb-0"), datetime.now().isoformat()
+    except Exception as e:
+        logger.error(f"Error handling TM admin action: {e}")
+        return dbc.Alert(f"Transfermarkt action failed: {e}", color="danger", className="mb-0"), datetime.now().isoformat()
+
+    return no_update, no_update

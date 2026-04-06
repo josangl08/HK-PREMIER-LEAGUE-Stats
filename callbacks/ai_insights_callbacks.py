@@ -266,17 +266,28 @@ def update_predictor_panel(n_clicks, player_name, target_metric, model_type):
             from sklearn.preprocessing import StandardScaler as _SS
 
             kmeans_model = registry.load("kmeans_overall_k5")
-            lens_keywords = FEATURE_LENSES.get("overall", [])
-            meta_cols_set = {"Player", "Season", "Team", "Position", "player_name"}
-            all_num_cols = [
-                c for c in df_eng.columns
-                if c not in meta_cols_set and pd.api.types.is_numeric_dtype(df_eng[c])
-            ]
-            cluster_cols = (
-                [c for c in all_num_cols if any(kw in c.lower() for kw in lens_keywords)]
-                or all_num_cols
-            )
-            X_all = df_eng[cluster_cols].fillna(0).values
+            # LOAD metadata to sync features and avoid warning
+            reg_data = registry._load_registry()
+            cluster_cols = reg_data.get("kmeans_overall_k5", {}).get("latest", {}).get("features")
+            
+            if not cluster_cols:
+                lens_keywords = FEATURE_LENSES.get("overall", [])
+                meta_cols_set = {"Player", "Season", "Team", "Position", "player_name"}
+                all_num_cols = [
+                    c for c in df_eng.columns
+                    if c not in meta_cols_set and pd.api.types.is_numeric_dtype(df_eng[c])
+                ]
+                cluster_cols = (
+                    [c for c in all_num_cols if any(kw in c.lower() for kw in lens_keywords)]
+                    or all_num_cols
+                )
+            
+            # Align df_eng with expected features
+            X_all_df = df_eng[[c for c in cluster_cols if c in df_eng.columns]].fillna(0).copy()
+            for mc in cluster_cols:
+                if mc not in X_all_df.columns: X_all_df[mc] = 0.0
+            
+            X_all = X_all_df[cluster_cols].values
             X_all_scaled = _SS().fit_transform(X_all)
             all_clusters = kmeans_model.predict(X_all_scaled)
 
@@ -294,7 +305,8 @@ def update_predictor_panel(n_clicks, player_name, target_metric, model_type):
             if target_metric in cluster_df.columns:
                 cluster_avg = cluster_df[target_metric].dropna().mean()
                 archetype_line = f"Plays like a '{arch_name}' — avg {target_metric} for this archetype: {cluster_avg:.1f}"
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Predictor archetype context skipped: {e}")
             pass  # Silently skip if kmeans model not in registry
 
         # ── Build result card ─────────────────────────────────────────────────

@@ -353,6 +353,36 @@ class SystemSyncLog(Base):
     details: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON)
 
 
+class ExternalSourceStatus(Base):
+    __tablename__ = "external_source_status"
+
+    source: Mapped[str] = mapped_column(String(50), primary_key=True)  # transfermarkt
+    mode: Mapped[str] = mapped_column(String(30), default="NORMAL")  # NORMAL, DEGRADED, BLOCKED, ASSISTED_ACTIVE, RECOVERING
+    status: Mapped[Optional[str]] = mapped_column(String(30))  # READY, BLOCKED, DEGRADED, ASSISTED
+    blocked_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    last_success_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    last_failure_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    failure_count: Mapped[int] = mapped_column(Integer, default=0)
+    block_reason: Mapped[Optional[str]] = mapped_column(Text)
+    cooldown_until: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    assisted_session_loaded_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    assisted_session_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    metadata_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON)
+
+
+class ExternalSourceCredential(Base):
+    __tablename__ = "external_source_credentials"
+
+    source: Mapped[str] = mapped_column(String(50), primary_key=True)  # transfermarkt
+    credential_type: Mapped[str] = mapped_column(String(30), default="cookies_json")
+    secret_payload: Mapped[Optional[str]] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    created_by: Mapped[Optional[str]] = mapped_column(String(100))
+    metadata_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON)
+
+
 class PlayerRefreshState(Base):
     __tablename__ = "player_refresh_state"
 
