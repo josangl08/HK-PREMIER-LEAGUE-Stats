@@ -2977,12 +2977,12 @@ def render_pre_match(
         extra_class: str = "",
     ) -> dbc.Card:
         base_style = {
-            "background": "linear-gradient(180deg, rgba(255,255,255,0.085) 0%, rgba(255,255,255,0.035) 18%, rgba(31,35,50,0.12) 100%)",
-            "border": f"1px solid rgba({_hex_to_rgb(accent)}, 0.20)",
+            "background": "linear-gradient(180deg, rgba(255,255,255,0.11) 0%, rgba(255,255,255,0.05) 26%, rgba(20,24,34,0.045) 100%)",
+            "border": f"1px solid rgba({_hex_to_rgb(accent)}, 0.14)",
             "borderRadius": "22px",
-            "boxShadow": "0 10px 18px rgba(0,0,0,0.07), 0 4px 10px rgba(0,0,0,0.04)",
-            "backdropFilter": "blur(22px) saturate(120%)",
-            "WebkitBackdropFilter": "blur(22px) saturate(120%)",
+            "boxShadow": "0 8px 16px rgba(0,0,0,0.05), 0 3px 8px rgba(0,0,0,0.03)",
+            "backdropFilter": "blur(20px)",
+            "WebkitBackdropFilter": "blur(20px)",
             "position": "relative",
             "overflow": "hidden",
         }
