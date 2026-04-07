@@ -137,18 +137,21 @@ class HKPLSyncManager:
                 player = session.get(Player, player_id)
                 
                 # Update basic player info
+                is_current_season_sync = season_id == get_current_season()
+
                 if not player:
                     player = Player(
                         id=player_id,
                         name=player_name,
-                        current_team_id=team.id,
+                        current_team_id=team.id if is_current_season_sync else None,
                         position_main=None,
                         age=int(row.get('Age', 0)) if pd.notna(row.get('Age')) else 0
                     )
                     session.add(player)
                     session.flush()
                 else:
-                    player.current_team_id = team.id
+                    if is_current_season_sync:
+                        player.current_team_id = team.id
                     if pd.notna(row.get('Age')):
                         player.age = int(row.get('Age'))
 
@@ -177,6 +180,15 @@ class HKPLSyncManager:
                     'Season', 'Age', 'Position_Group', 'Position_Clean'
                 }
                 advanced = {k: v for k, v in row.to_dict().items() if k not in exclude_keys and pd.notna(v)}
+                # Persist a stable season-team marker for every season.
+                season_team = (
+                    row.get('Team within selected timeframe')
+                    or row.get('Team')
+                    or team_name
+                )
+                if pd.notna(season_team) and str(season_team).strip():
+                    advanced["season_team"] = str(season_team).strip()
+                    advanced.setdefault("Team within selected timeframe", str(season_team).strip())
 
                 if not stat:
                     stat = PlayerSeasonStat(

@@ -13,6 +13,21 @@ from data.validators.advanced_metrics_validator import AdvancedMetricsValidator
 
 logger = logging.getLogger(__name__)
 
+_TEAM_NAME_ALIASES = {
+    "north dt.": "north district",
+    "north district": "north district",
+    "eastern dist.": "eastern district",
+    "eastern district": "eastern district",
+    "hkfc": "hong kong football club",
+    "hong kong football club": "hong kong football club",
+}
+
+
+def _normalize_team_name_for_h2h(value: str) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"\s+", " ", text)
+    return _TEAM_NAME_ALIASES.get(text, text)
+
 class HongKongStatsAggregator:
     """
     Agregador de estadísticas para la Liga de Hong Kong.
@@ -1422,7 +1437,7 @@ def _parse_h2h_match(opponent_field: str, result: str) -> Optional[Dict]:
     }
 
 
-def get_h2h_record(team_a: str, team_b: str, last_n: int = 3) -> Dict:
+def get_h2h_record(team_a: str, team_b: str, last_n: Optional[int] = None) -> Dict:
     """
     Returns head-to-head record for team_a vs team_b from local historical records.
 
@@ -1432,13 +1447,13 @@ def get_h2h_record(team_a: str, team_b: str, last_n: int = 3) -> Dict:
     Args:
         team_a: English team name (home team perspective for W/D/L).
         team_b: English team name.
-        last_n: Maximum number of most recent matches to consider.
+        last_n: Maximum number of most recent matches to consider. `None` uses full record.
 
     Returns:
         Dict with wins, draws, losses (from team_a's perspective), matches_found.
     """
-    team_a_lower = team_a.lower()
-    team_b_lower = team_b.lower()
+    team_a_lower = _normalize_team_name_for_h2h(team_a)
+    team_b_lower = _normalize_team_name_for_h2h(team_b)
 
     # Collect unique matches keyed by (date, opponent_field) to avoid duplicates
     seen: Dict[str, Dict] = {}
@@ -1455,8 +1470,8 @@ def get_h2h_record(team_a: str, team_b: str, last_n: int = 3) -> Dict:
                 if not parsed:
                     continue
 
-                h_lower = parsed["home_team"].lower()
-                a_lower = parsed["away_team"].lower()
+                h_lower = _normalize_team_name_for_h2h(parsed["home_team"])
+                a_lower = _normalize_team_name_for_h2h(parsed["away_team"])
 
                 # Check if both teams are in this match
                 teams_in_match = {h_lower, a_lower}
@@ -1465,12 +1480,13 @@ def get_h2h_record(team_a: str, team_b: str, last_n: int = 3) -> Dict:
                     if key not in seen:
                         seen[key] = {**parsed, "date": m.get("date", "")}
 
-    # Sort by date (most recent first) and take last_n
-    matches = sorted(seen.values(), key=lambda x: x.get("date", ""), reverse=True)[:last_n]
+    matches = sorted(seen.values(), key=lambda x: x.get("date", ""), reverse=True)
+    if last_n is not None:
+        matches = matches[:last_n]
 
     wins = draws = losses = 0
     for m in matches:
-        h_lower = m["home_team"].lower()
+        h_lower = _normalize_team_name_for_h2h(m["home_team"])
         hs, as_ = m["home_score"], m["away_score"]
 
         if h_lower == team_a_lower:

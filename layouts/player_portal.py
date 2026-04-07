@@ -71,6 +71,21 @@ def _build_timeline_column() -> html.Div:
                     dcc.Loading(
                         id="timeline-loading",
                         type="dot",
+                        delay_show=250,
+                        color="var(--accent-cyan)",
+                        parent_className="timeline-loading-parent",
+                        parent_style={"width": "100%", "display": "block"},
+                        style={"width": "100%", "display": "block"},
+                        overlay_style={
+                            "visibility": "visible",
+                            "filter": "none",
+                            "background": "transparent",
+                            "display": "flex",
+                            "alignItems": "flex-start",
+                            "justifyContent": "flex-end",
+                            "padding": "6px 8px",
+                        },
+                        className="timeline-loading-frame",
                         children=html.Div(
                             id="timeline-milestones",
                             children=[create_skeleton_timeline(8)],
@@ -83,9 +98,10 @@ def _build_timeline_column() -> html.Div:
 
 
 def _build_stage_column() -> html.Div:
-    """Stage column: back button (mobile only) + dynamic stage content."""
+    """Stage column: back button (mobile only) + dynamic stage content + overlay containers."""
     return html.Div(
         className="stage-column px-3 pb-3",
+        style={"position": "relative"},
         children=[
             dcc.Store(id="timeline-context-store"),
             dcc.Store(id="stage-context-snapshot"),
@@ -115,20 +131,37 @@ def _build_stage_column() -> html.Div:
             ),
             dcc.Loading(
                 id="stage-loading",
-                type="circle",
-                color="var(--bs-primary)",
+                type="dot",
+                delay_show=250,
+                color="var(--accent-cyan)",
+                parent_className="stage-loading-parent",
+                parent_style={"width": "100%", "display": "block"},
+                style={"width": "100%", "display": "block"},
+                overlay_style={
+                    "visibility": "visible",
+                    "filter": "none",
+                    "background": "transparent",
+                    "display": "flex",
+                    "alignItems": "flex-start",
+                    "justifyContent": "flex-end",
+                    "padding": "8px 10px",
+                },
+                className="stage-loading-frame mb-3",
                 children=html.Div(
                     id="stage-shell",
                     className="glass-card glass-career stage-shell",
                     children=html.Div(
                         id="stage-content",
-                        className="stage-inner",
+                        className="stage-frame",
                         children=[create_skeleton_stage()],
                     ),
                 ),
-                className="mb-3",
             ),
             html.Div(id="stage-decision-nodes"),
+            # ── T1 overlay: initially hidden, shown by portal-load callback ──────
+            html.Div(id="ai-overlay-t1-container", style={"display": "none"}),
+            # ── T2 overlays: absolute-positioned cards over stage column ─────────
+            html.Div(id="ai-overlay-t2-container"),
         ],
     )
 
@@ -146,6 +179,7 @@ def create_player_portal_layout(user_role: str = "player") -> html.Div:
             dcc.Store(id="selected-year-store", data=None),
             dcc.Store(id="year-nav-scroll-dummy"),
             dcc.Store(id="year-timeline-scroll-dummy"),
+            dcc.Store(id="prematch-h2h-scroll-dummy"),
             dcc.Store(id="portal-panel-state", data={"panel": "timeline"}),
             dcc.Store(id="timeline-expand-store", data=[]),
             dcc.Store(id="active-year-store", data=None),
@@ -157,6 +191,10 @@ def create_player_portal_layout(user_role: str = "player") -> html.Div:
             dcc.Store(id="player-photos-store", storage_type="local"),
             # Triggers post-generation gallery refresh or download
             dcc.Store(id="card-generation-trigger"),
+            # Career Intelligence overlay stores
+            dcc.Store(id="insight-session-state", storage_type="local"),
+            dcc.Store(id="t2-overlay-queue", storage_type="session"),
+            dcc.Store(id="t1-signal-store", storage_type="session"),
             # Polls sync status for newly registered players (stops after data is ready)
             dcc.Interval(id="sync-poll-interval", interval=8000, n_intervals=0, max_intervals=30, disabled=True),
 
@@ -176,6 +214,30 @@ def create_player_portal_layout(user_role: str = "player") -> html.Div:
                 ),
                 fluid=True,
                 className="py-0 px-0",
+            ),
+            dbc.Modal(
+                [
+                    dbc.ModalHeader(dbc.ModalTitle(id="season-asset-modal-title"), close_button=True),
+                    dbc.ModalBody(
+                        html.Div(
+                            html.Img(
+                                id="season-asset-modal-image",
+                                style={
+                                    "maxWidth": "100%",
+                                    "maxHeight": "70vh",
+                                    "objectFit": "contain",
+                                    "display": "block",
+                                    "margin": "0 auto",
+                                },
+                            ),
+                            className="text-center",
+                        )
+                    ),
+                ],
+                id="season-asset-modal",
+                is_open=False,
+                centered=True,
+                size="lg",
             ),
         ],
     )

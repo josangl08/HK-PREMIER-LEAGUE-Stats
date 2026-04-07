@@ -200,6 +200,13 @@ if not is_werkzeug_reloader_process():
     except ImportError as e:
         logger.info(f"⚠️ Card Editor callbacks no disponibles: {e}")
 
+    try:
+        from callbacks.player_portal_callbacks import register_career_intelligence_callbacks
+        register_career_intelligence_callbacks(app)
+        logger.info("✓ Career Intelligence overlay callbacks registrados")
+    except ImportError as e:
+        logger.info(f"⚠️ Career Intelligence callbacks no disponibles: {e}")
+
     logger.info("✓ Callbacks importados correctamente.")
 
     # Obtener nombres de jugadores para el Store global

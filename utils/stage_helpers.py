@@ -5,6 +5,8 @@ import logging
 import os
 import threading
 import html as _html_lib
+import re
+from datetime import timezone, timedelta
 from pathlib import Path
 import pandas as pd
 import numpy as np
@@ -45,6 +47,43 @@ def _clean_url(url: str) -> str:
     if not url:
         return url
     return _html_lib.unescape(url).rstrip('"').strip()
+
+
+def _normalize_team_jersey_key(team_name: str) -> str:
+    value = str(team_name or "").strip().lower()
+    aliases = {
+        "north dt.": "northdt",
+        "north district": "northdt",
+        "eastern district": "easterndt",
+        "eastern dist.": "easterndt",
+        "eastern": "eastern",
+        "eastern aa": "eastern",
+        "eastern sc": "eastern",
+        "eastern long lions": "eastern",
+        "eastern long lions fc": "eastern",
+        "hkfc": "hkfc",
+        "hong kong fc": "hkfc",
+        "hong kong football club": "hkfc",
+        "kitchee": "kitchee",
+        "lee man": "leeman",
+        "leeman": "leeman",
+        "warriors": "leeman",
+        "rangers": "rangers",
+        "bc rangers": "rangers",
+        "southern district": "southern",
+        "southern": "southern",
+        "tai po": "taipo",
+        "tai po fc": "taipo",
+    }
+    if value in aliases:
+        return aliases[value]
+    return re.sub(r"[^a-z0-9]+", "", value)
+
+
+def _resolve_team_jersey(team_name: str, variant: str = "home") -> str:
+    key = _normalize_team_jersey_key(team_name)
+    candidate = Path(f"assets/team_jersey/{key}_{variant}.png")
+    return f"/{candidate.as_posix()}" if candidate.exists() else ""
 
 
 def _normalize_position_code(raw: Any) -> str:
@@ -198,6 +237,54 @@ def get_career_arc_visibility(metric_name: str, pos_group: str) -> Any:
     return True if metric_name in top3 else "legendonly"
 
 
+def get_kpi_tooltip_text(metric: str, value: float, history_df: "pd.DataFrame") -> str:
+    """
+    Returns a one-sentence career-context tooltip for a KPI badge.
+
+    Parameters
+    ----------
+    metric     : Column name (e.g. "Goals", "Key passes").
+    value      : Current season value for the metric.
+    history_df : DataFrame with season history (one row per season).
+
+    Returns
+    -------
+    Human-readable string indicating career-high, career-low, or mid-range status.
+    """
+    try:
+        if history_df is None or history_df.empty or metric not in history_df.columns:
+            return f"{metric}: {value}"
+
+        col = history_df[metric].dropna()
+        if col.empty:
+            return f"{metric}: {value}"
+
+        career_max = col.max()
+        career_min = col.min()
+        n_seasons = len(col)
+
+        if value >= career_max:
+            return (
+                f"{metric} más alto en {n_seasons} temporada{'s' if n_seasons != 1 else ''}. "
+                "Estás en tu mejor nivel histórico."
+            )
+        elif value <= career_min:
+            return (
+                f"{metric} en su punto más bajo histórico. "
+                "Área prioritaria de mejora esta temporada."
+            )
+        else:
+            pct_rank = (value - career_min) / (career_max - career_min) * 100 if career_max != career_min else 50
+            if pct_rank >= 66:
+                return f"{metric} en rango alto de tu carrera ({value:.1f}). Mantén este nivel."
+            elif pct_rank >= 33:
+                return f"{metric} en rango medio de tu carrera ({value:.1f}). Margen de mejora disponible."
+            else:
+                return f"{metric} en rango bajo-medio de tu carrera ({value:.1f}). Oportunidad de crecimiento."
+    except Exception:
+        return f"{metric}: {value}"
+
+
 _CURRENT_SEASON_FALLBACK = "2025-26"
 _CARD_CACHE_DIR = Path("data/cache/cards")
 
@@ -221,14 +308,47 @@ _PLAYER_CARDS_ROOT = Path("data/player_cards")
 
 
 def _resolve_team_logo(team_name: str) -> Optional[str]:
-    """Busca logo en assets/team_logos/ por nombre normalizado."""
+    """Resolve a team logo from local assets first, then from Team.logo_url in DB."""
     if not team_name:
         return None
-    normalized = team_name.lower().replace(" ", "_").replace("-", "_")
-    for ext in ("png", "svg"):
-        candidate = Path(f"assets/team_logos/{normalized}.{ext}")
-        if candidate.exists():
-            return str(candidate)
+    normalized_key = _normalize_team_jersey_key(team_name)
+    candidate_keys = [normalized_key.lower().replace(" ", "_").replace("-", "_")]
+    asset_aliases = {
+        "leeman": ["lee_man"],
+        "hkfc": ["hong_kong_football_club"],
+        "northdt": ["north_district"],
+        "easterndt": ["eastern_district"],
+    }
+    candidate_keys.extend(asset_aliases.get(normalized_key, []))
+    for asset_key in candidate_keys:
+        for ext in ("png", "svg"):
+            candidate = Path(f"assets/team_logos/{asset_key}.{ext}")
+            if candidate.exists():
+                return f"/{candidate.as_posix()}"
+    try:
+        from models.db_models import Team
+        from utils.db_engine import SessionFactory
+
+        with SessionFactory() as session:
+            team = session.execute(select(Team).where(Team.name == team_name)).scalars().first()
+            alias_names = {
+                "leeman": ["Lee Man"],
+                "rangers": ["Rangers", "BC Rangers"],
+                "hkfc": ["Hong Kong FC", "Hong Kong Football Club", "HKFC"],
+                "eastern": ["Eastern", "Eastern AA", "Eastern SC", "Eastern Long Lions"],
+                "easterndt": ["Eastern District", "Eastern Dist."],
+                "northdt": ["North District", "North Dt."],
+                "southern": ["Southern", "Southern District"],
+                "taipo": ["Tai Po", "Tai Po FC"],
+            }.get(normalized_key, [])
+            if (not team or not getattr(team, "logo_url", None)) and alias_names:
+                alias_team = session.execute(select(Team).where(Team.name.in_(alias_names))).scalars().first()
+                if alias_team and getattr(alias_team, "logo_url", None):
+                    team = alias_team
+            if team and getattr(team, "logo_url", None):
+                return str(team.logo_url)
+    except Exception:
+        return None
     return None
 
 
@@ -842,8 +962,15 @@ def _generate_career_insight(
             f"Last 5-match form trend: {trend_str} (slope {slope_str}).\n"
             f"Transferability Score for a higher-tier league: {t_score} ({t_label}).\n"
             f"Season {primary_metric.split(',')[0].strip()} history: {brief_stats}.\n"
-            f"Write exactly 2 concise sentences of tactical insight for a professional scout. "
-            f"Focus on development trajectory and transfer potential. No bullet points."
+            f"Return a JSON object (no markdown, no extra text) with these fields:\n"
+            f"  title: short headline (max 10 words)\n"
+            f"  body: exactly 2 sentences of tactical insight for a professional scout, "
+            f"focusing on development trajectory and transfer potential\n"
+            f"  tier: integer 1 or 2 (1 = critical/high urgency, 2 = informational)\n"
+            f"  cta_label: call-to-action label string (e.g. 'Ver análisis →')\n"
+            f"  urgency: float 0.0–1.0 indicating signal priority\n"
+            f"Example: {{\"title\": \"Ascending striker profile\", \"body\": \"...\", "
+            f"\"tier\": 2, \"cta_label\": \"Ver análisis →\", \"urgency\": 0.6}}"
         )
 
         client = genai.Client(api_key=GOOGLE_API_KEY)
@@ -851,11 +978,19 @@ def _generate_career_insight(
         response = client.models.generate_content(
             model=model_name,
             contents=prompt,
-            config=genai_types.GenerateContentConfig(temperature=0.6, max_output_tokens=150),
+            config=genai_types.GenerateContentConfig(temperature=0.6, max_output_tokens=300),
         )
-        text = response.text.strip()
-        if text:
-            return text
+        raw_text = response.text.strip()
+        if raw_text:
+            # Try to parse structured JSON response
+            try:
+                import json as _json
+                structured = _json.loads(raw_text)
+                # Return body as the display text (overlay system consumes full dict separately)
+                return structured.get("body", raw_text)
+            except (ValueError, TypeError, KeyError):
+                logger.debug("_generate_career_insight: JSON parse failed, using raw text")
+                return raw_text
 
     except Exception as e:
         logger.debug(f"_generate_career_insight Gemini error: {e}")
@@ -867,17 +1002,20 @@ def _build_delta_kpis(
     current_row: pd.Series,
     prev_row: pd.Series,
     metrics: List[str],
+    history_df: Optional["pd.DataFrame"] = None,
 ) -> html.Div:
     """
     Renders a row of compact KPI badges showing season-over-season deltas.
     Green arrow = improvement, red arrow = decline, neutral = no change.
+    T3 tooltips are added when history_df is provided.
     """
     kpis = []
-    for m in metrics:
+    for i, m in enumerate(metrics):
         curr = float(current_row.get(m) or 0)
         prev = float(prev_row.get(m) or 0)
         delta = curr - prev
         label = m.split(",")[0].split(" per")[0].strip()
+        badge_id = f"kpi-badge-{i}-{label.lower().replace(' ', '-')}"
 
         if delta > 0.05:
             icon = "bi-arrow-up-circle-fill"
@@ -892,46 +1030,59 @@ def _build_delta_kpis(
             color = HKFATheme.TEXT_SECONDARY
             delta_txt = "—"
 
-        kpis.append(
-            html.Div(
-                [
-                    html.Div(
-                        f"{curr:.1f}",
-                        style={
-                            "fontSize": "1.1rem",
-                            "fontWeight": "700",
-                            "color": HKFATheme.TEXT_PRIMARY,
-                            "lineHeight": "1",
-                        },
-                    ),
-                    html.Div(
-                        [
-                            html.I(className=f"bi {icon} me-1", style={"fontSize": "0.7rem", "color": color}),
-                            html.Span(delta_txt, style={"fontSize": "0.7rem", "color": color}),
-                        ],
-                        style={"lineHeight": "1", "marginTop": "2px"},
-                    ),
-                    html.Div(
-                        label,
-                        style={
-                            "fontSize": "0.65rem",
-                            "color": HKFATheme.TEXT_SECONDARY,
-                            "marginTop": "4px",
-                            "textTransform": "uppercase",
-                            "letterSpacing": "0.04em",
-                        },
-                    ),
-                ],
-                style={
-                    "textAlign": "center",
-                    "padding": "8px 12px",
-                    "background": "rgba(255,255,255,0.04)",
-                    "borderRadius": "8px",
-                    "border": f"1px solid {HKFATheme.BORDER_COLOR}",
-                    "minWidth": "70px",
-                },
-            )
+        badge = html.Div(
+            id=badge_id,
+            children=[
+                html.Div(
+                    f"{curr:.1f}",
+                    style={
+                        "fontSize": "1.1rem",
+                        "fontWeight": "700",
+                        "color": HKFATheme.TEXT_PRIMARY,
+                        "lineHeight": "1",
+                    },
+                ),
+                html.Div(
+                    [
+                        html.I(className=f"bi {icon} me-1", style={"fontSize": "0.7rem", "color": color}),
+                        html.Span(delta_txt, style={"fontSize": "0.7rem", "color": color}),
+                    ],
+                    style={"lineHeight": "1", "marginTop": "2px"},
+                ),
+                html.Div(
+                    label,
+                    style={
+                        "fontSize": "0.65rem",
+                        "color": HKFATheme.TEXT_SECONDARY,
+                        "marginTop": "4px",
+                        "textTransform": "uppercase",
+                        "letterSpacing": "0.04em",
+                    },
+                ),
+            ],
+            style={
+                "textAlign": "center",
+                "padding": "8px 12px",
+                "background": "rgba(255,255,255,0.04)",
+                "borderRadius": "8px",
+                "border": f"1px solid {HKFATheme.BORDER_COLOR}",
+                "minWidth": "70px",
+                "cursor": "default",
+            },
         )
+        kpis.append(badge)
+
+        # T3 Tooltip — static text generated at render time, no callback required
+        if history_df is not None and not history_df.empty:
+            tooltip_text = get_kpi_tooltip_text(m, curr, history_df)
+            kpis.append(
+                dbc.Tooltip(
+                    tooltip_text,
+                    target=badge_id,
+                    placement="top",
+                    className="ai-tooltip-dark",
+                )
+            )
 
     return html.Div(
         kpis,
@@ -1096,8 +1247,7 @@ def render_post_match(payload: Dict[str, Any]) -> html.Div:
         logger.debug(f"render_post_match enrichment error: {e}")
 
     # ── Layout ─────────────────────────────────────────────────────────────
-    return html.Div(
-        html.Div([
+    return html.Div([
             header,
             html.P([
                 kpi_icon,
@@ -1116,8 +1266,8 @@ def render_post_match(payload: Dict[str, Any]) -> html.Div:
                     create_percentile_bars(percentile_display),
                 ], width=12, md=5),
             ]),
-        ]),
-        className=f"glass-card {glass_modifier}",
+        ],
+        className=f"stage-view stage-view--postmatch {glass_modifier}".strip(),
     )
 
 
@@ -1149,12 +1299,26 @@ def _split_position_tokens(value: Any) -> List[str]:
     return [part.strip() for part in raw.split(",") if part.strip()]
 
 
-def _parse_match_outcome(result_str: str, opponent_label: str, player_team: str) -> str:
+def _match_team_tokens(team_label: str, tokens: List[str]) -> bool:
+    label_norm = _normalize_team_lookup(team_label)
+    if not label_norm or not tokens:
+        return False
+    return any(token and token in label_norm for token in tokens)
+
+
+def _parse_match_outcome(
+    result_str: str,
+    opponent_label: str,
+    player_team: str,
+    opponent_team_hint: str = "",
+) -> str:
     score = str(result_str or "").strip().lower()
     if not score or ":" not in score:
         return "EMPTY"
     penalties = "pen" in score
     score_part = score.replace("pen.", "").replace("pen", "").strip()
+    score_part = re.sub(r"\(\s*p\s*\)", "", score_part, flags=re.IGNORECASE).strip()
+    score_part = re.sub(r"\(\s*pen(?:s|alties)?\s*\)", "", score_part, flags=re.IGNORECASE).strip()
     try:
         left, right = [int(x) for x in score_part.split(":", 1)]
     except Exception:
@@ -1164,9 +1328,20 @@ def _parse_match_outcome(result_str: str, opponent_label: str, player_team: str)
     if len(parts) != 2:
         return "EMPTY"
     home_team, away_team = parts[0].strip(), parts[1].strip()
-    player_team = str(player_team or "").strip().lower()
-    is_home = player_team and player_team in home_team.lower()
-    is_away = player_team and player_team in away_team.lower()
+    player_team_tokens = _team_lookup_tokens(player_team)
+    opponent_team_tokens = _team_lookup_tokens(opponent_team_hint)
+
+    is_home = _match_team_tokens(home_team, player_team_tokens)
+    is_away = _match_team_tokens(away_team, player_team_tokens)
+
+    if not is_home and not is_away and opponent_team_tokens:
+        opponent_is_home = _match_team_tokens(home_team, opponent_team_tokens)
+        opponent_is_away = _match_team_tokens(away_team, opponent_team_tokens)
+        if opponent_is_home and not opponent_is_away:
+            is_away = True
+        elif opponent_is_away and not opponent_is_home:
+            is_home = True
+
     if not is_home and not is_away:
         return "EMPTY"
     player_score = left if is_home else right
@@ -1212,14 +1387,19 @@ def _extract_score_text(result_str: Any) -> str:
     return raw
 
 
-def _extract_outcome_from_result(result_str: Any, opponent_label: str = "", player_team: str = "") -> str:
+def _extract_outcome_from_result(
+    result_str: Any,
+    opponent_label: str = "",
+    player_team: str = "",
+    opponent_team_hint: str = "",
+) -> str:
     raw = str(result_str or "").strip()
     if not raw:
         return "EMPTY"
     first = raw[:1].upper()
     if first in {"W", "D", "L"}:
         return first
-    return _parse_match_outcome(raw, opponent_label, player_team)
+    return _parse_match_outcome(raw, opponent_label, player_team, opponent_team_hint)
 
 
 def _get_recent_form_summary(player_id: str, limit: int = 5) -> Dict[str, Any]:
@@ -1313,8 +1493,37 @@ def _coerce_cutoff_datetime(payload: Dict[str, Any]) -> Optional[pd.Timestamp]:
     return None
 
 
-def _get_head_to_head_summary(player_id: str, opponent_team: str, limit: int = 3) -> List[Dict[str, Any]]:
-    """Returns the player's last matches against the current opponent."""
+_TEAM_NAME_ALIASES: Dict[str, List[str]] = {
+    "north dt": ["north dt", "north district"],
+    "north district": ["north district", "north dt"],
+    "eastern dist": ["eastern dist", "eastern district"],
+    "eastern district": ["eastern district", "eastern dist"],
+    "hkfc": ["hkfc", "hong kong football club"],
+    "hong kong football club": ["hong kong football club", "hkfc"],
+}
+
+
+def _normalize_team_lookup(value: str) -> str:
+    cleaned = str(value or "").lower().strip()
+    cleaned = cleaned.replace(".", "")
+    cleaned = " ".join(cleaned.split())
+    return cleaned
+
+
+def _team_lookup_tokens(value: str) -> List[str]:
+    normalized = _normalize_team_lookup(value)
+    if not normalized:
+        return []
+    tokens = {normalized}
+    for alias in _TEAM_NAME_ALIASES.get(normalized, []):
+        alias_norm = _normalize_team_lookup(alias)
+        if alias_norm:
+            tokens.add(alias_norm)
+    return list(tokens)
+
+
+def _get_head_to_head_summary(player_id: str, opponent_team: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Returns the player's matches against the current opponent."""
     if not player_id or not opponent_team:
         return []
     try:
@@ -1340,21 +1549,41 @@ def _get_head_to_head_summary(player_id: str, opponent_team: str, limit: int = 3
         logger.debug(f"_get_head_to_head_summary error: {exc}")
         return []
 
-    opponent_norm = opponent_team.lower().strip()
+    opponent_tokens = _team_lookup_tokens(opponent_team)
     results: List[Dict[str, Any]] = []
     for match in matches:
         opponent_label = str(getattr(match, "opponent", "") or "")
-        if opponent_norm not in opponent_label.lower():
+        opponent_label_norm = _normalize_team_lookup(opponent_label)
+        if opponent_tokens and not any(token in opponent_label_norm for token in opponent_tokens):
             continue
         raw_result = getattr(match, "result", "") or ""
+        raw_data = getattr(match, "raw_data", None) or {}
+        competition_name = getattr(match, "competition_name", None) or raw_data.get("competition") or ""
+        competition_logo = getattr(match, "competition_logo", None) or raw_data.get("competition_logo") or ""
+        subbed_in = raw_data.get("subbed_in")
+        subbed_out = raw_data.get("subbed_out")
+        substitution_text = ""
+        if subbed_in:
+            substitution_text = f"On {subbed_in}'"
+        elif subbed_out:
+            substitution_text = f"Off {subbed_out}'"
         results.append({
-            "outcome": _extract_outcome_from_result(raw_result, opponent_label, player_team),
+            "date": getattr(match, "date", None),
+            "outcome": _extract_outcome_from_result(raw_result, opponent_label, player_team, opponent_team),
             "score": _extract_score_text(raw_result),
+            "opponent_label": opponent_label,
             "goals": int(getattr(match, "goals", 0) or 0),
             "assists": int(getattr(match, "assists", 0) or 0),
+            "minutes": int(getattr(match, "minutes_played", 0) or 0),
+            "yellow_cards": int(getattr(match, "yellow_cards", 0) or 0),
+            "red_cards": int(getattr(match, "red_cards", 0) or 0),
+            "competition": competition_name,
+            "competition_logo": competition_logo,
+            "substitution": substitution_text,
+            "stadium": raw_data.get("stadium") or raw_data.get("venue") or "",
             "penalties": "pen" in str(raw_result).lower(),
         })
-        if len(results) >= limit:
+        if limit and len(results) >= limit:
             break
     return results
 
@@ -1515,10 +1744,19 @@ def _get_opponent_rivals(
         if not rival_pos_groups:
             return []
 
-        team_df = df[df["Team"].str.lower() == opponent_team.lower()] if "Team" in df.columns else pd.DataFrame()
-        if team_df.empty:
-            # Try partial match
-            team_df = df[df["Team"].str.lower().str.contains(opponent_team.lower(), na=False)] if "Team" in df.columns else pd.DataFrame()
+        team_df = pd.DataFrame()
+        if "Team" in df.columns:
+            normalized_opponent = _normalize_team_jersey_key(opponent_team)
+            normalized_team_col = df["Team"].fillna("").astype(str).map(_normalize_team_jersey_key)
+            team_df = df[normalized_team_col == normalized_opponent]
+            if team_df.empty:
+                team_df = df[df["Team"].astype(str).str.lower() == str(opponent_team).lower()]
+            if team_df.empty:
+                # Try partial match
+                team_df = df[df["Team"].astype(str).str.lower().str.contains(str(opponent_team).lower(), na=False)]
+            if team_df.empty and "Team within selected timeframe" in df.columns:
+                normalized_timeframe_col = df["Team within selected timeframe"].fillna("").astype(str).map(_normalize_team_jersey_key)
+                team_df = df[normalized_timeframe_col == normalized_opponent]
 
         if team_df.empty:
             return []
@@ -1588,23 +1826,181 @@ def _get_opponent_rivals(
                         continue
             return columns[0], 0.0
 
+        def _metric_ratio(row: pd.Series, column: str) -> Optional[float]:
+            if column not in row.index:
+                return None
+            try:
+                value = float(row.get(column) or 0)
+            except Exception:
+                return None
+            label = str(column or "").lower()
+            if "%" in label:
+                return max(0.0, min(1.0, value / 100.0))
+            bounds = {
+                "Goals": 8.0,
+                "Assists": 6.0,
+                "xG per 90": 0.55,
+                "xA per 90": 0.35,
+                "Shots per 90": 3.5,
+                "Key passes per 90": 2.5,
+                "Progressive passes per 90": 8.0,
+                "Interceptions per 90": 3.0,
+                "PAdj interceptions per 90": 10.0,
+                "Defensive duels per 90": 9.0,
+                "Aerial duels won, %": 100.0,
+                "Defensive duels won, %": 100.0,
+                "Successful dribbles, %": 100.0,
+                "Dribbles per 90": 5.0,
+                "Accurate passes, %": 100.0,
+                "Shots blocked per 90": 2.5,
+            }
+            limit = bounds.get(column, 1.0)
+            if limit <= 0:
+                return None
+            return max(0.0, min(1.0, value / limit))
+
         def _normalize_metric_label(label: str) -> str:
             return label.replace(" per 90", " /90").replace(", %", "%").strip()
 
-        def _strength_and_weakness(pos_group: str, key_label: str, sec_label: str, key_val: float, sec_val: float) -> tuple[str, str]:
+        def _role_metric_profile(role_token: str, pos_group: str) -> tuple[List[str], List[str], List[str], List[str]]:
+            role_token = str(role_token or "").upper()
+            if role_token in {"LB", "LWB", "LB5", "RB", "RWB", "RB5"}:
+                return (
+                    ["Defensive duels won, %", "Interceptions per 90", "Defensive duels per 90"],
+                    ["Interceptions per 90", "Defensive duels per 90", "Aerial duels won, %"],
+                    ["Defensive duels won, %", "Interceptions per 90", "Aerial duels won, %", "Successful dribbles, %"],
+                    physical_candidates,
+                )
+            if role_token in {"LCB", "RCB", "CB", "CB3", "LCB3", "RCB3"}:
+                return (
+                    ["Aerial duels won, %", "Defensive duels won, %", "Interceptions per 90"],
+                    ["Defensive duels won, %", "Interceptions per 90", "Shots blocked per 90"],
+                    ["Aerial duels won, %", "Defensive duels won, %", "Interceptions per 90"],
+                    physical_candidates,
+                )
+            if role_token in {"DM", "DMF", "CM", "CMF"}:
+                return (
+                    ["Interceptions per 90", "Accurate passes, %", "Progressive passes per 90"],
+                    ["Progressive passes per 90", "Accurate passes, %", "Defensive duels won, %"],
+                    ["Defensive duels won, %", "Interceptions per 90", "Progressive passes per 90", "Accurate passes, %"],
+                    physical_candidates,
+                )
+            if role_token in {"AM", "AMF", "RW", "RWF", "LW", "LWF", "RM", "LM"}:
+                return (
+                    ["Successful dribbles, %", "Dribbles per 90", "Key passes per 90", "Goals"],
+                    ["Key passes per 90", "xA per 90", "Goals", "xG per 90"],
+                    ["Defensive duels won, %", "Accurate passes, %", "Successful dribbles, %", "xA per 90"],
+                    physical_candidates,
+                )
+            if role_token in {"ST", "CF"}:
+                return (
+                    ["Goals", "xG per 90", "Shots per 90"],
+                    ["Shots per 90", "xG per 90", "Aerial duels won, %"],
+                    ["Defensive duels won, %", "Shots per 90", "xG per 90", "Aerial duels won, %"],
+                    physical_candidates,
+                )
             if pos_group == "Defender":
-                strength = "Strong in defensive duels" if "duels" in key_label.lower() else "Reliable defensive profile"
-                weakness = "Can be exposed when forced to turn" if sec_val < 5 else "Can leave space behind on recovery"
-            elif pos_group == "Midfielder":
-                strength = "Helps control possession under pressure"
-                weakness = "Can be rushed when play accelerates"
-            elif pos_group in {"Forward", "Winger"}:
-                strength = "Dangerous attacking outlet in transition"
-                weakness = "Offers limited defensive cover"
-            else:
-                strength = f"Stands out in {key_label.lower()}"
-                weakness = f"Less reliable in {sec_label.lower()}"
-            return strength, weakness
+                return (
+                    ["Defensive duels won, %", "Interceptions per 90", "Aerial duels won, %"],
+                    ["Interceptions per 90", "Aerial duels won, %", "Defensive duels per 90"],
+                    ["Defensive duels won, %", "Interceptions per 90", "Aerial duels won, %"],
+                    physical_candidates,
+                )
+            if pos_group == "Midfielder":
+                return (
+                    ["Accurate passes, %", "Key passes per 90", "Interceptions per 90"],
+                    ["Interceptions per 90", "Progressive passes per 90", "Defensive duels won, %"],
+                    ["Defensive duels won, %", "Interceptions per 90", "Progressive passes per 90"],
+                    physical_candidates,
+                )
+            if pos_group in {"Forward", "Winger"}:
+                return (
+                    ["Goals", "Successful dribbles, %", "Key passes per 90"],
+                    ["xG per 90", "Dribbles per 90", "xA per 90"],
+                    ["Defensive duels won, %", "Successful dribbles, %", "xA per 90"],
+                    physical_candidates,
+                )
+            return (["Goals"], ["Assists"], ["Goals"], physical_candidates)
+
+        def _choose_weak_metric(row: pd.Series, columns: List[str]) -> tuple[str, float]:
+            candidates: List[tuple[str, float, float]] = []
+            for column in columns:
+                ratio = _metric_ratio(row, column)
+                if ratio is None:
+                    continue
+                try:
+                    raw_value = float(row.get(column) or 0)
+                except Exception:
+                    raw_value = 0.0
+                candidates.append((column, raw_value, ratio))
+            if not candidates:
+                fallback = columns[0] if columns else "Unknown"
+                return fallback, 0.0
+            weakest = min(candidates, key=lambda item: item[2])
+            return weakest[0], weakest[1]
+
+        def _strength_text(role_token: str, metric_label: str, metric_value: float) -> str:
+            role_token = str(role_token or "").upper()
+            label = str(metric_label or "").lower()
+            display_value = _normalize_metric_label(metric_label)
+            if "aerial" in label:
+                return f"Dominant aerially with {metric_value:.1f} in {display_value}."
+            if "defensive duels won" in label:
+                flank_note = " on the flank" if role_token in {"LB", "LWB", "LB5", "RB", "RWB", "RB5"} else ""
+                return f"Wins defensive duels{flank_note} at {metric_value:.1f} {display_value.split()[-1]}."
+            if "interceptions" in label:
+                return f"Reads passing lanes well with {metric_value:.1f} {display_value}."
+            if "accurate passes" in label:
+                return f"Secure in possession with {metric_value:.1f} {display_value}."
+            if "progressive passes" in label:
+                return f"Moves the team upfield through {metric_value:.1f} {display_value}."
+            if "key passes" in label:
+                return f"Creates chances consistently with {metric_value:.1f} {display_value}."
+            if "dribbles" in label:
+                return f"Carries threat 1v1 through {metric_value:.1f} {display_value}."
+            if label == "goals":
+                return f"Reliable scorer with {metric_value:.1f} goals this season."
+            if "xg" in label:
+                return f"Finds quality shooting positions at {metric_value:.1f} {display_value}."
+            if "shots" in label:
+                return f"Gets shots away regularly with {metric_value:.1f} {display_value}."
+            return f"Strong output in {display_value.lower()}."
+
+        def _weakness_text(role_token: str, metric_label: str, metric_value: float) -> str:
+            role_token = str(role_token or "").upper()
+            label = str(metric_label or "").lower()
+            display_value = _normalize_metric_label(metric_label)
+            if "defensive duels won" in label:
+                return f"Can be beaten in direct defending with only {metric_value:.1f} {display_value.split()[-1]}."
+            if "interceptions" in label:
+                return f"Does not break up play often: {metric_value:.1f} {display_value}."
+            if "aerial" in label:
+                return f"Less convincing in the air with {metric_value:.1f} {display_value}."
+            if "accurate passes" in label:
+                return f"Passing can drop under pressure at {metric_value:.1f} {display_value}."
+            if "progressive passes" in label:
+                return f"Offers limited progression from deep: {metric_value:.1f} {display_value}."
+            if "key passes" in label or "xa" in label:
+                return f"Limited creative output recently and across the season in {display_value.lower()}."
+            if "dribbles" in label:
+                return f"Less efficient when isolated 1v1: {metric_value:.1f} {display_value}."
+            if label == "goals" or "xg" in label or "shots" in label:
+                return f"End product is modest in {display_value.lower()}."
+            if role_token in {"LB", "LWB", "LB5", "RB", "RWB", "RB5"}:
+                return "Can leave space behind when drawn high and wide."
+            return f"Lower output in {display_value.lower()}."
+
+        def _physical_text(metric_label: str, metric_value: float) -> str:
+            label = _normalize_metric_label(metric_label)
+            if "Sprinting Distance" in metric_label:
+                return f"{metric_value:.1f} sprinting distance /90"
+            if "Count Sprint" in metric_label:
+                return f"{metric_value:.1f} sprints /90"
+            if "HSR Distance" in metric_label:
+                return f"{metric_value:.1f} HSR distance /90"
+            if "Count HSR" in metric_label:
+                return f"{metric_value:.1f} HSR actions /90"
+            return f"{metric_value:.1f} {label}"
 
         physical_candidates = [
             "Sprinting Distance per 90 (+25 km/h)",
@@ -1612,15 +2008,6 @@ def _get_opponent_rivals(
             "HSR Distance per 90 (20-25 km/h)",
             "Count HSR per 90 (20-25 km/h)",
         ]
-
-        primary_metrics = {
-            "Defender": (["Defensive duels won, %", "Defensive duels per 90"], ["Interceptions per 90", "Aerial duels won, %"]),
-            "Midfielder": (["Accurate passes, %", "Key passes per 90"], ["Interceptions per 90", "Progressive passes per 90"]),
-            "Forward": (["Goals", "xG"], ["Shots per 90", "xG per 90"]),
-            "Winger": (["Successful dribbles, %", "Dribbles per 90", "Goals"], ["Key passes per 90", "xA per 90"]),
-        }
-        sort_group = rival_pos_groups[0] if rival_pos_groups else "Midfielder"
-        prim_cols, sec_cols = primary_metrics.get(sort_group, (["Goals"], ["Assists"]))
 
         for _, row in rival_df.iterrows():
             tokens = _candidate_tokens(row)
@@ -1631,14 +2018,27 @@ def _get_opponent_rivals(
             tokens = _candidate_tokens(row)
             if not tokens:
                 return -1.0
+            minutes = float(row.get("Minutes played", 0) or 0)
+            if minutes < 120:
+                return -1.0
             tactical_bonus = 18.0 if preferred_tokens and set(tokens) & set(preferred_tokens) else 0.0
+            role_token = tokens[0]
+            pos_group = str(row.get("Position_Group", rival_pos_groups[0] if rival_pos_groups else "Midfielder"))
+            prim_cols, sec_cols, _, _ = _role_metric_profile(role_token, pos_group)
             _, key_val = _metric_value(row, prim_cols)
             _, sec_val = _metric_value(row, sec_cols)
-            minutes = float(row.get("Minutes played", 0) or 0)
+            if key_val <= 0 and sec_val <= 0:
+                return -1.0
             return tactical_bonus + key_val + (sec_val * 0.35) + (minutes / 300.0)
 
         rival_df = rival_df.assign(_rival_score=rival_df.apply(_score_row, axis=1))
         rival_df = rival_df[rival_df["_rival_score"] >= 0].sort_values("_rival_score", ascending=False)
+
+        if len(rival_df) < 3 and "Position_Group" in team_df.columns:
+            fallback_df = team_df[team_df["Position_Group"].isin(rival_pos_groups)].copy()
+            fallback_df = fallback_df.assign(_rival_score=fallback_df.apply(_score_row, axis=1))
+            fallback_df = fallback_df[fallback_df["_rival_score"] >= 0].sort_values("_rival_score", ascending=False)
+            rival_df = pd.concat([rival_df, fallback_df], ignore_index=True).drop_duplicates(subset=["Player"], keep="first")
 
         results = []
         for idx, (_, row) in enumerate(rival_df.head(3).iterrows()):
@@ -1646,16 +2046,14 @@ def _get_opponent_rivals(
             if not tokens:
                 continue
             role_token = tokens[0]
+            pos_group = str(row.get("Position_Group", rival_pos_groups[0] if rival_pos_groups else "Midfielder"))
+            prim_cols, sec_cols, weakness_cols, physical_cols = _role_metric_profile(role_token, pos_group)
             key_label, key_val = _metric_value(row, prim_cols)
             sec_label, sec_val = _metric_value(row, sec_cols)
-            physical_label, physical_val = _metric_value(row, physical_candidates)
-            strength_text, weakness_text = _strength_and_weakness(
-                str(row.get("Position_Group", sort_group)),
-                key_label,
-                sec_label,
-                key_val,
-                sec_val,
-            )
+            weak_label, weak_val = _choose_weak_metric(row, weakness_cols)
+            physical_label, physical_val = _metric_value(row, physical_cols)
+            strength_text = _strength_text(role_token, key_label, key_val)
+            weakness_text = _weakness_text(role_token, weak_label, weak_val)
             recent_form = _get_rival_recent_form(
                 str(row.get("Player", "Unknown")),
                 opponent_team,
@@ -1681,6 +2079,8 @@ def _get_opponent_rivals(
                 "sec_val": float(sec_val or 0),
                 "physical_label": _normalize_metric_label(physical_label),
                 "physical_val": float(physical_val or 0),
+                "physical_text": _physical_text(physical_label, float(physical_val or 0)) if physical_label else "",
+                "recent_data_available": bool(recent_form.get("minutes", 0) or recent_form.get("goals", 0) or recent_form.get("assists", 0) or recent_form.get("yellow_cards", 0) or recent_form.get("red_cards", 0)),
             })
         return results
     except Exception as e:
@@ -2852,7 +3252,7 @@ def render_player_dashboard(
     ]
 
     return html.Div(
-        dbc.Card(html.Div(sections, className="pb-2"), className="glass-card glass-career"),
+        html.Div(sections, className="stage-view stage-view--dashboard pb-2"),
     )
 
 
@@ -2885,8 +3285,16 @@ def render_pre_match(
     streaming_url = _clean_url(payload.get("streaming_url") or "")
     competition = payload.get("competition", "HK Premier League")
     competition_logo = payload.get("competition_logo") or get_competition_logo(competition)
-    home_logo = payload.get("home_logo")
-    away_logo = payload.get("away_logo")
+    home_logo = (
+        payload.get("home_logo")
+        or payload.get("home_logo_url")
+        or _resolve_team_logo(home)
+    )
+    away_logo = (
+        payload.get("away_logo")
+        or payload.get("away_logo_url")
+        or _resolve_team_logo(away)
+    )
     has_var = bool(payload.get("has_var"))
     is_tv = bool(payload.get("is_tv"))
     broadcast_type = str(payload.get("broadcast_type") or "").strip()
@@ -2895,6 +3303,11 @@ def render_pre_match(
     player_id = _get_logged_in_player_id()
     recent_form = _get_recent_form_summary(player_id)
     h2h_summary = _get_head_to_head_summary(player_id, opponent_team)
+    if h2h_summary:
+        h2h_summary = sorted(
+            h2h_summary,
+            key=lambda item: pd.to_datetime(item.get("date")) if item.get("date") is not None else pd.Timestamp.min,
+        )
     cutoff_dt = _coerce_cutoff_datetime(payload)
     if cutoff_dt is not None and recent_form.get("results"):
         try:
@@ -3042,25 +3455,38 @@ def render_pre_match(
     def _lucide(name: str) -> html.I:
         return html.I(**{"data-lucide": name, "className": "lucide-inline-icon me-1"})
 
-    def _team_block(name: str, logo: str, align: str) -> html.Div:
-        text_align = "left" if align == "left" else "right"
+    def _card_icon(color: str, size: str = "18px", class_name: str = "") -> html.I:
+        return html.I(
+            **{"data-lucide": "rectangle-vertical"},
+            className=class_name,
+            style={"width": size, "height": size, "color": color, "opacity": "0.95", "lineHeight": "1"},
+        )
+
+    def _team_block(name: str, logo: str, align: str, jersey: str = "") -> html.Div:
         justify = "flex-start" if align == "left" else "flex-end"
+        crest_block = html.Div([
+            html.Img(src=logo, style={"width": "96px", "height": "96px", "objectFit": "contain"}) if logo else html.Div(
+                name[:2].upper(),
+                style={
+                    "width": "96px", "height": "96px", "borderRadius": "50%",
+                    "display": "flex", "alignItems": "center", "justifyContent": "center",
+                    "background": "rgba(255,255,255,0.08)", "color": "#f3f7fb", "fontWeight": "800",
+                },
+            ),
+            html.Div(name or "TBC", style={"color": "#f4f8fc", "fontWeight": "700", "fontSize": "1.08rem", "textAlign": "center", "letterSpacing": "0.01em", "marginTop": "10px", "width": "96px"}),
+        ], style={"display": "flex", "flexDirection": "column", "alignItems": "center", "justifyContent": "center"})
         return html.Div([
             html.Div([
-                html.Img(src=logo, style={"width": "96px", "height": "96px", "objectFit": "contain"}) if logo else html.Div(
-                    name[:2].upper(),
-                    style={
-                        "width": "96px", "height": "96px", "borderRadius": "50%",
-                        "display": "flex", "alignItems": "center", "justifyContent": "center",
-                        "background": "rgba(255,255,255,0.08)", "color": "#f3f7fb", "fontWeight": "800",
-                    },
-                ),
-            ], style={"display": "flex", "justifyContent": justify, "marginBottom": "10px"}),
-            html.Div(name or "TBC", style={"color": "#f4f8fc", "fontWeight": "700", "fontSize": "1.08rem", "textAlign": "center", "letterSpacing": "0.01em"}),
-        ], style={"flex": "0 1 210px", "minWidth": "190px", "maxWidth": "220px", "textAlign": "center", "display": "flex", "flexDirection": "column", "alignItems": "center"})
+                html.Img(src=jersey, style={"width": "90px", "height": "90px", "objectFit": "contain", "opacity": "0.98"}) if jersey and align == "right" else None,
+                crest_block,
+                html.Img(src=jersey, style={"width": "90px", "height": "90px", "objectFit": "contain", "opacity": "0.98"}) if jersey and align == "left" else None,
+            ], style={"display": "flex", "justifyContent": justify, "alignItems": "flex-start", "gap": "16px"}),
+        ], style={"flex": "0 1 240px", "minWidth": "210px", "maxWidth": "250px", "textAlign": "center", "display": "flex", "flexDirection": "column", "alignItems": "center"})
 
     stream_href = streaming_url if streaming_url and "facebook.com" not in streaming_url.lower() else ""
     broadcast_chips: List[Any] = []
+    home_jersey = _resolve_team_jersey(home, "home")
+    away_jersey = _resolve_team_jersey(away, "home")
     if has_var:
         broadcast_chips.append(_chip("bi-camera-video-fill", "VAR", HKFATheme.ACCENT_GOLD))
     if is_tv:
@@ -3077,11 +3503,11 @@ def render_pre_match(
     fixture_card = _glass_card(
         dbc.CardBody([
             html.Div([
-                html.Img(src=competition_logo, style={"width": "46px", "height": "46px", "objectFit": "contain", "marginBottom": "8px"}) if competition_logo else None,
+                html.Img(src=competition_logo, style={"width": "54px", "height": "54px", "objectFit": "contain", "marginBottom": "8px"}) if competition_logo else None,
                 html.Div(competition, style={"color": "#f6f8fb", "fontWeight": "700", "fontSize": "1.05rem"}),
             ], style={"display": "flex", "flexDirection": "column", "alignItems": "center", "marginBottom": "24px"}),
             html.Div([
-                _team_block(home, home_logo, "right"),
+                _team_block(home, home_logo, "right", home_jersey),
                 html.Div([
                     html.Div("VS", style={"color": "#d7dee8", "fontSize": "2rem", "fontWeight": "800", "letterSpacing": "0.06em"}),
                     html.Div(
@@ -3108,7 +3534,7 @@ def render_pre_match(
                         },
                     ) if date_label else None,
                 ], style={"flex": "0 0 250px", "display": "flex", "flexDirection": "column", "alignItems": "center", "justifyContent": "center", "textAlign": "center", "padding": "0 12px"}),
-                _team_block(away, away_logo, "left"),
+                _team_block(away, away_logo, "left", away_jersey),
             ], style={"display": "flex", "alignItems": "center", "justifyContent": "center", "gap": "28px", "flexWrap": "wrap"}),
             html.Hr(style={"borderColor": "rgba(255,255,255,0.14)", "margin": "20px 0 18px"}),
             html.Div([
@@ -3150,11 +3576,16 @@ def render_pre_match(
             "boxShadow": "0 10px 18px rgba(0,0,0,0.08)",
         })
 
-    def _stat_card(label: str, value: str, accent: str, subtext: str = "", icon: str = "bi-dot") -> dbc.Card:
+    def _stat_card(label: str, value: str, accent: str, subtext: str = "", icon: Any = "bi-dot") -> dbc.Card:
+        icon_node = (
+            html.I(className=f"bi {icon} me-2", style={"color": accent})
+            if isinstance(icon, str)
+            else icon
+        )
         return _glass_card(
             dbc.CardBody([
                 html.Div([
-                    html.I(className=f"bi {icon} me-2", style={"color": accent}),
+                    icon_node,
                     html.Span(label, style={"color": "#c9d2de", "fontSize": "0.8rem", "fontWeight": "400"}),
                 ], className="mb-2"),
                 html.Div(value, style={"color": "#f4f8fc", "fontSize": "1.55rem", "fontWeight": "800", "lineHeight": "1.05"}),
@@ -3192,8 +3623,8 @@ def render_pre_match(
         html.Div(
             html.Div([
                 html.Div(_stat_card("Minutes", f"{minutes_total}", "#b7c2d1", icon="bi-stopwatch"), style={"flex": "1 1 150px"}),
-                html.Div(_stat_card("Goals", f"{int(recent_form.get('goals_total', 0) or 0)}", HKFATheme.ACCENT_RED, f"{recent_form.get('goals_per90', 0):.2f} per 90" if minutes_total else "", "bi-bullseye"), style={"flex": "1 1 150px"}),
-                html.Div(_stat_card("Assists", f"{int(recent_form.get('assists_total', 0) or 0)}", HKFATheme.ACCENT_BLUE, f"{recent_form.get('assists_per90', 0):.2f} per 90" if minutes_total else "", "bi-stars"), style={"flex": "1 1 150px"}),
+                html.Div(_stat_card("Goals", f"{int(recent_form.get('goals_total', 0) or 0)}", HKFATheme.ACCENT_RED, f"{recent_form.get('goals_per90', 0):.2f} per 90" if minutes_total else "", html.Img(src="/assets/icons/soccer-ball.svg", style={"width": "20px", "height": "20px", "objectFit": "contain", "marginRight": "8px"})), style={"flex": "1 1 150px"}),
+                html.Div(_stat_card("Assists", f"{int(recent_form.get('assists_total', 0) or 0)}", HKFATheme.ACCENT_BLUE, f"{recent_form.get('assists_per90', 0):.2f} per 90" if minutes_total else "", html.I(**{"data-lucide": "sport-shoe", "className": "lucide-inline-icon rival-assist-icon me-2", "style": {"color": HKFATheme.ACCENT_BLUE, "width": "20px", "height": "20px"}})), style={"flex": "1 1 150px"}),
                 html.Div(_stat_card("xG", f"{recent_form.get('xg_total', 0):.2f}", "#4ed0a6", f"{recent_form.get('xg_per90', 0):.2f} per 90" if minutes_total else "", "bi-graph-up-arrow"), style={"flex": "1 1 150px"}),
                 html.Div(_stat_card("xA", f"{recent_form.get('xa_total', 0):.2f}", "#a28dff", f"{recent_form.get('xa_per90', 0):.2f} per 90" if minutes_total else "", "bi-bezier2"), style={"flex": "1 1 150px"}),
                 html.Div(_stat_card("Rating", "—", HKFATheme.ACCENT_GOLD, "", "bi-star"), style={"flex": "1 1 150px"}),
@@ -3203,8 +3634,14 @@ def render_pre_match(
     ], className="mb-4", style={"marginBottom": "54px"})
 
     rival_cards: List[Any] = []
-    for rival in rivals:
+    for rival_idx, rival in enumerate(rivals):
         accent = HKFATheme.ACCENT_RED if rival.get("matchup_tier") == "Primary Matchup" else HKFATheme.ACCENT_BLUE
+        recent_data_available = bool(rival.get("recent_data_available"))
+        form_badge_id = f"rival-form-badge-{rival_idx}"
+        def _recent_value(key: str) -> str:
+            if not recent_data_available:
+                return "—"
+            return str(rival.get(key, 0))
         rival_cards.append(
             html.Div(_glass_card(
                 dbc.CardBody([
@@ -3239,13 +3676,28 @@ def render_pre_match(
                             "fontSize": "0.74rem",
                             "fontWeight": "600",
                             "cursor": "help",
-                        }, title=rival.get("form_reason", "")),
+                        }, id=form_badge_id),
+                        dbc.Tooltip(
+                            rival.get("form_reason", "") or "No recent match history available yet.",
+                            target=form_badge_id,
+                            placement="top",
+                        ),
                     ], style={"display": "flex", "gap": "8px", "flexWrap": "wrap", "marginBottom": "12px"}),
+                    html.Div([
+                        html.Div("Last 5", style={
+                            "color": "#aebbc8",
+                            "fontSize": "0.68rem",
+                            "letterSpacing": "0.08em",
+                            "textTransform": "uppercase",
+                            "marginBottom": "8px",
+                            "paddingLeft": "4px",
+                        }),
+                    ]),
                     html.Div([
                         # Minutos
                         html.Span([
                             html.I(className="bi bi-stopwatch", style={"fontSize": "1.3rem", "opacity": "0.85"}),
-                            html.Span(str(rival.get("recent_minutes", 0))),
+                            html.Span(_recent_value("recent_minutes")),
                         ], style={"display": "inline-flex", "alignItems": "center", "gap": "8px"}),
 
                         # Goles
@@ -3254,7 +3706,7 @@ def render_pre_match(
                                 src="/assets/icons/soccer-ball.svg",
                                 style={"width": "22px", "height": "22px", "opacity": "0.9"}
                             ),
-                            html.Span(str(rival.get("recent_goals", 0))),
+                            html.Span(_recent_value("recent_goals")),
                         ], style={"display": "inline-flex", "alignItems": "center", "gap": "8px"}),
 
                         # Asistencias
@@ -3263,19 +3715,19 @@ def render_pre_match(
                                 **{"data-lucide": "sport-shoe"},
                                 style={"width": "22px", "height": "22px", "opacity": "0.9"}
                             ),
-                            html.Span(str(rival.get("recent_assists", 0))),
+                            html.Span(_recent_value("recent_assists")),
                         ], style={"display": "inline-flex", "alignItems": "center", "gap": "8px"}),
 
                         # Amarillas
                         html.Span([
-                            html.I(className="bi bi-square", style={"fontSize": "1.2rem", "color": "#f4c351", "opacity": "0.9", "borderWidth": "2px"}),
-                            html.Span(str(rival.get("recent_yellow_cards", 0))),
+                            _card_icon("#f4c351", size="20px"),
+                            html.Span(_recent_value("recent_yellow_cards")),
                         ], style={"display": "inline-flex", "alignItems": "center", "gap": "8px"}),
 
                         # Rojas
                         html.Span([
-                            html.I(className="bi bi-square", style={"fontSize": "1.2rem", "color": "#ef6b6b", "opacity": "0.9", "borderWidth": "2px"}),
-                            html.Span(str(rival.get("recent_red_cards", 0))),
+                            _card_icon("#ef6b6b", size="20px"),
+                            html.Span(_recent_value("recent_red_cards")),
                         ], style={"display": "inline-flex", "alignItems": "center", "gap": "8px"}),
                     ], style={
                         "display": "flex",
@@ -3307,12 +3759,12 @@ def render_pre_match(
                     ], style={"display": "flex", "gap": "12px", "marginBottom": "12px"}),
                     html.Div([
                         html.Div("Physical", style={"color": HKFATheme.ACCENT_BLUE, "fontSize": "0.72rem", "textTransform": "uppercase", "letterSpacing": "0.08em", "fontWeight": "700"}),
-                        html.Div(f"{rival.get('physical_val', 0):.1f} {rival.get('physical_label', '')}", style={"color": "#eff4fa", "fontWeight": "400", "fontSize": "0.86rem", "marginTop": "4px"}),
+                        html.Div(rival.get("physical_text") or f"{rival.get('physical_val', 0):.1f} {rival.get('physical_label', '')}", style={"color": "#eff4fa", "fontWeight": "400", "fontSize": "0.86rem", "marginTop": "4px"}),
                     ]) if rival.get("physical_label") else None,
                 ]),
                 accent=accent,
                 extra_style={"height": "100%"},
-            ), style={"flex": "1 1 260px", "minWidth": "240px"})
+            ), className="prematch-rival-card")
         )
 
     rivals_section = html.Div([
@@ -3320,34 +3772,234 @@ def render_pre_match(
             _section_title("bi-shield-exclamation", "Rivals to Watch", f"Likely direct matchups from {opponent_team}" if opponent_team else ""),
             style={"marginBottom": "36px"},
         ),
-        html.Div(rival_cards, style={"display": "flex", "gap": "12px", "flexWrap": "wrap"}) if rival_cards else html.Div(
+        html.Div(rival_cards, className="prematch-rivals-grid") if rival_cards else html.Div(
             "No direct rival profiles available yet.",
             style={"color": "#c5d1dd", "fontSize": "0.92rem"},
         ),
     ], className="mb-4", style={"marginBottom": "54px"})
 
-    h2h_cards = []
-    for match in h2h_summary:
-        accent = {"W": "#76d289", "D": "#f4c351", "L": "#ef6b6b"}.get(match.get("outcome"), "#a1adbb")
-        h2h_cards.append(
-            html.Div(_glass_card(
-                dbc.CardBody([
-                    html.Div(match.get("outcome", "—"), style={"color": accent, "fontSize": "1.4rem", "fontWeight": "800", "textAlign": "center"}),
-                    html.Div(match.get("score", "—"), style={"color": "#eef4fa", "fontWeight": "700", "textAlign": "center", "marginTop": "6px"}),
-                    html.Div(f"{int(match.get('goals', 0) or 0)}G {int(match.get('assists', 0) or 0)}A", style={"color": "#cfd8e3", "fontSize": "0.82rem", "fontWeight": "700", "textAlign": "center", "marginTop": "8px"}),
-                    html.Div("PEN", style={"color": accent, "fontSize": "0.72rem", "textAlign": "center", "marginTop": "6px", "fontWeight": "700"}) if match.get("penalties") else None,
-                ]),
-                accent=accent,
-                extra_style={"height": "100%"},
-            ), style={"flex": "0 1 130px"})
+    h2h_items = []
+    timeline_events: List[Dict[str, Any]] = [dict(item, _is_future=False) for item in h2h_summary]
+    next_h2h_dt = None
+    try:
+        next_h2h_dt = _coerce_cutoff_datetime(payload)
+    except Exception:
+        next_h2h_dt = None
+    if opponent_team and next_h2h_dt is not None:
+        timeline_events.append({
+            "_is_now": True,
+            "_is_future": False,
+            "date": next_h2h_dt,
+            "outcome": "NOW",
+            "score": "",
+            "competition": "",
+            "competition_logo": "",
+            "goals": 0,
+            "assists": 0,
+            "minutes": 0,
+            "yellow_cards": 0,
+            "red_cards": 0,
+            "substitution": "",
+            "penalties": False,
+        })
+        timeline_events.append({
+            "_is_future": True,
+            "date": next_h2h_dt,
+            "outcome": "NEXT",
+            "score": "",
+            "competition": competition,
+            "competition_logo": competition_logo,
+            "stadium": stadium,
+            "goals": 0,
+            "assists": 0,
+            "minutes": 0,
+            "yellow_cards": 0,
+            "red_cards": 0,
+            "substitution": "",
+            "penalties": False,
+        })
+    total_h2h_goals = sum(int(item.get("goals", 0) or 0) for item in h2h_summary)
+    total_h2h_assists = sum(int(item.get("assists", 0) or 0) for item in h2h_summary)
+    record_w = sum(1 for item in h2h_summary if item.get("outcome") == "W")
+    record_d = sum(1 for item in h2h_summary if item.get("outcome") == "D")
+    record_l = sum(1 for item in h2h_summary if item.get("outcome") == "L")
+    for idx, match in enumerate(timeline_events):
+        is_now = bool(match.get("_is_now"))
+        is_future = bool(match.get("_is_future"))
+        accent = {"W": "#76d289", "D": "#f4c351", "L": "#ef6b6b", "NEXT": "#79c8ff", "NOW": "#f4c351"}.get(match.get("outcome"), "#a1adbb")
+        orientation = "top" if idx % 2 == 0 else "bottom"
+        if is_future:
+            orientation = "top"
+        date_value = match.get("date")
+        date_label = "Date TBC"
+        day_number = ""
+        date_meta = ""
+        time_meta = ""
+        try:
+            if date_value is not None:
+                ts = pd.to_datetime(date_value)
+                day_number = ts.strftime("%d")
+                date_meta = ts.strftime("%b %Y")
+                date_label = ts.strftime("%d %b %Y")
+                if is_future:
+                    ts_py = ts.to_pydatetime()
+                    if ts_py.tzinfo is None:
+                        ts_py = ts_py.replace(tzinfo=timezone.utc)
+                    ts_hkt = ts_py.astimezone(timezone(timedelta(hours=8)))
+                    time_meta = ts_hkt.strftime("%H:%M")
+                else:
+                    time_meta = ts.strftime("%H:%M")
+        except Exception:
+            pass
+        competition_name = str(match.get("competition") or "Competition")
+        competition_name = re.sub(r"^Hong Kong\s+", "", competition_name, flags=re.IGNORECASE).strip()
+        competition_name = re.sub(r"\s+Hong Kong\s+", " ", competition_name, flags=re.IGNORECASE).strip()
+        competition_name = re.sub(r"^HK\s+", "", competition_name, flags=re.IGNORECASE).strip()
+        competition_name = re.sub(r"\s+HK\s+", " ", competition_name, flags=re.IGNORECASE).strip()
+        competition_name = re.sub(r"\s*\([^)]*\)\s*$", "", competition_name).strip()
+        competition_name = re.split(r"\s*[\(\[\-]\s*", competition_name, maxsplit=1)[0].strip()
+        competition_logo = str(match.get("competition_logo") or "")
+        historical_label = str(match.get("opponent_label") or "")
+        home_team_name = ""
+        away_team_name = ""
+        if is_future:
+            home_team_name = str(home or "")
+            away_team_name = str(away or "")
+        elif " vs " in historical_label:
+            parts = historical_label.split(" vs ", 1)
+            home_team_name = re.sub(r"\s*\([^)]*\)\s*$", "", parts[0]).strip()
+            away_team_name = re.sub(r"\s*\([^)]*\)\s*$", "", parts[1]).strip()
+        home_team_logo = _resolve_team_logo(home_team_name) if home_team_name else ""
+        away_team_logo = _resolve_team_logo(away_team_name) if away_team_name else ""
+        detail_grid = None
+        if is_future:
+            detail_items = []
+            if match.get("stadium"):
+                detail_items.append(
+                    html.Div([
+                        html.I(className="bi bi-geo-alt"),
+                        html.Span(str(match.get("stadium")), className="prematch-h2h-icon-value"),
+                    ], className="prematch-h2h-detail-item")
+                )
+            if detail_items:
+                detail_grid = html.Div(detail_items, className="prematch-h2h-details prematch-h2h-details--future")
+        else:
+            detail_items = [
+                html.Div([
+                    html.I(className="bi bi-stopwatch"),
+                    html.Span(str(int(match.get("minutes", 0) or 0)), className="prematch-h2h-icon-value"),
+                ], className="prematch-h2h-detail-item"),
+                html.Div([
+                    html.Img(src="/assets/icons/soccer-ball.svg", className="prematch-h2h-ball-icon"),
+                    html.Span(str(int(match.get("goals", 0) or 0)), className="prematch-h2h-icon-value"),
+                ], className="prematch-h2h-detail-item"),
+                html.Div([
+                    html.I(**{"data-lucide": "sport-shoe", "className": "lucide-inline-icon rival-assist-icon"}),
+                    html.Span(str(int(match.get("assists", 0) or 0)), className="prematch-h2h-icon-value"),
+                ], className="prematch-h2h-detail-item"),
+                html.Div([
+                    _card_icon("#f3c84d", size="14px"),
+                    html.Span(str(int(match.get("yellow_cards", 0) or 0)), className="prematch-h2h-icon-value"),
+                ], className="prematch-h2h-detail-item"),
+                html.Div([
+                    _card_icon("#ef6b6b", size="14px"),
+                    html.Span(str(int(match.get("red_cards", 0) or 0)), className="prematch-h2h-icon-value"),
+                ], className="prematch-h2h-detail-item"),
+                html.Div([
+                    html.I(className="bi bi-arrow-left-right"),
+                    html.Span(str(match.get("substitution") or "Full"), className="prematch-h2h-icon-value"),
+                ], className="prematch-h2h-detail-item"),
+            ]
+            if match.get("stadium"):
+                detail_items.append(
+                    html.Div([
+                        html.I(className="bi bi-geo-alt"),
+                        html.Span(str(match.get("stadium")), className="prematch-h2h-icon-value"),
+                    ], className="prematch-h2h-detail-item")
+                )
+            detail_grid = html.Div(detail_items, className="prematch-h2h-details")
+        if is_now:
+            h2h_items.append(
+                html.Div([
+                    html.Div(className="prematch-h2h-node prematch-h2h-node--now"),
+                    html.Div("NOW", className="prematch-h2h-now-label"),
+                ], className="prematch-h2h-item prematch-h2h-item--now", id=f"prematch-h2h-item-{idx}")
+            )
+            continue
+        h2h_items.append(
+            html.Div([
+                html.Div(className="prematch-h2h-node"),
+                html.Div(time_meta, className="prematch-h2h-time") if is_future and time_meta else None,
+                html.Div([
+                    html.Img(src=competition_logo, className="prematch-h2h-card-comp-logo") if competition_logo else None,
+                    html.Div([
+                        html.Div(day_number or "—", className="prematch-h2h-day"),
+                        html.Div([
+                            html.Div(date_meta or date_label, className="prematch-h2h-date-meta"),
+                            html.Div([
+                                html.Span(competition_name, className="prematch-h2h-comp"),
+                            ], className="prematch-h2h-comp-row"),
+                        ], className="prematch-h2h-head-main"),
+                    ], className="prematch-h2h-head"),
+                    html.Div([
+                        html.Span(match.get("outcome", "—"), className="prematch-h2h-outcome", style={"color": accent}),
+                        html.Div([
+                            html.Img(src=home_team_logo, className="prematch-h2h-team-logo") if home_team_logo else html.Span(className="prematch-h2h-team-logo prematch-h2h-team-logo--placeholder"),
+                            html.Span(
+                                "VS" if is_future else f"{match.get('score', '—')}{' (p)' if match.get('penalties') else ''}",
+                                className="prematch-h2h-score",
+                            ),
+                            html.Img(src=away_team_logo, className="prematch-h2h-team-logo") if away_team_logo else html.Span(className="prematch-h2h-team-logo prematch-h2h-team-logo--placeholder"),
+                        ], className="prematch-h2h-score-group"),
+                    ], className="prematch-h2h-result-row"),
+                    detail_grid,
+                ], className="prematch-h2h-card"),
+            ], className=f"prematch-h2h-item prematch-h2h-item--{orientation}{' prematch-h2h-item--future' if is_future else ''}", id=f"prematch-h2h-item-{idx}")
         )
 
     h2h_section = html.Div([
         html.Div(
-            _section_title("bi-clock-history", "Your record vs this opponent", f"Last {max(len(h2h_summary), 1)} meetings against {opponent_team}" if opponent_team else ""),
+            _section_title("bi-clock-history", "Your record vs this opponent", f"All meetings on record against {opponent_team}" if opponent_team else ""),
             style={"marginBottom": "36px"},
         ),
-        html.Div(h2h_cards, style={"display": "flex", "gap": "12px", "flexWrap": "wrap"}) if h2h_cards else html.Div(
+        html.Div([
+            html.Div([
+                html.Div("Record", className="prematch-h2h-summary-label"),
+                html.Div([
+                    html.I(className="bi bi-bar-chart-line", style={"color": "#b58cff"}),
+                    html.Span(f"{record_w}-{record_d}-{record_l}"),
+                ], className="prematch-h2h-summary-value"),
+            ], className="prematch-h2h-summary-item"),
+            html.Div([
+                html.Div("Goals", className="prematch-h2h-summary-label"),
+                html.Div([
+                    html.Img(src="/assets/icons/soccer-ball.svg", className="prematch-h2h-summary-ball"),
+                    html.Span(str(total_h2h_goals)),
+                ], className="prematch-h2h-summary-value"),
+            ], className="prematch-h2h-summary-item"),
+            html.Div([
+                html.Div("Assists", className="prematch-h2h-summary-label"),
+                html.Div([
+                    html.I(**{"data-lucide": "sport-shoe", "className": "lucide-inline-icon rival-assist-icon", "style": {"color": HKFATheme.ACCENT_BLUE}}),
+                    html.Span(str(total_h2h_assists)),
+                ], className="prematch-h2h-summary-value"),
+            ], className="prematch-h2h-summary-item"),
+            html.Div([
+                html.Div("Meetings", className="prematch-h2h-summary-label"),
+                html.Div([
+                    html.I(className="bi bi-clock-history", style={"color": HKFATheme.ACCENT_GOLD}),
+                    html.Span(str(len(h2h_summary))),
+                ], className="prematch-h2h-summary-value"),
+            ], className="prematch-h2h-summary-item"),
+        ], className="prematch-h2h-summary") if h2h_summary else None,
+        html.Div([
+            html.Div(className="prematch-h2h-track"),
+            html.Button([
+                html.Span("Today", className="prematch-h2h-hint-label"),
+                html.I(className="bi bi-arrow-right prematch-h2h-hint-arrow"),
+            ], id="prematch-h2h-today-btn", className="prematch-h2h-hint", n_clicks=0),
+            html.Div(h2h_items, className="prematch-h2h-scroll"),
+        ], className="prematch-h2h-timeline") if h2h_items else html.Div(
             "No head-to-head data available yet.",
             style={"color": "#c5d1dd", "fontSize": "0.92rem"},
         ),
@@ -3364,27 +4016,134 @@ def render_pre_match(
     except Exception:
         pass
 
-    game_plan_parts = []
-    if top_scorer_name:
-        game_plan_parts.append(f"{opponent_team}'s main scoring threat is {top_scorer_name} ({top_scorer_goals} goals), so be ready for their first movement around the box.")
-    if rivals:
-        main_rival = rivals[0]
-        game_plan_parts.append(
-            f"Your primary matchup is likely {main_rival.get('name', 'their main defender')} at {main_rival.get('role_label', main_rival.get('position_group', ''))}. "
-            f"They are strong because they are {main_rival.get('strength_text', '').lower()}, but you can exploit them because they {main_rival.get('weakness_text', '').lower()}."
-        )
-    if int(recent_form.get("assists_total", 0) or 0) > int(recent_form.get("goals_total", 0) or 0):
-        game_plan_parts.append("Lean into combination play early and attack the space behind their first line after your release pass.")
+    data_signals = sum(
+        1 for flag in [
+            bool(top_scorer_name),
+            bool(rivals),
+            bool(h2h_summary),
+            bool(recent_form.get("minutes_total", 0)),
+        ] if flag
+    )
+    confidence_label = {
+        4: "High confidence",
+        3: "Good confidence",
+        2: "Moderate confidence",
+    }.get(data_signals, "Limited confidence")
+    confidence_color = {
+        4: "#76d289",
+        3: HKFATheme.ACCENT_BLUE,
+        2: HKFATheme.ACCENT_GOLD,
+    }.get(data_signals, "#b7c2d1")
+
+    main_rival = rivals[0] if rivals else {}
+    rival_name = main_rival.get("name", "their direct defender")
+    rival_role = main_rival.get("role_label", main_rival.get("position_group", ""))
+    rival_strength = str(main_rival.get("strength_text", "") or "").strip()
+    rival_weakness = str(main_rival.get("weakness_text", "") or "").strip()
+
+    assist_bias = int(recent_form.get("assists_total", 0) or 0) > int(recent_form.get("goals_total", 0) or 0)
+    if rival_weakness:
+        plan_headline = f"Target {rival_name} early and force the duel into the phase where they {rival_weakness.lower()}."
+    elif top_scorer_name:
+        plan_headline = f"Control the first action around {top_scorer_name} and attack quickly once their front line is broken."
     else:
-        game_plan_parts.append("Attack the box aggressively when the move reaches the final third, especially after quick wide combinations.")
-    game_plan_text = " ".join(part for part in game_plan_parts if part).strip()
-    if not game_plan_text:
-        game_plan_text = f"Prepare for the match against {opponent_team}. Focus on quick transitions and aggressive first actions after the regain."
+        plan_headline = f"Play with fast first actions against {opponent_team} and attack the open space after the regain."
+
+    plan_rows = []
+    if top_scorer_name:
+        plan_rows.append((
+            "bi-crosshair",
+            "#ef6b6b",
+            "Main threat",
+            f"{top_scorer_name} is their top scorer with {top_scorer_goals} goals. Be ready for the first movement around the box."
+        ))
+    if rival_name:
+        duel_text = (
+            f"Likely matchup: {rival_name}"
+            + (f" ({rival_role})" if rival_role else "")
+            + (
+                f". Strong because {rival_strength.lower()}, but exploitable because they {rival_weakness.lower()}."
+                if rival_strength and rival_weakness
+                else ""
+            )
+        )
+        plan_rows.append((
+            "bi-person-bounding-box",
+            HKFATheme.ACCENT_BLUE,
+            "Primary duel",
+            duel_text,
+        ))
+    progression_text = (
+        "Lean into release passes and quick combinations to attack the space behind their first line."
+        if assist_bias else
+        "Attack the box aggressively once the move reaches the final third, especially after quick wide combinations."
+    )
+    plan_rows.append((
+        "bi-diagram-3",
+        "#a28dff",
+        "Progression",
+        progression_text,
+    ))
+    if h2h_summary:
+        recent_h2h_outcome = h2h_summary[-1].get("outcome", "")
+        h2h_text = (
+            f"You have {record_w}W-{record_d}D-{record_l}L on record against {opponent_team}. "
+            f"Use that context, but treat the next duel as a new game-state."
+        )
+        if recent_h2h_outcome in {"W", "L", "D"}:
+            h2h_text = (
+                f"All-time H2H stands at {record_w}W-{record_d}D-{record_l}L. "
+                f"The last meeting ended {recent_h2h_outcome}, so be ready for a different opening pattern this time."
+            )
+        plan_rows.append((
+            "bi-clock-history",
+            HKFATheme.ACCENT_GOLD,
+            "Context",
+            h2h_text,
+        ))
 
     game_plan_card = _glass_card(
         dbc.CardBody([
-            _section_title("bi-robot", "AI Game-Plan"),
-            html.P(game_plan_text, className="mb-0", style={"color": "#edf3f9", "fontSize": "0.98rem", "lineHeight": "1.65"}),
+            html.Div([
+                _section_title("bi-robot", "AI Game-Plan", "Structured from recent form, rival profiles and head-to-head data."),
+                html.Span(
+                    confidence_label,
+                    style={
+                        "padding": "6px 10px",
+                        "borderRadius": "999px",
+                        "background": f"rgba({_hex_to_rgb(confidence_color)}, 0.12)",
+                        "border": f"1px solid rgba({_hex_to_rgb(confidence_color)}, 0.24)",
+                        "color": "#eef4fa",
+                        "fontSize": "0.72rem",
+                        "fontWeight": "600",
+                        "whiteSpace": "nowrap",
+                    },
+                ),
+            ], style={"display": "flex", "justifyContent": "space-between", "alignItems": "flex-start", "gap": "12px", "marginBottom": "20px", "flexWrap": "wrap"}),
+            html.Div(
+                plan_headline,
+                style={
+                    "color": "#f4f8fc",
+                    "fontSize": "1.02rem",
+                    "fontWeight": "700",
+                    "lineHeight": "1.55",
+                    "marginBottom": "18px",
+                },
+            ),
+            html.Div([
+                html.Div([
+                    html.Div([
+                        html.I(className=f"bi {icon}", style={"color": accent, "fontSize": "1rem", "lineHeight": "1"}),
+                        html.Span(label, style={"color": "#f0f5fa", "fontWeight": "700", "fontSize": "0.84rem", "letterSpacing": "0.02em"}),
+                    ], style={"display": "flex", "alignItems": "center", "gap": "8px", "marginBottom": "6px"}),
+                    html.Div(text, style={"color": "#d8e1eb", "fontSize": "0.9rem", "lineHeight": "1.6"}),
+                ], style={
+                    "padding": "12px 14px",
+                    "borderRadius": "14px",
+                    "background": "rgba(255,255,255,0.04)",
+                    "border": "1px solid rgba(255,255,255,0.08)",
+                }) for icon, accent, label, text in plan_rows
+            ], style={"display": "grid", "gridTemplateColumns": "repeat(auto-fit, minmax(220px, 1fr))", "gap": "12px"}),
         ]),
         accent=HKFATheme.ACCENT_GOLD,
     )
@@ -3395,7 +4154,7 @@ def render_pre_match(
         html.Div(rivals_section, style={"marginBottom": "36px"}),
         html.Div(h2h_section, style={"marginBottom": "36px"}),
         game_plan_card,
-    ], className="stage-inner")
+    ], className="stage-view stage-view--prematch")
 
 
 def render_career_insights(payload: Dict[str, Any], user_role: str = "player") -> html.Div:
@@ -3403,10 +4162,14 @@ def render_career_insights(payload: Dict[str, Any], user_role: str = "player") -
     Renders the Career Insights stage with contextual projection, UMAP clustering,
     archetype badge, season-over-season delta KPIs, AI insight line,
     and a role-conditional Dossier export button.
+
+    When payload contains source="overlay", the signal widget matching the
+    triggering signal type is highlighted with a cyan left-border accent.
     """
     season = payload.get("season", "")
     player_id = payload.get("player_id", "")
     player_name = payload.get("player_name", "Player")
+    overlay_source = payload.get("source", "")
     current_season = _get_current_season()
 
     # ── Fetch multi-season history (real data, no random) ──────────────────
@@ -3484,7 +4247,7 @@ def render_career_insights(payload: Dict[str, Any], user_role: str = "player") -
                     ],
                     style={"color": HKFATheme.TEXT_SECONDARY, "display": "block", "marginBottom": "8px"},
                 ),
-                _build_delta_kpis(current_row, prev_row, kpi_metrics),
+                _build_delta_kpis(current_row, prev_row, kpi_metrics, history_df),
             ])
     except Exception as e:
         logger.debug(f"Delta KPIs error: {e}")
@@ -3547,8 +4310,16 @@ def render_career_insights(payload: Dict[str, Any], user_role: str = "player") -
             dcc.Download(id="dossier-download"),
         ])
 
-    return html.Div(
-        html.Div([
+    # Apply overlay-source highlight: cyan left-border on the insight widget
+    insight_highlight_style = {}
+    if overlay_source == "overlay":
+        insight_highlight_style = {
+            "borderLeft": "3px solid #00D4FF",
+            "paddingLeft": "10px",
+            "borderRadius": "0 8px 8px 0",
+        }
+
+    return html.Div([
             html.H6([
                 html.I(className="bi bi-calendar3 me-2"),
                 html.Span(
@@ -3557,16 +4328,14 @@ def render_career_insights(payload: Dict[str, Any], user_role: str = "player") -
                 ),
             ], className="mb-3 fw-semibold", style={"color": "var(--accent-cyan, #00d4ff)"}),
             archetype_section,
-            insight_section,
+            html.Div(insight_section, style=insight_highlight_style) if insight_section else None,
             delta_section,
             dbc.Row([
                 dbc.Col(projection_section, width=12, lg=6),
                 dbc.Col(umap_section, width=12, lg=6),
             ]),
             dossier_button,
-        ], className="pb-2"),
-        className="glass-card glass-career",
-    )
+        ], className="stage-view stage-view--career pb-2")
 
 def get_umap_figure(player_id: str) -> go.Figure:
     """

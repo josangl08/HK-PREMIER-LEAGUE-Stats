@@ -18,6 +18,8 @@ from utils.stage_helpers import (
     get_cached_image_path,
     render_image_gallery,
     _get_position_group,
+    _resolve_team_logo,
+    _resolve_team_jersey,
 )
 from utils.performance_helpers import get_streaming_label
 from utils.app_context import get_hong_kong_data_manager
@@ -26,6 +28,203 @@ from utils.competition_helpers import normalize_competition, get_competition_log
 import html as _html_lib
 
 logger = logging.getLogger(__name__)
+
+
+def _get_active_player_identity():
+    """Returns `(player_id, player_name, user_role)` for the logged-in portal user."""
+    player_id = getattr(current_user, "player_id", None)
+    user_role = getattr(current_user, "role", "player") if current_user else "player"
+    player_name = ""
+    if player_id:
+        from utils.player_index import get_player_index
+
+        pi = get_player_index()
+        player_info = pi.get_player_info(player_id)
+        player_name = player_info.get("canonical_name", "") if player_info else ""
+    return player_id, player_name, user_role
+
+
+def _render_default_stage_content():
+    """Renders the default dashboard stage inside the persistent shell."""
+    try:
+        player_id, player_name, user_role = _get_active_player_identity()
+        if player_id and player_name:
+            return render_player_dashboard(player_name, player_id, user_role)
+    except Exception as exc:
+        logger.warning(f"default stage render error: {exc}")
+    return no_update
+
+
+def _render_stage_content_for_context(context):
+    """Dispatches a context dict to the correct stage renderer."""
+    if not context:
+        return _render_default_stage_content()
+
+    user_role = getattr(current_user, "role", "player") if current_user else "player"
+    m_type = context.get("type")
+    payload = context.get("payload", {})
+
+    if m_type == "post-match":
+        return render_post_match(payload)
+
+    if m_type == "pre-match":
+        pos_group = ""
+        position_main = ""
+        current_role_hint = ""
+        try:
+            player_id = getattr(current_user, "player_id", None)
+            if player_id:
+                from utils.player_index import get_player_index
+                from utils.app_context import get_hong_kong_data_manager as _get_dm
+                from models.db_models import Player, MatchHistory
+                from utils.db_engine import SessionFactory
+
+                pi = get_player_index()
+                player_info = pi.get_player_info(player_id)
+                player_name = player_info.get("canonical_name", "") if player_info else ""
+                with SessionFactory() as session:
+                    player_obj = session.get(Player, player_id)
+                    position_main = str(getattr(player_obj, "position_main", "") or "").strip()
+                    recent_matches = (
+                        session.query(MatchHistory)
+                        .filter(MatchHistory.player_id == player_id)
+                        .order_by(MatchHistory.date.desc())
+                        .limit(8)
+                        .all()
+                    )
+                    weighted = {}
+                    for idx, match in enumerate(recent_matches):
+                        raw_pos = str(getattr(match, "position", "") or "").strip().upper()
+                        mapped = {
+                            "ED": "RW", "EI": "LW", "ID": "RM", "II": "LM",
+                            "MCO": "AMF", "CMF": "CM", "DMF": "DM",
+                        }.get(raw_pos, raw_pos)
+                        if not mapped:
+                            continue
+                        minutes = int(getattr(match, "minutes_played", 0) or 0)
+                        weight = max(minutes, 1) + max(0, 8 - idx)
+                        weighted[mapped] = weighted.get(mapped, 0) + weight
+                    if weighted:
+                        current_role_hint = max(weighted.items(), key=lambda item: item[1])[0]
+                if player_name:
+                    pos_group = _get_position_group(player_name, _get_dm())
+        except Exception:
+            pass
+        return render_pre_match(
+            payload,
+            player_pos_group=pos_group,
+            player_position_main=position_main,
+            player_current_role=current_role_hint,
+        )
+
+    if m_type == "career":
+        return render_career_insights(payload, user_role)
+
+    return dbc.Alert(f"Tipo de contexto desconocido: {m_type}", color="warning")
+
+
+def _get_career_parent_context(milestones_data, milestone) -> dict | None:
+    """Returns the season-level career context for a non-career milestone."""
+    if not milestone:
+        return None
+    milestone_year = milestone.get("group_year") or str(milestone.get("date", ""))[:4]
+    fallback_career = next(
+        (
+            item for item in (milestones_data or [])
+            if item.get("type") == "career"
+            and (item.get("group_year") or str(item.get("date", ""))[:4]) == milestone_year
+        ),
+        None,
+    )
+    if not fallback_career:
+        return None
+    return {
+        "id": fallback_career.get("id"),
+        "type": "career",
+        "payload": fallback_career["payload"],
+    }
+
+
+def _render_season_team_assets(team_name: str):
+    """Top-right team assets for career cards: crest + home kit + away kit."""
+    if not team_name:
+        return None
+
+    crest = _resolve_team_logo(team_name)
+    home_jersey = _resolve_team_jersey(team_name, "home")
+    away_jersey = _resolve_team_jersey(team_name, "away")
+
+    items = []
+    if crest:
+        items.append(
+            html.Img(
+                src=crest,
+                title=team_name,
+                id={"type": "season-team-asset", "src": crest, "label": team_name},
+                style={"width": "34px", "height": "34px", "objectFit": "contain", "display": "block", "cursor": "zoom-in"},
+            )
+        )
+    if home_jersey:
+        items.append(
+            html.Img(
+                src=home_jersey,
+                title=f"{team_name} home kit",
+                id={"type": "season-team-asset", "src": home_jersey, "label": f"{team_name} home kit"},
+                style={"width": "40px", "height": "40px", "objectFit": "contain", "display": "block", "marginLeft": "2px", "marginTop": "-2px", "cursor": "zoom-in"},
+            )
+        )
+    if away_jersey:
+        items.append(
+            html.Img(
+                src=away_jersey,
+                title=f"{team_name} away kit",
+                id={"type": "season-team-asset", "src": away_jersey, "label": f"{team_name} away kit"},
+                style={"width": "40px", "height": "40px", "objectFit": "contain", "display": "block", "marginLeft": "-4px", "marginTop": "-2px", "cursor": "zoom-in"},
+            )
+        )
+
+    if not items:
+        return None
+
+    return html.Div(
+        items,
+        className="season-team-assets",
+        style={
+            "display": "flex",
+            "alignItems": "flex-start",
+            "justifyContent": "flex-end",
+            "gap": "0px",
+            "marginTop": "0px",
+            "width": "100%",
+        },
+    )
+
+
+def _get_player_current_team_name(player_id: str) -> str:
+    """DB fallback for career header assets when serialized payload lacks season_team."""
+    if not player_id:
+        return ""
+    try:
+        from sqlalchemy import select
+        from sqlalchemy.orm import joinedload
+        from utils.db_engine import SessionFactory
+        from models.db_models import Player
+
+        session = SessionFactory()
+        try:
+            stmt = (
+                select(Player)
+                .options(joinedload(Player.current_team))
+                .where(Player.id == player_id)
+            )
+            player = session.execute(stmt).unique().scalar_one_or_none()
+            if player and player.current_team:
+                return player.current_team.name or ""
+            return ""
+        finally:
+            session.close()
+    except Exception:
+        return ""
 
 # Static team color palette — sourced from official club identity (Badge and Kits)
 _TEAM_COLORS = {
@@ -298,6 +497,15 @@ def _lucide(name: str) -> html.I:
     return html.I(**{"data-lucide": name, "className": "lucide-inline-icon me-1"})
 
 
+def _card_icon(color: str, size: str = "14px", class_name: str = "me-1") -> html.I:
+    """Returns a vertical rectangle icon for disciplinary cards."""
+    return html.I(
+        **{"data-lucide": "rectangle-vertical"},
+        className=class_name,
+        style={"width": size, "height": size, "color": color, "opacity": "0.95", "lineHeight": "1"},
+    )
+
+
 def _team_pill(name: str, logo_url, reverse: bool = False) -> html.Div:
     """Small team block: logo + name (or name + logo when reverse=True)."""
     
@@ -393,44 +601,62 @@ def _build_header_label(
             ),
             html.Div(
                 [
-                    # Partidos
                     html.Div([
-                        html.I(className="bi bi-calendar-check me-1", style={"fontSize": "0.9rem"}),
+                        html.Span(
+                            html.I(className="bi bi-calendar-check", style={"fontSize": "20px", "lineHeight": "1"}),
+                            className="me-1 d-inline-flex align-items-center justify-content-center",
+                            style={"width": "20px", "height": "20px", "flexShrink": "0"},
+                        ),
                         html.Span(str(pj)),
-                    ], className="portal-text-muted d-flex align-items-center me-2"),
-                    
-                    # Minutos
+                    ], className="portal-text-muted d-flex align-items-center justify-content-start", style={"whiteSpace": "nowrap"}),
                     html.Div([
-                        html.I(className="bi bi-stopwatch me-1", style={"fontSize": "0.9rem"}),
+                        html.Span(
+                            html.I(className="bi bi-stopwatch", style={"fontSize": "20px", "lineHeight": "1"}),
+                            className="me-1 d-inline-flex align-items-center justify-content-center",
+                            style={"width": "20px", "height": "20px", "flexShrink": "0"},
+                        ),
                         html.Span(str(minutes)),
-                    ], className="portal-text-muted d-flex align-items-center me-2"),
-
-                    # Goles
+                    ], className="portal-text-muted d-flex align-items-center justify-content-start", style={"whiteSpace": "nowrap"}),
                     html.Div([
-                        html.Img(src="/assets/icons/soccer-ball.svg", style={"width": "14px", "height": "14px", "opacity": "0.85"}, className="me-1"),
+                        html.Span(
+                            html.Img(src="/assets/icons/soccer-ball.svg", style={"width": "20px", "height": "20px", "opacity": "0.85", "display": "block"}),
+                            className="me-1 d-inline-flex align-items-center justify-content-center",
+                            style={"width": "20px", "height": "20px", "flexShrink": "0"},
+                        ),
                         html.Span(str(goals)),
-                    ], className="portal-text-muted d-flex align-items-center me-2"),
-
-                    # Asistencias
+                    ], className="portal-text-muted d-flex align-items-center justify-content-start", style={"whiteSpace": "nowrap"}),
                     html.Div([
-                        html.I(**{"data-lucide": "sport-shoe"}, style={"width": "14px", "height": "14px", "opacity": "0.85"}, className="me-1"),
+                        html.Span(
+                            html.I(**{"data-lucide": "sport-shoe"}, style={"width": "20px", "height": "20px", "opacity": "0.9", "lineHeight": "1"}),
+                            className="me-1 d-inline-flex align-items-center justify-content-center",
+                            style={"width": "20px", "height": "20px", "flexShrink": "0"},
+                        ),
                         html.Span(str(assists)),
-                    ], className="portal-text-muted d-flex align-items-center me-2"),
-
-                    # Amarillas
+                    ], className="portal-text-muted d-flex align-items-center justify-content-start", style={"whiteSpace": "nowrap"}),
                     html.Div([
-                        html.I(className="bi bi-square me-1", style={"fontSize": "0.8rem", "color": "#f4c351"}),
+                        html.Span(
+                            _card_icon("#f4c351", size="20px"),
+                            className="me-1 d-inline-flex align-items-center justify-content-center",
+                            style={"width": "20px", "height": "20px", "flexShrink": "0"},
+                        ),
                         html.Span(str(yellow)),
-                    ], className="portal-text-muted d-flex align-items-center me-2"),
-
-                    # Rojas
+                    ], className="portal-text-muted d-flex align-items-center justify-content-start", style={"whiteSpace": "nowrap"}),
                     html.Div([
-                        html.I(className="bi bi-square me-1", style={"fontSize": "0.8rem", "color": "#ef6b6b"}),
+                        html.Span(
+                            _card_icon("#ef6b6b", size="20px"),
+                            className="me-1 d-inline-flex align-items-center justify-content-center",
+                            style={"width": "20px", "height": "20px", "flexShrink": "0"},
+                        ),
                         html.Span(str(red)),
-                    ], className="portal-text-muted d-flex align-items-center"),
+                    ], className="portal-text-muted d-flex align-items-center justify-content-start", style={"whiteSpace": "nowrap"}),
                 ],
-                className="d-flex align-items-center flex-wrap mt-1",
-                style={"gap": "4px", "marginLeft": "16px"}
+                className="season-stats-grid",
+                style={
+                    "justifyContent": "start",
+                    "marginLeft": "16px",
+                    "marginTop": "12px",
+                    "width": "100%",
+                }
             ),
         ]
 
@@ -519,10 +745,19 @@ def _build_collapse_content(
         # 6.3 — compute H2H
         home = payload.get("home_team", "")
         away = payload.get("away_team", "")
+        user_team = payload.get("player_team", "") or payload.get("team_name", "") or payload.get("team", "") or ""
+        team_a = home
+        team_b = away
+        user_team_norm = str(user_team or "").strip().lower()
+        if user_team_norm:
+            if user_team_norm == str(away or "").strip().lower():
+                team_a, team_b = away, home
+            elif user_team_norm == str(home or "").strip().lower():
+                team_a, team_b = home, away
         h2h = None
-        if home and away:
+        if team_a and team_b:
             try:
-                h2h = get_h2h_record(home, away, last_n=3)
+                h2h = get_h2h_record(team_a, team_b, last_n=None)
             except Exception:
                 pass
 
@@ -566,7 +801,7 @@ def _build_collapse_content(
                     className="d-flex align-items-center gap-1 mb-1",
                 )
             )
-        if streaming_url:
+        if streaming_url and "facebook.com" not in str(streaming_url).lower():
             platform_label = get_streaming_label(streaming_url, streaming_platform)
             rows.append(
                 html.Div(
@@ -583,7 +818,7 @@ def _build_collapse_content(
                     className="d-flex align-items-center gap-1 mb-1",
                 )
             )
-        else:
+        elif not streaming_url:
             rows.append(
                 html.Div(
                     [
@@ -596,40 +831,57 @@ def _build_collapse_content(
                     className="d-flex align-items-center gap-1 mb-1",
                 )
             )
-        # AI Win Prob (stub at 50%)
-        win_prob = payload.get("win_probability", 50)
-        rows.append(
-            html.Div(
-                [
-                    html.Small(
-                        [_lucide("bar-chart-2"), f"Win prob: {win_prob}%"],
-                        className="portal-text-muted d-block mb-1",
-                    ),
-                    dbc.Progress(
-                        value=win_prob,
-                        max=100,
-                        color="success" if win_prob >= 50 else "warning",
-                        style={"height": "5px"},
-                        className="mb-1",
-                    ),
-                ],
-                className="mb-1",
-            )
-        )
-        # H2H
         if h2h and h2h.get("matches_found", 0) > 0:
-            h2h_txt = (
-                f"H2H (last {h2h['matches_found']}): "
-                f"{h2h['wins']}V – {h2h['draws']}E – {h2h['losses']}D"
+            matches_found = max(int(h2h.get("matches_found", 0) or 0), 1)
+            wins = int(h2h.get("wins", 0) or 0)
+            draws = int(h2h.get("draws", 0) or 0)
+            losses = int(h2h.get("losses", 0) or 0)
+            h2h_txt = f"H2H: {wins}W - {draws}D - {losses}L"
+            rows.append(
+                html.Div(
+                    [
+                        html.Small(
+                            [_lucide("shield"), h2h_txt],
+                            className="portal-text-muted d-block mb-1",
+                        ),
+                        html.Div(
+                            [
+                                html.Div(style={
+                                    "width": f"{(wins / matches_found) * 100:.2f}%",
+                                    "background": "#76d289",
+                                    "height": "100%",
+                                }),
+                                html.Div(style={
+                                    "width": f"{(draws / matches_found) * 100:.2f}%",
+                                    "background": "#f4c351",
+                                    "height": "100%",
+                                }),
+                                html.Div(style={
+                                    "width": f"{(losses / matches_found) * 100:.2f}%",
+                                    "background": "#ef6b6b",
+                                    "height": "100%",
+                                }),
+                            ],
+                            style={
+                                "display": "flex",
+                                "height": "6px",
+                                "borderRadius": "999px",
+                                "overflow": "hidden",
+                                "background": "rgba(255,255,255,0.08)",
+                            },
+                            className="mb-1",
+                        ),
+                    ],
+                    className="mb-1",
+                )
             )
         else:
-            h2h_txt = "H2H: sin datos"
-        rows.append(
-            html.Div(
-                [_lucide("shield"), html.Small(h2h_txt, className="portal-text-muted")],
-                className="d-flex align-items-center gap-1",
+            rows.append(
+                html.Div(
+                    [_lucide("shield"), html.Small("H2H: sin datos", className="portal-text-muted")],
+                    className="d-flex align-items-center gap-1",
+                )
             )
-        )
         return html.Div(rows, className="px-2 pb-2 pt-1")
 
     if m_type == "post-match":
@@ -682,17 +934,17 @@ def _build_collapse_content(
                 html.Div([
                     html.I(className="bi bi-stopwatch me-1", style={"fontSize": "0.85rem"}),
                     html.Span(f"{minutes}'"),
-                ], className="portal-text-muted d-flex align-items-center me-3"),
+                ], className="portal-text-muted d-flex align-items-center justify-content-center", style={"flex": "1 1 0", "minWidth": "0"}),
                 
                 html.Div([
                     html.Img(src="/assets/icons/soccer-ball.svg", style={"width": "14px", "height": "14px", "opacity": "0.85"}, className="me-1"),
                     html.Span(f"{goals}G"),
-                ], className="portal-text-muted d-flex align-items-center me-3"),
+                ], className="portal-text-muted d-flex align-items-center justify-content-center", style={"flex": "1 1 0", "minWidth": "0"}),
 
                 html.Div([
                     html.I(**{"data-lucide": "sport-shoe"}, style={"width": "14px", "height": "14px", "opacity": "0.85"}, className="me-1"),
                     html.Span(f"{assists}A"),
-                ], className="portal-text-muted d-flex align-items-center"),
+                ], className="portal-text-muted d-flex align-items-center justify-content-center", style={"flex": "1 1 0", "minWidth": "0"}),
             ]
             if own_goals > 0:
                 stat_parts.append(
@@ -704,7 +956,7 @@ def _build_collapse_content(
 
             rows.append(
                 html.Div(
-                    stat_parts, className="d-flex flex-wrap align-items-center mb-2"
+                    stat_parts, className="d-flex align-items-center mb-2", style={"width": "100%", "gap": "8px"}
                 )
             )
 
@@ -713,14 +965,14 @@ def _build_collapse_content(
             if yellow > 0:
                 detail_parts.append(
                     html.Div([
-                        html.I(className="bi bi-square me-1", style={"fontSize": "0.8rem", "color": "#f4c351"}),
+                        _card_icon("#f4c351"),
                         html.Span(f"{yellow} Yellow"),
                     ], className="portal-text-muted d-flex align-items-center me-3", style={"fontSize": "0.8rem"})
                 )
             if red > 0:
                 detail_parts.append(
                     html.Div([
-                        html.I(className="bi bi-square me-1", style={"fontSize": "0.8rem", "color": "#ef6b6b"}),
+                        _card_icon("#ef6b6b"),
                         html.Span(f"{red} Red"),
                     ], className="portal-text-muted d-flex align-items-center", style={"fontSize": "0.8rem"})
                 )
@@ -841,41 +1093,48 @@ def _build_collapse_content(
                             [
                                 # MP
                                 html.Div([
-                                    html.I(className="bi bi-calendar-check me-1", style={"fontSize": "0.75rem"}),
-                                    html.Span(str(stats['pj'])),
-                                ], className="portal-text-muted d-flex align-items-center me-2", style={"fontSize": "0.7rem"}),
+                                    html.I(className="bi bi-calendar-check me-1", style={"fontSize": "0.86rem", "opacity": "0.95", "color": "#e4ecf4"}),
+                                    html.Span(str(stats['pj']), style={"color": "#e4ecf4", "fontWeight": "600"}),
+                                ], className="portal-text-muted d-flex align-items-center justify-content-center", style={"fontSize": "0.8rem", "color": "#e4ecf4", "flex": "1 1 0", "minWidth": "0", "whiteSpace": "nowrap"}),
                                 
                                 # Min
                                 html.Div([
-                                    html.I(className="bi bi-stopwatch me-1", style={"fontSize": "0.75rem"}),
-                                    html.Span(str(stats['minutes'])),
-                                ], className="portal-text-muted d-flex align-items-center me-2", style={"fontSize": "0.7rem"}),
+                                    html.I(className="bi bi-stopwatch me-1", style={"fontSize": "0.86rem", "opacity": "0.95", "color": "#e4ecf4"}),
+                                    html.Span(str(stats['minutes']), style={"color": "#e4ecf4", "fontWeight": "600"}),
+                                ], className="portal-text-muted d-flex align-items-center justify-content-center", style={"fontSize": "0.8rem", "color": "#e4ecf4", "flex": "1.2 1 0", "minWidth": "0", "whiteSpace": "nowrap"}),
 
                                 # Goals
                                 html.Div([
-                                    html.Img(src="/assets/icons/soccer-ball.svg", style={"width": "12px", "height": "14px", "opacity": "0.8"}, className="me-1"),
-                                    html.Span(str(stats['goals'])),
-                                ], className="portal-text-muted d-flex align-items-center me-2", style={"fontSize": "0.7rem"}),
+                                    html.Img(src="/assets/icons/soccer-ball.svg", style={"width": "15px", "height": "17px", "opacity": "0.95"}, className="me-1"),
+                                    html.Span(str(stats['goals']), style={"color": "#e4ecf4", "fontWeight": "600"}),
+                                ], className="portal-text-muted d-flex align-items-center justify-content-center", style={"fontSize": "0.8rem", "color": "#e4ecf4", "flex": "1 1 0", "minWidth": "0", "whiteSpace": "nowrap"}),
 
                                 # Assists
                                 html.Div([
-                                    html.I(**{"data-lucide": "sport-shoe"}, style={"width": "12px", "height": "12px", "opacity": "0.8"}, className="me-1"),
-                                    html.Span(str(stats['assists'])),
-                                ], className="portal-text-muted d-flex align-items-center me-2", style={"fontSize": "0.7rem"}),
+                                    html.I(**{"data-lucide": "sport-shoe"}, style={"width": "15px", "height": "15px", "opacity": "0.95", "color": "#e4ecf4"}, className="me-1"),
+                                    html.Span(str(stats['assists']), style={"color": "#e4ecf4", "fontWeight": "600"}),
+                                ], className="portal-text-muted d-flex align-items-center justify-content-center", style={"fontSize": "0.8rem", "color": "#e4ecf4", "flex": "1 1 0", "minWidth": "0", "whiteSpace": "nowrap"}),
 
-                                # Yellow
-                                html.Div([
-                                    html.I(className="bi bi-square me-1", style={"fontSize": "0.7rem", "color": "#f4c351"}),
-                                    html.Span(str(stats['yellow'])),
-                                ], className="portal-text-muted d-flex align-items-center me-2", style={"fontSize": "0.7rem"}),
+                                html.Div(
+                                    [
+                                        # Yellow
+                                        html.Div([
+                                            _card_icon("#f4c351", size="13px"),
+                                            html.Span(str(stats['yellow']), style={"color": "#e4ecf4", "fontWeight": "600"}),
+                                        ], className="portal-text-muted d-flex align-items-center justify-content-center", style={"fontSize": "0.8rem", "color": "#e4ecf4", "whiteSpace": "nowrap"}),
 
-                                # Red
-                                html.Div([
-                                    html.I(className="bi bi-square me-1", style={"fontSize": "0.7rem", "color": "#ef6b6b"}),
-                                    html.Span(str(stats['red'])),
-                                ], className="portal-text-muted d-flex align-items-center", style={"fontSize": "0.7rem"}),
+                                        # Red
+                                        html.Div([
+                                            _card_icon("#ef6b6b", size="13px"),
+                                            html.Span(str(stats['red']), style={"color": "#e4ecf4", "fontWeight": "600"}),
+                                        ], className="portal-text-muted d-flex align-items-center justify-content-center", style={"fontSize": "0.8rem", "color": "#e4ecf4", "whiteSpace": "nowrap"}),
+                                    ],
+                                    className="d-flex align-items-center justify-content-center",
+                                    style={"flex": "1.45 1 0", "minWidth": "0", "gap": "4px"},
+                                ),
                             ],
-                            className="d-flex align-items-center flex-wrap flex-grow-1",
+                            className="d-flex align-items-center flex-grow-1",
+                            style={"gap": "6px", "width": "100%"},
                         ),
                     ],
                     className="d-flex align-items-center border-bottom border-secondary border-opacity-25 py-2",
@@ -1062,7 +1321,16 @@ def _render_milestone_item(
                 n_clicks=0,
             )
         else:
-            # Career card: arrow sits inline at the right
+            # Career card: arrow anchored bottom-right like pre/post-match
+            season_team_name = (
+                payload.get("season_team")
+                or payload.get("team_name")
+                or payload.get("team")
+                or _get_player_current_team_name(payload.get("player_id") or payload.get("player"))
+            )
+            season_team_assets = _render_season_team_assets(
+                season_team_name
+            )
             detail_btn = html.Div(
                 html.I(
                     **{
@@ -1071,25 +1339,71 @@ def _render_milestone_item(
                     }
                 ),
                 id={"type": "milestone-detail-btn", "index": milestone_id},
-                className=f"event-detail-btn event-detail-btn-{color} flex-shrink-0",
+                className=f"event-detail-btn event-detail-btn-{color}",
                 n_clicks=0,
                 title="Ver Detalle",
-                style={"cursor": "pointer"},
+                style={
+                    "cursor": "pointer",
+                    "gridColumn": "2",
+                    "gridRow": "2",
+                    "justifySelf": "end",
+                    "alignSelf": "end",
+                },
+            )
+            right_action_stack = html.Div(
+                [
+                    html.Div(
+                        season_team_assets,
+                        className="season-team-assets-wrap",
+                        style={
+                            "marginTop": "2px",
+                            "minHeight": "30px",
+                            "display": "flex",
+                            "alignItems": "flex-start",
+                            "justifyContent": "flex-end",
+                            "width": "100%",
+                        },
+                    ),
+                    detail_btn,
+                ],
+                className="career-right-stack",
+                style={
+                    "display": "flex",
+                    "flexDirection": "column",
+                    "alignItems": "flex-end",
+                    "justifyContent": "space-between",
+                    "gridColumn": "2",
+                    "gridRow": "1 / 3",
+                    "minWidth": "108px",
+                    "width": "108px",
+                    "maxWidth": "108px",
+                    "flexShrink": "0",
+                    "minHeight": "74px",
+                    "height": "100%",
+                },
             )
             header_row = html.Div(
                 [
                     html.Div(
                         header_label_content,
-                        className="flex-grow-1",
                         id={"type": "timeline-milestone-text", "index": milestone_id},
-                        style={"cursor": "pointer"},
+                        className="career-header-main",
+                        style={"cursor": "pointer", "gridRow": "1 / 3", "minWidth": "0"},
                     ),
-                    detail_btn,
+                    right_action_stack,
                 ],
                 id={"type": "milestone-header", "index": milestone_id},
-                className="d-flex align-items-center gap-2 py-1 px-0",
+                className="milestone-header milestone-header--career",
+                style={
+                    "display": "grid",
+                    "gridTemplateColumns": "minmax(0, 1fr) 108px",
+                    "gridTemplateRows": "1fr auto",
+                    "minHeight": "80px",
+                    "padding": "5px 0 0 0",
+                    "cursor": "pointer",
+                    "columnGap": "8px",
+                },
                 n_clicks=0,
-                style={"cursor": "pointer"},
             )
 
         milestone_body = html.Div(
@@ -1140,6 +1454,22 @@ def _render_milestone_item(
 
 def register_player_portal_callbacks(app):
     """Registers all Player Portal callbacks."""
+
+    @app.callback(
+        Output("season-asset-modal", "is_open"),
+        Output("season-asset-modal-image", "src"),
+        Output("season-asset-modal-title", "children"),
+        Input({"type": "season-team-asset", "src": ALL, "label": ALL}, "n_clicks"),
+        Input("season-asset-modal", "is_open"),
+        prevent_initial_call=True,
+    )
+    def toggle_season_asset_modal(asset_clicks, modal_open):
+        triggered = ctx.triggered_id
+        if isinstance(triggered, dict) and triggered.get("type") == "season-team-asset":
+            if not any((click or 0) > 0 for click in (asset_clicks or [])):
+                return False, no_update, no_update
+            return True, triggered.get("src"), triggered.get("label", "")
+        return False, no_update, no_update
 
     # ------------------------------------------------------------------ #
     # Sync-status banner + interval enable/disable                        #
@@ -1567,7 +1897,7 @@ def register_player_portal_callbacks(app):
             for m in milestones_data:
                 m_year = m.get("group_year") or str(m.get("date", ""))[:4]
                 if m.get("type") == "career" and m_year == str(selected_year):
-                    return {"type": "career", "payload": m["payload"]}
+                    return {"id": m.get("id"), "type": "career", "payload": m["payload"]}
             return no_update
 
         if isinstance(triggered, dict) and triggered.get("type") in (
@@ -1580,22 +1910,22 @@ def register_player_portal_callbacks(app):
             if not trigger_value:
                 return no_update
             milestone_id = triggered["index"]
-            # Toggle: if this milestone is already the active context, clear it → dashboard
-            if (
-                current_context
-                and current_context.get("payload", {}) == next(
-                    (item.get("payload") for item in milestones_data if item.get("id") == milestone_id),
-                    None,
-                )
-            ):
-                return None
-            # Find the milestone by ID in the list
-            m = next(
+            milestone = next(
                 (item for item in milestones_data if item.get("id") == milestone_id),
                 None,
             )
+            # Toggle: if this milestone is already the active context, clear it → dashboard
+            if current_context and current_context.get("id") == milestone_id:
+                return current_context.get("parent") or None
+            # Find the milestone by ID in the list
+            m = milestone
             if m:
-                return {"type": m["type"], "payload": m["payload"]}
+                context = {"id": m.get("id"), "type": m["type"], "payload": m["payload"]}
+                if m.get("type") != "career":
+                    parent = _get_career_parent_context(milestones_data, m)
+                    if parent:
+                        context["parent"] = parent
+                return context
 
         return no_update
 
@@ -1614,21 +1944,7 @@ def register_player_portal_callbacks(app):
         """
         if milestones_data is None:
             return no_update
-        try:
-            player_id   = getattr(current_user, "player_id", None)
-            user_role   = getattr(current_user, "role", "player") if current_user else "player"
-            if not player_id:
-                return no_update
-            from utils.player_index import get_player_index
-            pi          = get_player_index()
-            player_info = pi.get_player_info(player_id)
-            player_name = player_info.get("canonical_name", "") if player_info else ""
-            if not player_name:
-                return no_update
-            return render_career_overview(player_name, player_id, user_role)
-        except Exception as e:
-            logger.warning(f"render_initial_stage error: {e}")
-            return no_update
+        return _render_default_stage_content()
 
     # ------------------------------------------------------------------ #
     # timeline-context-store → Stage content                              #
@@ -1640,86 +1956,8 @@ def register_player_portal_callbacks(app):
     )
     def update_stage(context):
         """Dispatches rendering to the appropriate stage helper based on card type."""
-        if not context:
-            # Card was closed — show career overview again
-            try:
-                player_id   = getattr(current_user, "player_id", None)
-                user_role   = getattr(current_user, "role", "player") if current_user else "player"
-                if player_id:
-                    from utils.player_index import get_player_index
-                    pi          = get_player_index()
-                    player_info = pi.get_player_info(player_id)
-                    player_name = player_info.get("canonical_name", "") if player_info else ""
-                    if player_name:
-                        return render_player_dashboard(player_name, player_id, user_role)
-            except Exception:
-                pass
-            return no_update
-
-        user_role = (
-            getattr(current_user, "role", "player") if current_user else "player"
-        )
-        m_type  = context.get("type")
-        payload = context.get("payload", {})
-
         try:
-            if m_type == "post-match":
-                return render_post_match(payload)
-            elif m_type == "pre-match":
-                # Resolve logged-in player's position for rival analysis
-                pos_group = ""
-                position_main = ""
-                current_role_hint = ""
-                try:
-                    player_id   = getattr(current_user, "player_id", None)
-                    if player_id:
-                        from utils.player_index import get_player_index
-                        from utils.app_context import get_hong_kong_data_manager as _get_dm
-                        from models.db_models import Player, MatchHistory
-                        from utils.db_engine import SessionFactory
-                        pi          = get_player_index()
-                        player_info = pi.get_player_info(player_id)
-                        player_name = player_info.get("canonical_name", "") if player_info else ""
-                        with SessionFactory() as session:
-                            player_obj = session.get(Player, player_id)
-                            position_main = str(getattr(player_obj, "position_main", "") or "").strip()
-                            recent_matches = (
-                                session.query(MatchHistory)
-                                .filter(MatchHistory.player_id == player_id)
-                                .order_by(MatchHistory.date.desc())
-                                .limit(8)
-                                .all()
-                            )
-                            weighted = {}
-                            for idx, match in enumerate(recent_matches):
-                                raw_pos = str(getattr(match, "position", "") or "").strip().upper()
-                                mapped = {
-                                    "ED": "RW", "EI": "LW", "ID": "RM", "II": "LM",
-                                    "MCO": "AMF", "CMF": "CM", "DMF": "DM",
-                                }.get(raw_pos, raw_pos)
-                                if not mapped:
-                                    continue
-                                minutes = int(getattr(match, "minutes_played", 0) or 0)
-                                weight = max(minutes, 1) + max(0, 8 - idx)
-                                weighted[mapped] = weighted.get(mapped, 0) + weight
-                            if weighted:
-                                current_role_hint = max(weighted.items(), key=lambda item: item[1])[0]
-                        if player_name:
-                            pos_group = _get_position_group(player_name, _get_dm())
-                except Exception:
-                    pass
-                return render_pre_match(
-                    payload,
-                    player_pos_group=pos_group,
-                    player_position_main=position_main,
-                    player_current_role=current_role_hint,
-                )
-            elif m_type == "career":
-                return render_career_insights(payload, user_role)
-            else:
-                return dbc.Alert(
-                    f"Tipo de contexto desconocido: {m_type}", color="warning"
-                )
+            return _render_stage_content_for_context(context)
         except Exception as e:
             logger.error(f"update_stage error: {e}")
             return dbc.Alert("Error al renderizar el escenario.", color="danger")
@@ -1889,6 +2127,41 @@ def register_player_portal_callbacks(app):
         prevent_initial_call=True,
     )
 
+    app.clientside_callback(
+        """
+        function(n_clicks) {
+            if (!n_clicks) {
+                return window.dash_clientside.no_update;
+            }
+            var scroller = document.querySelector('.prematch-h2h-scroll');
+            if (!scroller) {
+                return window.dash_clientside.no_update;
+            }
+            var nextItem = scroller.querySelector('.prematch-h2h-item--future');
+            var nowItem = scroller.querySelector('.prematch-h2h-item--now');
+            var target = nextItem || nowItem;
+            if (!target) {
+                return window.dash_clientside.no_update;
+            }
+
+            var targetLeft = target.offsetLeft;
+            var targetWidth = target.offsetWidth;
+            var desired = Math.max(
+                0,
+                Math.min(
+                    scroller.scrollWidth - scroller.clientWidth,
+                    targetLeft + targetWidth - scroller.clientWidth + 22
+                )
+            );
+            scroller.scrollTo({ left: desired, behavior: 'smooth' });
+            return n_clicks;
+        }
+        """,
+        Output("prematch-h2h-scroll-dummy", "data"),
+        Input("prematch-h2h-today-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )
+
 
     # ------------------------------------------------------------------ #
     # Phase 3: Action Node click → Stage gallery (task 6.1)               #
@@ -1898,18 +2171,18 @@ def register_player_portal_callbacks(app):
         Output("gallery-close-btn", "style"),
         Input({"type": "action-node", "index": ALL}, "n_clicks"),
         Input("gallery-close-btn", "n_clicks"),
+        State("timeline-context-store", "data"),
         prevent_initial_call=True,
     )
-    def update_stage_from_action_node(node_clicks, close_clicks):
+    def update_stage_from_action_node(node_clicks, close_clicks, active_context):
         """Opens image gallery in Stage when an Action Node is clicked; close button resets."""
         if not ctx.triggered_id:
             return no_update, no_update
 
-        # Close button resets stage to skeleton loader and hides itself
+        # Close button restores the active stage context and hides itself
         if ctx.triggered_id == "gallery-close-btn":
-            from utils.skeleton_components import create_skeleton_stage
-
-            return create_skeleton_stage(), {"display": "none"}
+            restored = _render_stage_content_for_context(active_context)
+            return restored, {"display": "none"}
 
         triggered = ctx.triggered_id
         if not isinstance(triggered, dict) or triggered.get("type") != "action-node":
@@ -2015,6 +2288,7 @@ def register_player_portal_callbacks(app):
         Output("stage-content", "children", allow_duplicate=True),
         Output("timeline-pagination-store", "data", allow_duplicate=True),
         Output("card-editor-state", "data", allow_duplicate=True),
+        Output("gallery-close-btn", "style", allow_duplicate=True),
         Input({"type": "action-node-pill", "index": ALL}, "n_clicks"),
         State("milestones-data-store", "data"),
         State("timeline-pagination-store", "data"),
@@ -2023,22 +2297,22 @@ def register_player_portal_callbacks(app):
     def handle_action_node_pill(n_clicks_list, milestones_data, pagination_store):
         """Open Card Studio on first click; show gallery if already generated."""
         if not ctx.triggered_id or not any(n_clicks_list or []):
-            return no_update, no_update, no_update
+            return no_update, no_update, no_update, no_update
         triggered = ctx.triggered_id
         if (
             not isinstance(triggered, dict)
             or triggered.get("type") != "action-node-pill"
         ):
-            return no_update, no_update, no_update
+            return no_update, no_update, no_update, no_update
 
         milestone_id = triggered["index"]
         if not milestones_data:
-            return no_update, no_update, no_update
+            return no_update, no_update, no_update, no_update
         m = next(
             (item for item in milestones_data if item.get("id") == milestone_id), None
         )
         if not m:
-            return no_update, no_update, no_update
+            return no_update, no_update, no_update, no_update
 
         store = pagination_store or {}
         generated = dict(store.get("generated", {}))
@@ -2049,11 +2323,14 @@ def register_player_portal_callbacks(app):
         # Already generated → show gallery from new player_cards dir (with cache fallback)
         if is_generated:
             path = get_cached_image_path(milestone_id)
-            return render_image_gallery(path), no_update, no_update
+            return render_image_gallery(path), no_update, no_update, {
+                "display": "inline-flex",
+                "alignItems": "center",
+            }
 
         # Only handle card-type milestones
         if m_type not in ("pre-match", "post-match"):
-            return no_update, no_update, no_update
+            return no_update, no_update, no_update, no_update
 
         card_type = m_type
 
@@ -2124,13 +2401,14 @@ def register_player_portal_callbacks(app):
             else:
                 studio = create_performance_card_studio(milestone_id, match_context, [], initial_preview=initial_preview, album=album)
 
-            return studio, no_update, editor_state
+            return studio, no_update, editor_state, {"display": "none"}
         except Exception as exc:
             logger.error(f"handle_action_node_pill studio render error: {exc}")
             return (
                 dbc.Alert("Error opening the Card Studio.", color="danger"),
                 no_update,
                 no_update,
+                {"display": "none"},
             )
 
     # ------------------------------------------------------------------ #
@@ -2275,3 +2553,307 @@ def _get_player_sync_status(player_id: str) -> dict:
             session.close()
     except Exception:
         return {"state": "ready"}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Career Intelligence Overlay Callbacks (T1 / T2 / IntersectionObserver)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def register_career_intelligence_callbacks(app):
+    """Registers T1/T2 overlay and IntersectionObserver bridge callbacks."""
+    import json
+    from datetime import date, timedelta
+    from dash import Input, Output, State, callback, ctx, no_update, ALL
+    from dash import clientside_callback, ClientsideFunction
+    from flask_login import current_user
+
+    from utils.career_intelligence import (
+        get_career_phase_data,
+        get_career_signals,
+        get_development_priorities,
+        classify_overlay_signals,
+    )
+    from utils.stage_helpers import _fetch_player_season_history, _get_position_group
+    from utils.app_context import get_hong_kong_data_manager
+    from layouts.components.ai_overlay import render_t1_overlay, render_t2_overlay
+
+    # ── 7.1 Portal-load callback: evaluate signals, populate stores ─────────
+
+    @app.callback(
+        Output("t1-signal-store", "data"),
+        Output("t2-overlay-queue", "data"),
+        Output("insight-session-state", "data"),
+        Input("milestones-data-store", "data"),
+        State("insight-session-state", "data"),
+        prevent_initial_call=False,
+    )
+    def evaluate_career_signals(milestones_data, session_state):
+        """
+        Runs the career pattern detector on portal load.
+        Skips evaluation if session state is recent AND minutes unchanged.
+        Writes top signal to t1-signal-store and remaining to t2-overlay-queue.
+        """
+        try:
+            player_name = getattr(current_user, "player_name", None)
+            if not player_name:
+                return no_update, no_update, no_update
+
+            history_df = _fetch_player_season_history(player_name)
+            if history_df is None or history_df.empty:
+                return no_update, no_update, no_update
+
+            # Get current minutes for the most recent season
+            minutes_col = next((c for c in history_df.columns if "minute" in c.lower()), None)
+            current_minutes = int(history_df.iloc[-1][minutes_col]) if minutes_col else 0
+            current_season = str(history_df.iloc[-1].get("Season", "")) if "Season" in history_df.columns else ""
+            today = date.today().isoformat()
+
+            # Check if re-evaluation is needed
+            if session_state:
+                stored_minutes = session_state.get("minutes_at_eval", -1)
+                stored_date_str = session_state.get("eval_date", "")
+                try:
+                    stored_date = date.fromisoformat(stored_date_str)
+                    days_elapsed = (date.today() - stored_date).days
+                except (ValueError, TypeError):
+                    days_elapsed = 999
+
+                if stored_minutes == current_minutes and days_elapsed < 7:
+                    return no_update, no_update, no_update
+
+            # Build player dict for career intelligence functions
+            dm = get_hong_kong_data_manager()
+            pos_group = _get_position_group(player_name, dm)
+
+            # Try to get transferability from the DB
+            try:
+                from ai_models.predictor import get_transferability_score
+                career_dict = (
+                    history_df.drop(columns=["Season"], errors="ignore").mean().to_dict()
+                    if not history_df.empty else {}
+                )
+                t_result = get_transferability_score(career_dict, pos_group, player_id=None)
+            except Exception:
+                t_result = None
+
+            # Try to get birth_date from DB
+            try:
+                from models.db_models import Player as PlayerModel
+                from utils.db_engine import SessionFactory
+                from sqlalchemy import select as sa_select
+
+                with SessionFactory() as sess:
+                    player_obj = sess.execute(
+                        sa_select(PlayerModel).where(PlayerModel.name == player_name)
+                    ).scalar_one_or_none()
+                player_dict = {
+                    "position_main": pos_group,
+                    "birth_date": player_obj.birth_date if player_obj else None,
+                }
+            except Exception:
+                player_dict = {"position_main": pos_group, "birth_date": None}
+
+            # Run the career intelligence functions
+            career_phase_data = get_career_phase_data(player_dict, history_df)
+            career_phase_data["transferability"] = t_result
+
+            career_signals = get_career_signals(player_dict, history_df, career_phase_data)
+
+            # Build percentiles_data for development priorities (use last season values)
+            percentiles_data = {}
+            if not history_df.empty:
+                last_row = history_df.iloc[-1]
+                numeric_cols = history_df.select_dtypes(include="number").columns
+                for col in numeric_cols:
+                    if col.lower() in ("season", "minutes played", "minutes_played"):
+                        continue
+                    col_vals = history_df[col].dropna()
+                    if col_vals.empty:
+                        continue
+                    val = last_row.get(col)
+                    if val is None:
+                        continue
+                    pct_rank = int((col_vals < float(val)).sum() / len(col_vals) * 100)
+                    percentiles_data[col] = pct_rank
+
+            dev_priorities = get_development_priorities(percentiles_data)
+            signals = classify_overlay_signals(career_phase_data, career_signals, dev_priorities)
+
+            if not signals:
+                return None, [], {
+                    "minutes_at_eval": current_minutes,
+                    "season_at_eval": current_season,
+                    "eval_date": today,
+                }
+
+            t1_signal = None
+            t2_queue = []
+            for sig in signals:
+                if sig.tier == 1 and t1_signal is None:
+                    t1_signal = {
+                        "tier": sig.tier,
+                        "title": sig.title,
+                        "body": sig.body,
+                        "cta_label": sig.cta_label,
+                        "urgency": sig.urgency,
+                    }
+                else:
+                    t2_queue.append({
+                        "tier": sig.tier,
+                        "title": sig.title,
+                        "body": sig.body,
+                        "cta_label": sig.cta_label,
+                        "urgency": sig.urgency,
+                    })
+
+            new_session_state = {
+                "minutes_at_eval": current_minutes,
+                "season_at_eval": current_season,
+                "eval_date": today,
+                "t1_dismissed_this_session": False,
+            }
+            return t1_signal, t2_queue, new_session_state
+
+        except Exception as exc:
+            logger.debug(f"evaluate_career_signals error: {exc}")
+            return no_update, no_update, no_update
+
+    # ── 7.2 T1 render/dismiss callback ──────────────────────────────────────
+
+    @app.callback(
+        Output("ai-overlay-t1-container", "children"),
+        Output("ai-overlay-t1-container", "style"),
+        Output("insight-session-state", "data", allow_duplicate=True),
+        Input("t1-signal-store", "data"),
+        Input({"type": "ai-overlay-t1-btn", "action": ALL}, "n_clicks"),
+        State("insight-session-state", "data"),
+        prevent_initial_call=True,
+    )
+    def render_t1_overlay_callback(t1_data, btn_clicks, session_state):
+        """
+        Renders the T1 overlay when the store is populated.
+        Dismiss/CTA click → hide overlay + update session state.
+        CTA navigation is handled by a clientside callback.
+        """
+        from utils.career_intelligence import OverlaySignal
+        triggered_id = ctx.triggered_id
+
+        # Dismiss or CTA click → hide (any ai-overlay-t1-btn with any n_clicks > 0)
+        if isinstance(triggered_id, dict) and triggered_id.get("type") == "ai-overlay-t1-btn":
+            updated_state = dict(session_state or {})
+            updated_state["t1_dismissed_this_session"] = True
+            return None, {"display": "none"}, updated_state
+
+        # t1-signal-store populated → show
+        if not t1_data:
+            return None, {"display": "none"}, no_update
+
+        signal = OverlaySignal(
+            tier=t1_data.get("tier", 1),
+            title=t1_data.get("title", ""),
+            body=t1_data.get("body", ""),
+            cta_label=t1_data.get("cta_label", "Ver análisis →"),
+            urgency=t1_data.get("urgency", 0.8),
+        )
+        return render_t1_overlay(signal), {"display": "block"}, no_update
+
+    # ── 7.3 T2 queue management callback ────────────────────────────────────
+
+    @app.callback(
+        Output("ai-overlay-t2-container", "children"),
+        Output("t2-overlay-queue", "data", allow_duplicate=True),
+        Input("t2-overlay-queue", "data"),
+        Input({"type": "ai-overlay-t2-dismiss", "index": ALL}, "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def render_t2_overlays(queue, dismiss_clicks_list):
+        """
+        Renders up to 2 T2 overlay cards from the queue with 400ms CSS stagger.
+        Dismiss [×] click removes that card and surfaces the next queued signal.
+        """
+        from utils.career_intelligence import OverlaySignal
+        triggered_id = ctx.triggered_id
+
+        queue = list(queue or [])
+
+        # Handle dismiss click
+        if isinstance(triggered_id, dict) and triggered_id.get("type") == "ai-overlay-t2-dismiss":
+            idx = triggered_id.get("index", 0)
+            if idx < len(queue):
+                queue.pop(idx)
+
+        if not queue:
+            return [], queue
+
+        # Render up to 2 visible cards
+        visible = queue[:2]
+        cards = []
+        for i, sig_data in enumerate(visible):
+            signal = OverlaySignal(
+                tier=sig_data.get("tier", 2),
+                title=sig_data.get("title", ""),
+                body=sig_data.get("body", ""),
+                cta_label=sig_data.get("cta_label", "Ver análisis →"),
+                urgency=sig_data.get("urgency", 0.5),
+            )
+            cards.append(render_t2_overlay(signal, signal_index=i))
+
+        return cards, queue
+
+    # ── 7.4 T2 career-context gate ──────────────────────────────────────────
+
+    @app.callback(
+        Output("ai-overlay-t2-container", "style"),
+        Input("timeline-context-store", "data"),
+        prevent_initial_call=True,
+    )
+    def gate_t2_by_context(context):
+        """Hides T2 cards when not in a career context; shows them in career context."""
+        if not context:
+            return {"display": "none"}
+        context_type = context.get("type", "")
+        if context_type in ("career", "ai-insight", "career-overview"):
+            return {"display": "block"}
+        return {"display": "none"}
+
+    # ── 7.5 IntersectionObserver clientside callback ─────────────────────────
+
+    app.clientside_callback(
+        """
+        function(stage_content) {
+            // Observe the career arc section for scroll-into-view T2 trigger
+            if (!stage_content) return window.dash_clientside.no_update;
+
+            setTimeout(function() {
+                var careerArc = document.querySelector('.career-arc-section, [id*="career-arc"]');
+                if (!careerArc) return;
+
+                // Only register once per section
+                if (careerArc._t2ObserverRegistered) return;
+                careerArc._t2ObserverRegistered = true;
+
+                var observer = new IntersectionObserver(function(entries) {
+                    entries.forEach(function(entry) {
+                        if (entry.intersectionRatio >= 0.5) {
+                            // Push career-trajectory T2 signal to the queue store
+                            var store = document.getElementById('t2-overlay-queue');
+                            if (store && !store._careerTrajectoryQueued) {
+                                store._careerTrajectoryQueued = true;
+                                // Trigger via hidden input
+                                var event = new CustomEvent('career-arc-visible');
+                                document.dispatchEvent(event);
+                            }
+                        }
+                    });
+                }, {threshold: 0.5});
+
+                observer.observe(careerArc);
+            }, 300);
+
+            return window.dash_clientside.no_update;
+        }
+        """,
+        Output("stage-lucide-refresh-dummy", "data", allow_duplicate=True),
+        Input("stage-content", "children"),
+        prevent_initial_call=True,
+    )

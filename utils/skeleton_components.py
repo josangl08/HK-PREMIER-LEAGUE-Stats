@@ -115,24 +115,56 @@ def create_skeleton_table(
 def create_skeleton_timeline(num_items: int = 6):
     """
     Create a skeleton loader for the Player Portal Timeline (Sidebar).
-    Adjusted for 25% width context.
+    Mirrors the season-header plus milestone-card rhythm of the real timeline.
     """
-    items = []
-    for _ in range(num_items):
-        items.append(
-            html.Div([
-                # Milestone icon placeholder
-                html.Div(className="skeleton skeleton-circle me-2", 
-                         style={"width": "20px", "height": "20px", "flexShrink": 0}),
-                html.Div([
-                    # Title placeholder
-                    html.Div(className="skeleton", style={"width": "100%", "height": "14px", "marginBottom": "4px"}),
-                    # Date/Subtitle placeholder
-                    html.Div(className="skeleton", style={"width": "60%", "height": "10px"}),
-                ], className="flex-grow-1")
-            ], className="d-flex align-items-center mb-4 px-2")
+    season_blocks = []
+    remaining = max(num_items, 1)
+    for season_idx in range(2):
+        season_blocks.append(
+            html.Div(
+                [
+                    html.Div(
+                        [
+                            html.Div(className="skeleton", style={"width": "92px", "height": "16px", "marginBottom": "10px"}),
+                            html.Div(
+                                [
+                                    html.Div(className="skeleton skeleton-circle", style={"width": "34px", "height": "34px"}),
+                                    html.Div(className="skeleton", style={"width": "58px", "height": "34px", "borderRadius": "10px"}),
+                                ],
+                                className="d-flex align-items-center justify-content-end",
+                                style={"gap": "8px"},
+                            ),
+                        ],
+                        className="d-flex align-items-start justify-content-between px-2 mb-3",
+                    ),
+                ],
+                className="mb-2",
+            )
         )
-    return html.Div(items, className="milestone-list-container")
+        for item_idx in range(min(remaining, 3)):
+            season_blocks.append(
+                html.Div(
+                    [
+                        html.Div(className="skeleton skeleton-circle", style={"width": "18px", "height": "18px", "flexShrink": 0, "marginTop": "6px"}),
+                        html.Div(
+                            [
+                                html.Div(className="skeleton", style={"width": "72%", "height": "14px", "marginBottom": "6px"}),
+                                html.Div(className="skeleton", style={"width": "46%", "height": "10px", "marginBottom": "10px"}),
+                                html.Div(className="skeleton", style={"width": "100%", "height": "62px", "borderRadius": "14px"}),
+                            ],
+                            className="flex-grow-1",
+                        ),
+                    ],
+                    className="d-flex align-items-start px-2 mb-4",
+                    style={"gap": "12px"},
+                )
+            )
+            remaining -= 1
+            if remaining <= 0:
+                break
+        if remaining <= 0:
+            break
+    return html.Div(season_blocks, className="portal-skeleton-timeline")
 
 
 def create_skeleton_year_navigator(num_pills: int = 6):
@@ -164,16 +196,45 @@ def create_skeleton_stage():
     """
     Create a skeleton loader for the Stage area.
     """
-    return html.Div([
-        html.Div(className="skeleton skeleton-title mb-3", style={"width": "40%"}),
-        html.Div(className="skeleton mb-2", style={"width": "100%", "height": "14px"}),
-        html.Div(className="skeleton mb-2", style={"width": "95%", "height": "14px"}),
-        html.Div(className="skeleton mb-4", style={"width": "80%", "height": "14px"}),
-        dbc.Row([
-            dbc.Col(html.Div(className="skeleton", style={"height": "200px"}), md=6),
-            dbc.Col(html.Div(className="skeleton", style={"height": "200px"}), md=6),
-        ])
-    ])
+    return html.Div(
+        [
+            html.Div(
+                [
+                    html.Div(
+                        [
+                            html.Div(className="skeleton skeleton-title", style={"width": "220px", "height": "24px", "marginBottom": "12px"}),
+                            html.Div(className="skeleton", style={"width": "140px", "height": "14px"}),
+                        ],
+                        className="flex-grow-1",
+                    ),
+                    html.Div(className="skeleton", style={"width": "88px", "height": "28px", "borderRadius": "999px"}),
+                ],
+                className="d-flex align-items-start justify-content-between mb-4",
+                style={"gap": "16px"},
+            ),
+            html.Div(
+                [
+                    html.Div(className="skeleton", style={"height": "118px", "borderRadius": "16px"}),
+                    html.Div(className="skeleton", style={"height": "118px", "borderRadius": "16px"}),
+                    html.Div(className="skeleton", style={"height": "118px", "borderRadius": "16px"}),
+                ],
+                className="mb-4",
+                style={"display": "grid", "gridTemplateColumns": "repeat(auto-fit, minmax(180px, 1fr))", "gap": "14px"},
+            ),
+            html.Div(className="skeleton mb-3", style={"width": "180px", "height": "16px"}),
+            html.Div(className="skeleton mb-4", style={"height": "280px", "borderRadius": "18px"}),
+            dbc.Row(
+                [
+                    dbc.Col(html.Div(className="skeleton", style={"height": "220px", "borderRadius": "18px"}), md=6, className="mb-3"),
+                    dbc.Col(html.Div(className="skeleton", style={"height": "220px", "borderRadius": "18px"}), md=6, className="mb-3"),
+                ],
+                className="g-3",
+            ),
+            html.Div(className="skeleton mb-3", style={"width": "150px", "height": "16px"}),
+            html.Div(className="skeleton", style={"height": "176px", "borderRadius": "18px"}),
+        ],
+        className="stage-view stage-view--skeleton",
+    )
 
 
 def get_skeleton_for_view(view_level: str):

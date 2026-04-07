@@ -62,18 +62,7 @@ def _decision_nodes_post_match(payload: dict) -> list:
 
 def _decision_nodes_pre_match(payload: dict) -> list:
     """Returns deterministic Decision Node buttons for pre-match context."""
-    return [html.Div([
-        dbc.Button(
-            [html.I(className="bi bi-image me-1"), "Card de Previa"],
-            id="dn-previa-card",
-            color="primary", outline=True, size="sm", className="me-2", n_clicks=0,
-        ),
-        dbc.Button(
-            [html.I(className="bi bi-calendar-check me-1"), "Añadir a iCal"],
-            id="dn-ical",
-            color="secondary", outline=True, size="sm", n_clicks=0,
-        ),
-    ], className="d-flex flex-wrap gap-2 mt-2")]
+    return []
 
 
 def _decision_nodes_career(payload: dict, user_role: str) -> list:

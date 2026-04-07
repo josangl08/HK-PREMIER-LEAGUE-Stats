@@ -201,6 +201,15 @@ class TimelineAggregator:
 
                 stat = next((s for s in player.season_stats if s.season_id == sid), None)
                 season_matches = matches_by_season.get(sid, [])
+                season_team = None
+                if stat and isinstance(stat.advanced_stats, dict):
+                    for key in ("season_team", "Season Team", "Team within selected timeframe", "Team", "team", "team_name", "club", "club_name"):
+                        value = stat.advanced_stats.get(key)
+                        if value:
+                            season_team = str(value).strip()
+                            break
+                if not season_team and player.current_team:
+                    season_team = player.current_team.name
 
                 timeline.append({
                     "type": "career",
@@ -212,6 +221,7 @@ class TimelineAggregator:
                         "season": sid,
                         "player_id": player_id,
                         "player_name": player_name,
+                        "season_team": season_team,
                         "matches": season_matches,
                         "stats": (
                         {

@@ -385,9 +385,15 @@ class HongKongDataProcessor:
             logger.error(f"Error inyectando métricas compuestas: {e}")
 
         # Convertir a numérico TODAS las columnas excepto las de texto conocidas
-        text_columns = ['Player', 'Team', 'Position', 'Position_Clean', 'Position_Group', 
-                        'Season', 'Age_Category', 'Birth country', 'Passport country', 
-                        'Foot', 'On loan']
+        text_columns = [
+            'Player', 'Full name',
+            'Team', 'Team within selected timeframe', 'Team logo', 'Competition',
+            'League', 'league', 'League name',
+            'Position', 'Position_Clean', 'Position_Group',
+            'Primary position', 'Secondary position', 'Third position',
+            'Season', 'Age_Category', 'Birthday', 'Contract expires',
+            'Birth country', 'Passport country', 'Foot', 'On loan',
+        ]
         
         for col in df.columns:
             if col not in text_columns and df[col].dtype == 'object':
