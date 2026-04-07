@@ -7839,14 +7839,6 @@
   "umap_reducer": {
     "versions": [
       {
-        "version": 344,
-        "path": "/Users/joseangel/Downloads/Projects/HongKong_PremierLeague/HK-PREMIER-LEAGUE-Stats/models/clustering/umap_reducer_v344.pkl",
-        "model_type": "clustering",
-        "metrics": {},
-        "features": [],
-        "trained_at": "2026-04-07T07:25:03.921798+00:00"
-      },
-      {
         "version": 345,
         "path": "/Users/joseangel/Downloads/Projects/HongKong_PremierLeague/HK-PREMIER-LEAGUE-Stats/models/clustering/umap_reducer_v345.pkl",
         "model_type": "clustering",
@@ -7861,15 +7853,23 @@
         "metrics": {},
         "features": [],
         "trained_at": "2026-04-07T07:52:55.840075+00:00"
+      },
+      {
+        "version": 347,
+        "path": "/Users/joseangel/Downloads/Projects/HongKong_PremierLeague/HK-PREMIER-LEAGUE-Stats/models/clustering/umap_reducer_v347.pkl",
+        "model_type": "clustering",
+        "metrics": {},
+        "features": [],
+        "trained_at": "2026-04-07T08:27:24.662270+00:00"
       }
     ],
     "latest": {
-      "version": 346,
-      "path": "/Users/joseangel/Downloads/Projects/HongKong_PremierLeague/HK-PREMIER-LEAGUE-Stats/models/clustering/umap_reducer_v346.pkl",
+      "version": 347,
+      "path": "/Users/joseangel/Downloads/Projects/HongKong_PremierLeague/HK-PREMIER-LEAGUE-Stats/models/clustering/umap_reducer_v347.pkl",
       "model_type": "clustering",
       "metrics": {},
       "features": [],
-      "trained_at": "2026-04-07T07:52:55.840075+00:00"
+      "trained_at": "2026-04-07T08:27:24.662270+00:00"
     }
   },
   "scaler_Goals": {

@@ -1,6 +1,65 @@
+# ABOUTME: Global application navbar with role-aware navigation and modern portal styling.
+# ABOUTME: Renders contextual actions like insight inbox access and logout controls.
+
+import base64
+from pathlib import Path
+
 import dash_bootstrap_components as dbc
 from dash import html, dcc
 from flask_login import current_user
+from sqlalchemy import select
+from sqlalchemy.orm import joinedload
+
+from models.db_models import Player, PlayerPhoto, User, UserPlayerLink
+from utils.db_engine import Session
+
+
+def _guess_mime_type(path: str) -> str:
+    suffix = Path(path).suffix.lower()
+    if suffix in {".jpg", ".jpeg"}:
+        return "image/jpeg"
+    if suffix == ".webp":
+        return "image/webp"
+    return "image/png"
+
+
+def _get_user_avatar_src(user_id: str) -> str | None:
+    """Resolve the user's primary player photo into a browser-safe src."""
+    session = Session()
+    try:
+        stmt = (
+            select(User)
+            .options(
+                joinedload(User.player_link)
+                .joinedload(UserPlayerLink.player)
+                .joinedload(Player.photos)
+            )
+            .where(User.id == user_id)
+        )
+        user = session.execute(stmt).unique().scalar_one_or_none()
+        player = user.player_link.player if user and user.player_link and user.player_link.player else None
+        if not player or not player.photos:
+            return None
+
+        primary_photo = next(
+            (photo for photo in player.photos if getattr(photo, "is_primary", False)),
+            player.photos[0],
+        )
+
+        if primary_photo.photo_data:
+            return "data:image/jpeg;base64," + base64.b64encode(primary_photo.photo_data).decode("utf-8")
+
+        for candidate_path in (primary_photo.cutout_path, primary_photo.original_path):
+            if candidate_path and Path(candidate_path).is_file():
+                mime_type = _guess_mime_type(candidate_path)
+                image_bytes = Path(candidate_path).read_bytes()
+                return f"data:{mime_type};base64," + base64.b64encode(image_bytes).decode("utf-8")
+
+        return None
+    except Exception:
+        return None
+    finally:
+        session.close()
 
 
 # Crea la barra de navegación
@@ -26,10 +85,13 @@ def create_navbar(pathname):
     nav_items = [
         dbc.NavItem(
             dbc.NavLink(
-                [html.I(className=f"bi {home_icon} me-2"), home_label],
+                [
+                    html.I(className=f"bi {home_icon} portal-navbar__link-icon"),
+                    html.Span(home_label),
+                ],
                 href=home_href,
                 active=pathname == home_href,
-                className="me-3 text-decoration-none",
+                className="portal-navbar__link",
             )
         ),
     ]
@@ -38,10 +100,13 @@ def create_navbar(pathname):
         nav_items.append(
             dbc.NavItem(
                 dbc.NavLink(
-                    [html.I(className="bi bi-bar-chart me-2"), "Performance"],
+                    [
+                        html.I(className="bi bi-bar-chart portal-navbar__link-icon"),
+                        html.Span("Performance"),
+                    ],
                     href="/performance",
                     active=pathname == "/performance",
-                    className="text-decoration-none",
+                    className="portal-navbar__link",
                 )
             )
         )
@@ -51,10 +116,13 @@ def create_navbar(pathname):
         nav_items.append(
             dbc.NavItem(
                 dbc.NavLink(
-                    [html.I(className="bi bi-person-badge me-2"), "Portal Agente"],
+                    [
+                        html.I(className="bi bi-person-badge portal-navbar__link-icon"),
+                        html.Span("Portal Agente"),
+                    ],
                     href="/agent-portal",
                     active=pathname == "/agent-portal",
-                    className="ms-3 text-decoration-none",
+                    className="portal-navbar__link",
                 )
             )
         )
@@ -64,10 +132,13 @@ def create_navbar(pathname):
         nav_items.append(
             dbc.NavItem(
                 dbc.NavLink(
-                    [html.I(className="bi bi-cpu me-2"), "AI Insights"],
+                    [
+                        html.I(className="bi bi-cpu portal-navbar__link-icon"),
+                        html.Span("AI Insights"),
+                    ],
                     href="/ai-insights",
                     active=pathname == "/ai-insights",
-                    className="ms-3 text-decoration-none",
+                    className="portal-navbar__link",
                 )
             )
         )
@@ -77,13 +148,23 @@ def create_navbar(pathname):
          nav_items.append(
             dbc.NavItem(
                 dbc.NavLink(
-                    [html.I(className="bi bi-person-circle me-2"), "Player Portal"],
+                    [
+                        html.I(className="bi bi-person-circle portal-navbar__link-icon"),
+                        html.Span("Player Portal"),
+                    ],
                     href="/player-portal",
                     active=pathname == "/player-portal",
-                    className="ms-3 text-decoration-none",
+                    className="portal-navbar__link",
                 )
             )
         )
+
+    avatar_src = _get_user_avatar_src(current_user.id) if is_auth else None
+    user_avatar = (
+        html.Img(src=avatar_src, alt=current_user.id if is_auth else "User", className="portal-navbar__user-avatar-image")
+        if avatar_src
+        else html.I(className="bi bi-person-circle")
+    )
 
     # Agregar información de usuario y botón de logout
     nav_right = dbc.Nav(
@@ -102,41 +183,34 @@ def create_navbar(pathname):
                     ],
                     id="insight-inbox-btn",
                     color="link",
-                    className="p-1 position-relative me-3" + ("" if pathname == "/player-portal" else " d-none"),
-                    style={"color": "var(--accent-cyan)", "fontSize": "1.1rem"},
+                    className="portal-navbar__icon-btn position-relative" + ("" if pathname == "/player-portal" else " d-none"),
                 ),
             ),
             dbc.NavItem(
-                [
-                    html.Span(
-                        [
-                            html.I(className="bi bi-person-circle text-white me-2"),
-                            (
-                                f"User: {current_user.id}"
-                                if is_auth
-                                else ""
-                            ),
-                        ],
-                        className="navbar-text text-white me-3",
-                    )
-                ],
-                className="me-4 align-middle",
+                html.Div(
+                    [
+                        html.Span(user_avatar, className="portal-navbar__user-avatar"),
+                        html.Span(current_user.id if is_auth else ""),
+                    ],
+                    className="portal-navbar__user-chip",
+                ),
             ),
             dbc.NavItem(
                 dbc.Button(
                     [
-                        html.I(className="bi bi-box-arrow-right text-white me-2"),
+                        html.I(className="bi bi-box-arrow-right"),
                         "Logout",
                     ],
                     id="logout-button",
-                    color="secondary",
+                    color="link",
                     size="sm",
-                    className="me-1",
+                    className="portal-navbar__logout-btn",
                 )
             ),
             # Location para manejar el logout
             dcc.Location(id="logout-trigger", refresh=True),
         ],
+        className="portal-navbar__actions",
         navbar=True,
     )
 
@@ -146,45 +220,47 @@ def create_navbar(pathname):
             dbc.Container(
                 [
                     html.A(
-                        dbc.Row(
+                        html.Div(
                             [
-                                dbc.Col(
+                                html.Div(
                                     html.Img(
                                         src="/assets/logo.png",
-                                        height="30px",
-                                        className="me-2",
+                                        alt="HKPL Stats",
+                                        className="portal-navbar__brand-logo",
                                     ),
-                                    width="auto",
+                                    className="portal-navbar__brand-mark",
                                 ),
-                                dbc.Col(
-                                    dbc.NavbarBrand(
-                                        "HKPL Stats", className="ms-1 fw-bold"
-                                    ),
-                                    width="auto",
+                                html.Div(
+                                    [
+                                        html.Span("HKPL Stats", className="portal-navbar__brand-title"),
+                                        html.Span("Player Intelligence", className="portal-navbar__brand-subtitle"),
+                                    ],
+                                    className="portal-navbar__brand-copy",
                                 ),
                             ],
-                            align="center",
-                            className="g-0",
+                            className="portal-navbar__brand",
                         ),
                         href=home_href,
-                        className="navbar-brand-link text-decoration-none",
+                        className="portal-navbar__brand-link",
                     ),
-                    dbc.NavbarToggler(id="navbar-toggler", n_clicks=0),
+                    dbc.NavbarToggler(id="navbar-toggler", n_clicks=0, className="portal-navbar__toggler"),
                     dbc.Collapse(
                         [
-                            dbc.Nav(nav_items, className="me-auto", navbar=True),
+                            dbc.Nav(nav_items, className="portal-navbar__nav me-auto", navbar=True),
                             nav_right,
                         ],
                         id="navbar-collapse",
+                        className="portal-navbar__collapse",
                         navbar=True,
                         is_open=False,
                     ),
-                ]
+                ],
+                className="portal-navbar__container",
             ),
         ],
         dark=True,
-        color="dark",
-        className="shadow-sm",
+        className="portal-navbar",
+        expand="lg",
     )
 
     return navbar

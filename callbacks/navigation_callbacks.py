@@ -1,7 +1,7 @@
 # ABOUTME: Navigation callback that handles routing, authentication, and role-based access control.
 # ABOUTME: Defines ROLE_ALLOWED_PATHS to restrict page access by user role.
 
-from dash import Input, Output, callback, html, no_update
+from dash import Input, Output, State, callback, html, no_update
 from flask_login import current_user
 # Importar layouts
 from layouts.home import layout as home_layout
@@ -35,6 +35,19 @@ ROLE_DEFAULT_PATH = {
 
 _AUTH_VISIBLE = {"display": "block"}
 _AUTH_HIDDEN  = {"display": "none"}
+
+
+@callback(
+    Output("navbar-collapse", "is_open"),
+    Input("navbar-toggler", "n_clicks"),
+    State("navbar-collapse", "is_open"),
+    prevent_initial_call=True,
+)
+def toggle_navbar_collapse(n_clicks: int, is_open: bool) -> bool:
+    """Toggle navbar collapse state on smaller screens."""
+    if not n_clicks:
+        return is_open
+    return not is_open
 
 
 def _get_default_path_for_role(role: str) -> str:
