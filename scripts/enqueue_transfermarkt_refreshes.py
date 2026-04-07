@@ -1,13 +1,16 @@
 # ABOUTME: Enqueues prioritized Transfermarkt refresh jobs for current squads, upcoming opponents, and user-linked players.
+# ABOUTME: Use force-all to enqueue every HK player with a tm_id regardless of squad/fixture filters.
 
 import os
 import sys
 import argparse
 import logging
+from datetime import datetime
 
 sys.path.append(os.getcwd())
 
-from utils.db_engine import init_db
+from models.db_models import Player, MatchUpdateQueue
+from utils.db_engine import SessionFactory, init_db
 from scripts.background_match_watcher import MatchWatcher
 
 
@@ -16,6 +19,30 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+def force_enqueue_all_hk(watcher: MatchWatcher) -> int:
+    """Enqueue current_season_bootstrap for every HK player with a tm_id, bypassing squad/fixture filters."""
+    now = datetime.utcnow()
+    added = 0
+    with SessionFactory() as session:
+        players = session.query(Player).filter(
+            Player.id.like("hk_%"),
+            Player.tm_id.isnot(None),
+        ).all()
+        for player in players:
+            if watcher._enqueue_job(
+                session,
+                player_id=player.id,
+                next_attempt=now,
+                job_type="current_season_bootstrap",
+                priority=60,
+                source="force_all",
+                reason="Manual full-roster refresh",
+            ):
+                added += 1
+        session.commit()
+    return added
 
 
 def main():
@@ -32,6 +59,8 @@ def main():
 
     p_all = subparsers.add_parser("all", help="Queue all supported TM refresh job classes.")
     p_all.add_argument("days_ahead", nargs="?", type=int, default=10)
+
+    subparsers.add_parser("force-all", help="Force-enqueue ALL HK players with tm_id, ignoring squad/fixture filters.")
 
     args = parser.parse_args()
 
@@ -51,6 +80,11 @@ def main():
     if args.command == "user-priority":
         added = watcher.enqueue_user_priority_refresh()
         logger.info(f"✓ Enqueued user-priority jobs: {added}")
+        return
+
+    if args.command == "force-all":
+        added = force_enqueue_all_hk(watcher)
+        logger.info("✓ Force-enqueued %s HK players for current_season_bootstrap.", added)
         return
 
     added_bootstrap = watcher.enqueue_current_season_bootstrap(days_ahead=args.days_ahead)

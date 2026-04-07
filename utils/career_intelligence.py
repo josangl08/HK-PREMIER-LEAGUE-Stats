@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -23,6 +23,28 @@ class OverlaySignal:
     body: str
     cta_label: str
     urgency: float     # 0.0 – 1.0; higher = more urgent
+    evidence_key: str = ""
+
+
+@dataclass
+class DashboardInsightItem:
+    title: str
+    body: str
+    support: str
+    evidence_key: str
+    emphasis: str = "neutral"
+    badge_value: str = ""
+    badge_label: str = ""
+    secondary_value: str = ""
+    secondary_label: str = ""
+
+
+@dataclass
+class CareerDashboardBrief:
+    career_thesis: Dict[str, str]
+    signals: List[DashboardInsightItem]
+    levers: List[DashboardInsightItem]
+    outlook: Dict[str, str]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -65,6 +87,15 @@ METRIC_CORRELATION_TABLE: Dict[str, float] = {
     "xG":                 0.54,
     "xA":                 0.49,
     "Minutes played":     1.00,
+}
+
+EVIDENCE_DESTINATIONS: Dict[str, Dict[str, str]] = {
+    "career_arc": {"title": "Career Arc", "group": "trajectory"},
+    "minutes_trend": {"title": "Minutes Trend", "group": "trajectory"},
+    "percentile_profile": {"title": "Percentile Profile", "group": "profile"},
+    "similarity_profiles": {"title": "Similarity Profiles", "group": "comparison"},
+    "projection_outlook": {"title": "Season Projection", "group": "projection"},
+    "tactical_dna": {"title": "Tactical DNA", "group": "identity"},
 }
 
 
@@ -427,6 +458,308 @@ def get_development_priorities(percentiles_data: Dict[str, int]) -> List[Dict[st
     return result
 
 
+def normalize_evidence_key(evidence_key: str) -> str:
+    key = str(evidence_key or "").strip().lower()
+    return key if key in EVIDENCE_DESTINATIONS else "career_arc"
+
+
+def get_evidence_destination_meta(evidence_key: str) -> Dict[str, str]:
+    key = normalize_evidence_key(evidence_key)
+    return {"key": key, **EVIDENCE_DESTINATIONS[key]}
+
+
+def _extract_percentile(metric_obj: Any) -> Optional[int]:
+    if isinstance(metric_obj, dict):
+        value = metric_obj.get("percentile")
+    else:
+        value = metric_obj
+    try:
+        return int(round(float(value)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(round(float(value)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def build_fallback_career_dashboard_brief(
+    data: Dict[str, Any],
+    career_phase_data: Dict[str, Any],
+    career_signals: Dict[str, Any],
+    development_priorities: List[Dict[str, Any]],
+) -> CareerDashboardBrief:
+    """Builds a concise, evidence-linked dashboard brief with no AI dependency."""
+    player_name = str(data.get("player_name") or "This player")
+    history_df = data.get("history_df", pd.DataFrame())
+    phase = str(career_phase_data.get("career_phase") or "unknown")
+    momentum = _safe_int(career_phase_data.get("momentum_score") or 3)
+    age = _safe_int(career_phase_data.get("age") or 0)
+    minutes_total = _safe_int(data.get("minutes_played"))
+    goals_total = _safe_int(data.get("goals"))
+    assists_total = _safe_int(data.get("assists"))
+
+    coach_conf = career_signals.get("coach_confidence") or {}
+    transfer_window = career_signals.get("transfer_window") or {}
+    consistency = career_signals.get("consistency_score") or {}
+    direction = coach_conf.get("direction", "stable")
+    delta_pct = coach_conf.get("delta_pct", 0)
+    transfer_quality = str(transfer_window.get("quality") or "MODERADA")
+    consistency_level = str(consistency.get("level") or "MODERADA")
+    latest_season = ""
+    latest_minutes = 0
+    season_count = 0
+    if isinstance(history_df, pd.DataFrame) and not history_df.empty:
+        season_count = len(history_df)
+        latest_season = str(history_df.iloc[-1].get("Season") or "")
+        minutes_col = next((c for c in history_df.columns if "minute" in c.lower()), None)
+        if minutes_col:
+            latest_minutes = _safe_int(history_df.iloc[-1].get(minutes_col))
+
+    trajectory_map = {
+        ("up", 4): ("Consolidating Upward", "Your career is turning improvement into a more stable identity."),
+        ("up", 5): ("Peak Acceleration", "Your career is building upward momentum at the strongest point of your cycle."),
+        ("stable", 3): ("Stable Consolidation", "Your career is holding value, but still needs sharper differentiation."),
+        ("down", 0): ("Pressure Phase", "Your career direction is under pressure and needs a clearer recovery signal."),
+        ("down", 1): ("Stalled Momentum", "Your trajectory is losing force and needs a new growth lever."),
+        ("down", 2): ("Stalled Momentum", "Your trajectory is losing force and needs a new growth lever."),
+    }
+    thesis_label, thesis_body = trajectory_map.get(
+        (direction, momentum),
+        ("Career Progression", "Your career trajectory is still being defined by long-term role and output trends."),
+    )
+    thesis_support = (
+        f"Phase {phase.upper()} · Momentum {momentum}/5 · "
+        f"{minutes_total} total minutes, {goals_total} goals, {assists_total} assists."
+    )
+
+    signals: List[DashboardInsightItem] = []
+    coach_support = (
+        f"Minutes trend is {delta_pct:+.0f}% versus the previous season, which points to a {coach_conf.get('label', 'stable role').lower()}."
+    )
+    coach_body = {
+        "up": "Coach trust is becoming more structural.",
+        "down": "Your role is losing stability across recent seasons.",
+        "stable": "Your role is staying stable, but not clearly strengthening yet.",
+    }.get(direction, "Your role is staying stable, but not clearly strengthening yet.")
+    signals.append(
+        DashboardInsightItem(
+            title="Role Evolution",
+            body=coach_body,
+            support=coach_support,
+            evidence_key="minutes_trend",
+            emphasis="positive" if direction == "up" else ("warning" if direction == "down" else "neutral"),
+            badge_value=f"{delta_pct:+.0f}%",
+            badge_label="vs last season",
+            secondary_value=f"{latest_minutes:,}" if latest_minutes else "—",
+            secondary_label="latest minutes",
+        )
+    )
+
+    consistency_support = (
+        f"Consistency is rated {consistency_level} from your cross-season variability profile."
+    )
+    consistency_body = {
+        "ALTA": "Your career signal is repeatable, not just seasonal.",
+        "BAJA": "Your strongest versions are not stable enough yet.",
+        "MODERADA": "Your level is visible, but still uneven across seasons.",
+    }.get(consistency_level, "Your level is visible, but still uneven across seasons.")
+    signals.append(
+        DashboardInsightItem(
+            title="Consistency",
+            body=consistency_body,
+            support=consistency_support,
+            evidence_key="career_arc",
+            emphasis="positive" if consistency_level == "ALTA" else ("warning" if consistency_level == "BAJA" else "neutral"),
+            badge_value=consistency_level,
+            badge_label="career level",
+            secondary_value=str(season_count or "—"),
+            secondary_label="seasons tracked",
+        )
+    )
+
+    transfer_support = transfer_window.get("rationale") or "Transfer conditions are being evaluated from trajectory and market fit."
+    transfer_body = {
+        "ÓPTIMA": "Your market timing is at a strong strategic point.",
+        "BUENA": "Your market context is improving, but still wants more consolidation.",
+        "MODERADA": "Your career still benefits more from building value than forcing movement.",
+        "BAJA": "This is not yet a strong market window for your profile.",
+    }.get(transfer_quality, "Your career still benefits more from building value than forcing movement.")
+    signals.append(
+        DashboardInsightItem(
+            title="Market Window",
+            body=transfer_body,
+            support=transfer_support,
+            evidence_key="projection_outlook",
+            emphasis="positive" if transfer_quality == "ÓPTIMA" else ("warning" if transfer_quality == "BAJA" else "neutral"),
+            badge_value=transfer_quality,
+            badge_label="window",
+            secondary_value=f"{momentum}/5",
+            secondary_label="momentum",
+        )
+    )
+
+    levers: List[DashboardInsightItem] = []
+    for item in development_priorities[:3]:
+        metric = str(item.get("metric") or "Key metric")
+        percentile = _safe_int(item.get("percentile"))
+        impact = str(item.get("impact") or "medio")
+        action = str(item.get("action") or "mejorar")
+        if action == "mejorar":
+            body = f"Your next growth lever is improving {metric.lower()}."
+            support = (
+                f"{metric} sits around the {percentile}th percentile, with {impact} estimated impact on role growth."
+            )
+            evidence_key = "percentile_profile"
+            emphasis = "warning" if impact == "alto" else "neutral"
+        else:
+            body = f"{metric} is already supporting your long-term profile."
+            support = (
+                f"{metric} sits around the {percentile}th percentile and is worth protecting as a stable strength."
+            )
+            evidence_key = "tactical_dna"
+            emphasis = "positive"
+            levers.append(
+                DashboardInsightItem(
+                    title=metric,
+                    body=body,
+                    support=support,
+                    evidence_key=evidence_key,
+                    emphasis=emphasis,
+                    badge_value=f"P{percentile}",
+                    badge_label="percentile",
+                    secondary_value=impact.upper(),
+                    secondary_label="impact",
+                )
+            )
+
+    if not levers:
+        levers.append(
+            DashboardInsightItem(
+                title="Career Leverage",
+                body="Your next leap will come from turning stable minutes into clearer separation.",
+                support="There is not enough ranked percentile data to surface a sharper lever yet.",
+                evidence_key="career_arc",
+                emphasis="neutral",
+                badge_value=f"{momentum}/5",
+                badge_label="momentum",
+                secondary_value=f"{minutes_total:,}" if minutes_total else "—",
+                secondary_label="career minutes",
+            )
+        )
+
+    if transfer_quality == "ÓPTIMA":
+        outlook_label = "Push"
+        outlook_body = "Your current trajectory supports a more aggressive next-step strategy."
+    elif direction == "up" and consistency_level == "ALTA":
+        outlook_label = "Consolidate"
+        outlook_body = "You are in a strong value-building phase and should reinforce repeatability."
+    elif direction == "down":
+        outlook_label = "Reposition"
+        outlook_body = "The next step is to recover role strength before treating market timing as the priority."
+    else:
+        outlook_label = "Build"
+        outlook_body = "The next 1–2 seasons should focus on strengthening identity and separation."
+
+    outlook_support = (
+        f"Phase {phase.upper()} at age {age or '—'} with momentum {momentum}/5 and transfer window {transfer_quality}."
+    )
+
+    return CareerDashboardBrief(
+        career_thesis={
+            "label": thesis_label,
+            "body": thesis_body,
+            "support": thesis_support,
+        },
+        signals=signals[:3],
+        levers=levers[:3],
+        outlook={
+            "label": outlook_label,
+            "body": outlook_body,
+            "support": outlook_support,
+            "evidence_key": "projection_outlook" if transfer_quality in {"ÓPTIMA", "BUENA"} else "career_arc",
+        },
+    )
+
+
+def build_career_dashboard_brief(
+    data: Dict[str, Any],
+    career_phase_data: Dict[str, Any],
+    career_signals: Dict[str, Any],
+    development_priorities: List[Dict[str, Any]],
+    ai_payload: Any = None,
+) -> CareerDashboardBrief:
+    """
+    Builds a structured dashboard brief.
+
+    The current implementation always falls back to deterministic synthesis unless a
+    future AI payload cleanly matches the expected shape.
+    """
+    fallback = build_fallback_career_dashboard_brief(
+        data,
+        career_phase_data,
+        career_signals,
+        development_priorities,
+    )
+    if not isinstance(ai_payload, dict):
+        return fallback
+
+    try:
+        thesis = ai_payload.get("career_thesis") or {}
+        signals_payload = ai_payload.get("signals") or []
+        levers_payload = ai_payload.get("levers") or []
+        outlook = ai_payload.get("outlook") or {}
+        if not thesis or not outlook:
+            return fallback
+
+        def _build_items(items: Any, default_items: List[DashboardInsightItem]) -> List[DashboardInsightItem]:
+            built: List[DashboardInsightItem] = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                title = str(item.get("title") or "").strip()
+                body = str(item.get("body") or "").strip()
+                support = str(item.get("support") or "").strip()
+                evidence_key = normalize_evidence_key(item.get("evidence_key") or "")
+                if not (title and body and support):
+                    continue
+                built.append(
+                    DashboardInsightItem(
+                        title=title,
+                        body=body,
+                        support=support,
+                        evidence_key=evidence_key,
+                        emphasis=str(item.get("emphasis") or "neutral"),
+                        badge_value=str(item.get("badge_value") or ""),
+                        badge_label=str(item.get("badge_label") or ""),
+                        secondary_value=str(item.get("secondary_value") or ""),
+                        secondary_label=str(item.get("secondary_label") or ""),
+                    )
+                )
+            return built or default_items
+
+        return CareerDashboardBrief(
+            career_thesis={
+                "label": str(thesis.get("label") or fallback.career_thesis["label"]),
+                "body": str(thesis.get("body") or fallback.career_thesis["body"]),
+                "support": str(thesis.get("support") or fallback.career_thesis["support"]),
+            },
+            signals=_build_items(signals_payload, fallback.signals),
+            levers=_build_items(levers_payload, fallback.levers),
+            outlook={
+                "label": str(outlook.get("label") or fallback.outlook["label"]),
+                "body": str(outlook.get("body") or fallback.outlook["body"]),
+                "support": str(outlook.get("support") or fallback.outlook["support"]),
+                "evidence_key": normalize_evidence_key(outlook.get("evidence_key") or fallback.outlook.get("evidence_key")),
+            },
+        )
+    except Exception:
+        return fallback
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # 4. Overlay Signal Classifier
 # ──────────────────────────────────────────────────────────────────────────────
@@ -481,6 +814,7 @@ def classify_overlay_signals(
             ),
             cta_label="Ver análisis →",
             urgency=0.95,
+            evidence_key="projection_outlook",
         ))
 
     # Coach confidence Señal de alerta
@@ -495,6 +829,7 @@ def classify_overlay_signals(
             ),
             cta_label="Ver análisis →",
             urgency=0.90,
+            evidence_key="minutes_trend",
         ))
 
     # Post-peak + low momentum
@@ -508,6 +843,7 @@ def classify_overlay_signals(
             ),
             cta_label="Ver análisis →",
             urgency=0.85,
+            evidence_key="career_arc",
         ))
 
     # Peak momentum (score 5)
@@ -521,6 +857,7 @@ def classify_overlay_signals(
             ),
             cta_label="Ver análisis →",
             urgency=0.80,
+            evidence_key="career_arc",
         ))
 
     # ── T2 signals ──────────────────────────────────────────────────────────
@@ -536,6 +873,7 @@ def classify_overlay_signals(
             ),
             cta_label="Ver análisis →",
             urgency=0.55,
+            evidence_key="career_arc",
         ))
     elif consistency_level == "ALTA":
         signals.append(OverlaySignal(
@@ -547,6 +885,7 @@ def classify_overlay_signals(
             ),
             cta_label="Ver análisis →",
             urgency=0.40,
+            evidence_key="career_arc",
         ))
 
     # Transfer window informational (non-ÓPTIMA)
@@ -557,6 +896,7 @@ def classify_overlay_signals(
             body=transfer_win.get("rationale", "Condiciones de mercado en rango moderado."),
             cta_label="Ver análisis →",
             urgency=0.60 if transfer_quality == "BUENA" else 0.45,
+            evidence_key="projection_outlook",
         ))
 
     # Development priorities (top weakness)
@@ -573,6 +913,7 @@ def classify_overlay_signals(
             ),
             cta_label="Ver análisis →",
             urgency=0.50,
+            evidence_key="percentile_profile",
         ))
 
     # Coach confidence upward (informational T2)
@@ -586,6 +927,7 @@ def classify_overlay_signals(
             ),
             cta_label="Ver análisis →",
             urgency=0.35,
+            evidence_key="minutes_trend",
         ))
 
     # Sort by urgency descending

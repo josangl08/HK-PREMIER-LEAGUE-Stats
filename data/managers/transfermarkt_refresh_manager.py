@@ -10,11 +10,13 @@ from typing import List, Optional
 from sqlalchemy import select
 
 from data.extractors.transfermarkt_extractor import TransfermarktExtractor
+from data.extractors.transfermarkt_playwright_extractor import TransfermarktPlaywrightExtractor
 from data.managers.transfermarkt_runtime_manager import TransfermarktRuntimeManager
 from data.transfermarkt_data_manager import TransfermarktDataManager
 from models.db_models import Player, Season
 from utils.common import get_current_season
 from utils.db_engine import SessionFactory
+from utils.proxy_manager import ProxyManager
 
 
 logger = logging.getLogger(__name__)
@@ -22,10 +24,23 @@ logger = logging.getLogger(__name__)
 MIN_TM_SEASON_START = 2018
 
 
+def _build_extractor(proxy_manager: ProxyManager) -> TransfermarktExtractor:
+    """Return a Playwright extractor if dependencies are available, otherwise CloudScraper."""
+    try:
+        import playwright  # noqa: F401
+        import playwright_stealth  # noqa: F401
+        logger.info("TransfermarktRefreshManager: using Playwright+stealth extractor.")
+        return TransfermarktPlaywrightExtractor(proxy_manager=proxy_manager)
+    except ImportError as exc:
+        logger.warning("Playwright unavailable (%s); falling back to CloudScraper extractor.", exc)
+        return TransfermarktExtractor(proxy_manager=proxy_manager)
+
+
 class TransfermarktRefreshManager:
     def __init__(self):
         self.runtime = TransfermarktRuntimeManager()
-        self.extractor = TransfermarktExtractor()
+        self.proxy_manager = ProxyManager()
+        self.extractor = _build_extractor(self.proxy_manager)
         self.tm_manager = TransfermarktDataManager(auto_load=False)
         self.last_http_status: Optional[int] = None
         self.last_block_type: Optional[str] = None
@@ -116,12 +131,12 @@ class TransfermarktRefreshManager:
 
         any_updated = False
         for season_id in seasons:
-            raw_matches = self.tm_manager.extractor.get_match_history(str(tm_id), season_id)
-            self.last_http_status = self.tm_manager.extractor.last_http_status
-            self.last_block_type = self.tm_manager.extractor.last_block_type
-            self.last_block_reason = self.tm_manager.extractor.last_block_reason
-            self.last_result_source = self.tm_manager.extractor.last_result_source
-            self.last_cache_fresh = self.tm_manager.extractor.last_cache_fresh
+            raw_matches = self.extractor.get_match_history(str(tm_id), season_id)
+            self.last_http_status = self.extractor.last_http_status
+            self.last_block_type = self.extractor.last_block_type
+            self.last_block_reason = self.extractor.last_block_reason
+            self.last_result_source = self.extractor.last_result_source
+            self.last_cache_fresh = self.extractor.last_cache_fresh
             if self.last_http_status == 405:
                 logger.warning(
                     "TransfermarktRefreshManager: 405 for player=%s tm_id=%s season=%s; stopping refresh early.",

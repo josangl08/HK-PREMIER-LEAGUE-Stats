@@ -19,13 +19,20 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///data/database.db")
 # check_same_thread=False es necesario para SQLite en Flask/Dash si hay hilos
 engine_args = {}
 if DATABASE_URL.startswith("sqlite"):
-    engine_args["connect_args"] = {"check_same_thread": False}
+    engine_args["connect_args"] = {"check_same_thread": False, "timeout": 30}
     # Asegurar que el directorio de la base de datos existe
     db_path = DATABASE_URL.replace("sqlite:///", "")
     if db_path != ":memory:":
         os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
 
 engine = create_engine(DATABASE_URL, **engine_args)
+
+# Enable WAL mode for SQLite so concurrent readers/writers don't deadlock.
+if DATABASE_URL.startswith("sqlite"):
+    with engine.connect() as _conn:
+        _conn.execute(text("PRAGMA journal_mode=WAL"))
+        _conn.execute(text("PRAGMA busy_timeout=30000"))
+        _conn.commit()
 
 # Crear un SessionFactory
 SessionFactory = sessionmaker(bind=engine, autoflush=False, autocommit=False)

@@ -15,6 +15,7 @@ from utils.stage_helpers import (
     render_career_insights,
     render_career_overview,
     render_player_dashboard,
+    render_career_evidence_view,
     get_cached_image_path,
     render_image_gallery,
     _get_position_group,
@@ -1598,9 +1599,10 @@ def register_player_portal_callbacks(app):
         Output("milestones-data-store", "data"),
         Input("url", "pathname"),
         Input("sync-poll-interval", "n_intervals"),
+        State("milestones-data-store", "data"),
         prevent_initial_call=False,
     )
-    def update_timeline(pathname, _n):
+    def update_timeline(pathname, _n, current_data):
         """Fetches timeline milestones and stores serialized data."""
         if pathname != "/player-portal":
             return no_update
@@ -1614,9 +1616,12 @@ def register_player_portal_callbacks(app):
             milestones = aggregator.get_player_timeline(player_id)
 
             if not milestones:
-                return []
+                return no_update if current_data == [] else []
 
-            return _serialize_milestones(milestones)
+            serialized = _serialize_milestones(milestones)
+            if serialized == current_data:
+                return no_update
+            return serialized
 
         except Exception as e:
             logger.error(f"update_timeline error: {e}")
@@ -1952,7 +1957,7 @@ def register_player_portal_callbacks(app):
         """Keeps the persistent stage shell while changing the glass modifier by active context."""
         base = "glass-card stage-shell"
         if not context:
-            return f"{base} glass-career"
+            return f"{base} stage-shell--career"
 
         m_type = context.get("type")
         if m_type == "pre-match":
@@ -1966,7 +1971,7 @@ def register_player_portal_callbacks(app):
                 rating = None
             modifier = "glass-danger" if (rating is not None and rating < 6.0) else "glass-success"
             return f"{base} {modifier}"
-        return f"{base} glass-career"
+        return f"{base} stage-shell--career"
 
     @app.callback(
         Output("timeline-expand-store", "data", allow_duplicate=True),
@@ -1995,7 +2000,7 @@ def register_player_portal_callbacks(app):
 
     app.clientside_callback(
         ClientsideFunction(namespace="playerPortal", function_name="observeSeasonSections"),
-        Output("active-year-store", "data"),
+        Output("timeline-season-observer-dummy", "data"),
         Input("timeline-milestones", "children"),
         prevent_initial_call=True,
     )
@@ -2506,6 +2511,7 @@ def register_career_intelligence_callbacks(app):
                         "body": sig.body,
                         "cta_label": sig.cta_label,
                         "urgency": sig.urgency,
+                        "evidence_key": sig.evidence_key,
                     }
                 else:
                     t2_queue.append({
@@ -2514,6 +2520,7 @@ def register_career_intelligence_callbacks(app):
                         "body": sig.body,
                         "cta_label": sig.cta_label,
                         "urgency": sig.urgency,
+                        "evidence_key": sig.evidence_key,
                     })
 
             new_session_state = {
@@ -2528,6 +2535,93 @@ def register_career_intelligence_callbacks(app):
             logger.debug(f"evaluate_career_signals error: {exc}")
             return no_update, no_update, no_update
 
+    @app.callback(
+        Output("portal-overlay-store", "data"),
+        Input("insight-inbox-btn", "n_clicks"),
+        Input({"type": "career-evidence-trigger", "key": ALL, "source": ALL}, "n_clicks"),
+        Input({"type": "ai-overlay-t1-btn", "action": ALL, "evidence_key": ALL}, "n_clicks"),
+        Input({"type": "ai-overlay-t2-cta", "index": ALL, "evidence_key": ALL}, "n_clicks"),
+        Input("career-evidence-modal-close", "n_clicks"),
+        State("portal-overlay-store", "data"),
+        prevent_initial_call=True,
+    )
+    def update_portal_overlay_state(_, __, ___, ____, _____, overlay_state):
+        """Uses a single overlay state so inbox and evidence modal cannot coexist."""
+        triggered_id = ctx.triggered_id
+        current = overlay_state or {"type": "none"}
+        trigger_value = ctx.triggered[0].get("value", 0) if ctx.triggered else 0
+
+        # Dash can fire callbacks when dynamic components mount with n_clicks=0.
+        # Ignore any non-user interaction here so overlays don't auto-open on load.
+        if not trigger_value:
+            return no_update
+
+        if triggered_id == "career-evidence-modal-close":
+            return {"type": "none"}
+
+        if triggered_id == "insight-inbox-btn":
+            return {"type": "none"} if current.get("type") == "inbox" else {"type": "inbox"}
+
+        if not isinstance(triggered_id, dict):
+            return no_update
+
+        if triggered_id.get("type") == "career-evidence-trigger":
+            return {
+                "type": "evidence",
+                "evidence_key": triggered_id.get("key", "career_arc"),
+                "source": triggered_id.get("source", "dashboard"),
+                "nonce": ctx.triggered[0]["value"],
+            }
+        if triggered_id.get("type") == "ai-overlay-t1-btn" and triggered_id.get("action") == "cta":
+            return {
+                "type": "evidence",
+                "evidence_key": triggered_id.get("evidence_key", "career_arc"),
+                "source": "overlay-t1",
+                "nonce": ctx.triggered[0]["value"],
+            }
+        if triggered_id.get("type") == "ai-overlay-t2-cta":
+            return {
+                "type": "evidence",
+                "evidence_key": triggered_id.get("evidence_key", "career_arc"),
+                "source": "overlay-t2",
+                "nonce": ctx.triggered[0]["value"],
+            }
+        return no_update
+
+    @app.callback(
+        Output("career-evidence-modal-title", "children"),
+        Output("career-evidence-modal-body", "children"),
+        Output("career-evidence-modal", "is_open"),
+        Output("insight-inbox-offcanvas", "is_open"),
+        Input("portal-overlay-store", "data"),
+        prevent_initial_call=False,
+    )
+    def render_portal_overlay_state(overlay_state):
+        """Renders either the inbox or the evidence modal from one shared overlay state."""
+        state = overlay_state or {"type": "none"}
+        overlay_type = state.get("type", "none")
+
+        if overlay_type == "inbox":
+            return no_update, no_update, False, True
+
+        if overlay_type != "evidence":
+            return no_update, no_update, False, False
+
+        player_id, player_name, _ = _get_active_player_identity()
+        if not player_id or not player_name:
+            return "Evidence", html.P("Player evidence is not available.", className="text-muted small mb-0"), True, False
+
+        try:
+            payload = render_career_evidence_view(
+                state.get("evidence_key", "career_arc"),
+                player_name,
+                player_id,
+            )
+            return payload["title"], payload["content"], True, False
+        except Exception as exc:
+            logger.warning(f"career evidence modal error: {exc}")
+            return "Evidence", html.P("Detailed evidence is not available right now.", className="text-muted small mb-0"), True, False
+
     # ── 7.2 T1 render/dismiss callback ──────────────────────────────────────
 
     @app.callback(
@@ -2535,7 +2629,7 @@ def register_career_intelligence_callbacks(app):
         Output("ai-overlay-t1-container", "style"),
         Output("insight-session-state", "data", allow_duplicate=True),
         Input("t1-signal-store", "data"),
-        Input({"type": "ai-overlay-t1-btn", "action": ALL}, "n_clicks"),
+        Input({"type": "ai-overlay-t1-btn", "action": ALL, "evidence_key": ALL}, "n_clicks"),
         State("insight-session-state", "data"),
         prevent_initial_call=True,
     )
@@ -2561,6 +2655,7 @@ def register_career_intelligence_callbacks(app):
                     "title": t1_data.get("title", ""),
                     "body": t1_data.get("body", ""),
                     "tier": t1_data.get("tier", 1),
+                    "evidence_key": t1_data.get("evidence_key", "career_arc"),
                     "timestamp": _dt.utcnow().isoformat(),
                 })
                 updated_state["history"] = history
@@ -2576,6 +2671,7 @@ def register_career_intelligence_callbacks(app):
             body=t1_data.get("body", ""),
             cta_label=t1_data.get("cta_label", "Ver análisis →"),
             urgency=t1_data.get("urgency", 0.8),
+            evidence_key=t1_data.get("evidence_key", "career_arc"),
         )
         return render_t1_overlay(signal), {"display": "block"}, no_update
 
@@ -2614,6 +2710,7 @@ def register_career_intelligence_callbacks(app):
                     "title": dismissed.get("title", ""),
                     "body": dismissed.get("body", ""),
                     "tier": dismissed.get("tier", 2),
+                    "evidence_key": dismissed.get("evidence_key", "career_arc"),
                     "timestamp": _dt.utcnow().isoformat(),
                 })
                 updated_session["history"] = history
@@ -2631,6 +2728,7 @@ def register_career_intelligence_callbacks(app):
                 body=sig_data.get("body", ""),
                 cta_label=sig_data.get("cta_label", "Ver análisis →"),
                 urgency=sig_data.get("urgency", 0.5),
+                evidence_key=sig_data.get("evidence_key", "career_arc"),
             )
             cards.append(render_t2_overlay(signal, signal_index=i))
 
@@ -2664,21 +2762,19 @@ def register_career_intelligence_callbacks(app):
     # ── 13.3 Insight Inbox: Offcanvas toggle + badge count ──────────────────
 
     @app.callback(
-        Output("insight-inbox-offcanvas", "is_open"),
         Output("insight-inbox-count", "children"),
         Output("insight-inbox-count", "style"),
-        Input("insight-inbox-btn", "n_clicks"),
-        State("insight-inbox-offcanvas", "is_open"),
+        Input("insight-session-state", "data"),
         State("insight-session-state", "data"),
         prevent_initial_call=True,
     )
-    def toggle_insight_inbox(n_clicks, is_open, session_state):
-        """Toggle Insight Inbox offcanvas and update badge count."""
+    def update_insight_inbox_badge(_, session_state):
+        """Updates the inbox badge count independently from overlay open state."""
         history = (session_state or {}).get("history", [])
         count = len(history)
         badge_text = str(count) if count > 0 else ""
         badge_style = {} if count > 0 else {"display": "none"}
-        return not is_open, badge_text, badge_style
+        return badge_text, badge_style
 
     # ── 13.5 Insight Inbox: body render callback ─────────────────────────────
 
@@ -2699,6 +2795,7 @@ def register_career_intelligence_callbacks(app):
             tier = entry.get("tier", 2)
             title = entry.get("title", "—")
             body = entry.get("body", "")
+            evidence_key = entry.get("evidence_key", "career_arc")
             timestamp_raw = entry.get("timestamp", "")
             tier_class = "insight-inbox-item--t1" if tier == 1 else "insight-inbox-item--t2"
             tier_label = "CRITICAL" if tier == 1 else "TREND"
@@ -2734,6 +2831,13 @@ def register_career_intelligence_callbacks(app):
                 ], style={"display": "flex", "alignItems": "center", "marginBottom": "4px"}),
                 html.Div(title, style={"fontSize": "0.8rem", "fontWeight": "700", "marginBottom": "4px"}),
                 html.Div(body_short, style={"fontSize": "0.75rem", "opacity": "0.75", "lineHeight": "1.4"}),
+                dbc.Button(
+                    "See evidence",
+                    id={"type": "career-evidence-trigger", "key": evidence_key, "source": "inbox"},
+                    color="link",
+                    className="insight-inbox-item__cta px-0 mt-2",
+                    n_clicks=0,
+                ),
             ], className=f"insight-inbox-item {tier_class}"))
 
         return items

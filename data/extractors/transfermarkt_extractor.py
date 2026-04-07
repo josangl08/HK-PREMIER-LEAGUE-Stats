@@ -1,6 +1,7 @@
 # ABOUTME: Extractor for Transfermarkt data (team injuries, player match history, and player photos).
 # ABOUTME: Provides get_match_history(), get_player_photo_url(), fetch_and_store_player_photo() with blob storage in DB.
 
+import random
 import requests
 import cloudscraper
 from bs4 import BeautifulSoup, Tag
@@ -17,19 +18,36 @@ from pathlib import Path
 import json
 from requests.cookies import create_cookie
 
+from utils.proxy_manager import ProxyManager
+
+_USER_AGENTS = [
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+]
+
 class TransfermarktExtractor:
     """
     Extractor avanzado de Transfermarkt para rendimiento detallado de jugadores.
     """
-    
-    def __init__(self, cache_dir: str = "data/cache"):
+
+    def __init__(self, cache_dir: str = "data/cache", proxy_manager: Optional[ProxyManager] = None):
         self.base_url = "https://www.transfermarkt.es"
         self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
+            'User-Agent': random.choice(_USER_AGENTS),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-GB,en;q=0.9,es;q=0.7',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Upgrade-Insecure-Requests': '1',
         }
-        self.delay_between_requests = 2
+        self.delay_min = 5.0
+        self.delay_max = 9.0
+        self.request_count = 0
         self.last_request_time = 0
+        self.proxy_manager = proxy_manager or ProxyManager()
         self.cache_dir = Path(cache_dir)
         self.historical_records_dir = Path("data/historical_records")
         self.competition_logos_dir = Path("assets/competition_logos")
@@ -54,21 +72,34 @@ class TransfermarktExtractor:
         }
 
     def _wait_rate_limit(self):
-        current_time = time.time()
-        elapsed = current_time - self.last_request_time
-        if elapsed < self.delay_between_requests:
-            time.sleep(self.delay_between_requests - elapsed)
+        self.request_count += 1
+        # Every 10 requests, take a longer break to look human.
+        if self.request_count % 10 == 0:
+            pause = random.uniform(20, 35)
+            self.logger.debug("Rate limit long pause: %.1fs after %d requests", pause, self.request_count)
+            time.sleep(pause)
+        else:
+            delay = random.uniform(self.delay_min, self.delay_max)
+            elapsed = time.time() - self.last_request_time
+            remaining = delay - elapsed
+            if remaining > 0:
+                time.sleep(remaining)
+        # Rotate User-Agent every 5 requests.
+        if self.request_count % 5 == 0:
+            self.session.headers.update({'User-Agent': random.choice(_USER_AGENTS)})
         self.last_request_time = time.time()
     
     def _make_request(self, url: str) -> Optional[BeautifulSoup]:
+        proxy_url = self.proxy_manager.get_proxy() if self.proxy_manager.has_proxies else None
+        proxies = self.proxy_manager.as_requests_dict(proxy_url) if proxy_url else None
         try:
             self._wait_rate_limit()
-            self.logger.info(f"Scraping: {url}")
+            self.logger.info("Scraping: %s%s", url, f" [proxy]" if proxy_url else "")
             self.last_block_type = None
             self.last_block_reason = None
             self.last_result_source = "network"
             self.last_cache_fresh = False
-            response = self.session.get(url, timeout=15)
+            response = self.session.get(url, timeout=15, proxies=proxies)
             self.last_http_status = response.status_code
             self.last_request_time = time.time()
             protection_reason = self._detect_protection_page(response.text)
@@ -76,16 +107,24 @@ class TransfermarktExtractor:
                 self.last_block_type = "AWS_WAF_HUMAN_VERIFICATION"
                 self.last_block_reason = protection_reason
                 self.logger.warning("Transfermarkt protection page detected for %s: %s", url, protection_reason)
+                if proxy_url:
+                    self.proxy_manager.mark_failure(proxy_url)
                 return None
             response.raise_for_status()
+            if proxy_url:
+                self.proxy_manager.mark_success(proxy_url)
             return BeautifulSoup(response.content, 'html.parser')
         except requests.HTTPError as e:
             self.last_http_status = e.response.status_code if e.response is not None else None
-            self.logger.error(f"Error en {url}: {e}")
+            self.logger.error("Error en %s: %s", url, e)
+            if proxy_url:
+                self.proxy_manager.mark_failure(proxy_url)
             return None
         except Exception as e:
             self.last_http_status = None
-            self.logger.error(f"Error en {url}: {e}")
+            self.logger.error("Error en %s: %s", url, e)
+            if proxy_url:
+                self.proxy_manager.mark_failure(proxy_url)
             return None
 
     def _detect_protection_page(self, html: str) -> Optional[str]:

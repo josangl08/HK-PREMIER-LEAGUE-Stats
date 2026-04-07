@@ -49,9 +49,29 @@ class TransfermarktRuntimeManager:
             if row.mode == "ASSISTED_ACTIVE":
                 return False
             cooldown_until = self._to_naive_utc(row.cooldown_until)
-            if row.mode == "BLOCKED" and cooldown_until and cooldown_until > now:
-                return True
+            if row.mode == "BLOCKED":
+                if cooldown_until and cooldown_until > now:
+                    return True
+                # Cooldown expired — auto-recover so the next attempt proceeds.
+                row.mode = "RECOVERING"
+                row.status = "RECOVERING"
+                row.cooldown_until = None
+                session.commit()
+                logger.info("Transfermarkt cooldown expired — auto-recovering to RECOVERING mode.")
             return False
+
+    def reset_block(self) -> None:
+        """Manually clear a BLOCKED state after cooldown. Safe to call at any time."""
+        with SessionFactory() as session:
+            row = self._get_status_row(session)
+            row.mode = "NORMAL"
+            row.status = "READY"
+            row.failure_count = 0
+            row.blocked_at = None
+            row.cooldown_until = None
+            row.block_reason = None
+            session.commit()
+            logger.info("Transfermarkt block reset manually.")
 
     def record_success(self, metadata: Optional[dict[str, Any]] = None) -> None:
         with SessionFactory() as session:
@@ -62,10 +82,7 @@ class TransfermarktRuntimeManager:
             row.block_reason = None
             row.blocked_at = None
             row.cooldown_until = None
-            if row.mode == "ASSISTED_ACTIVE":
-                row.mode = "RECOVERING"
-                row.status = "ASSISTED"
-            else:
+            if row.mode not in ("ASSISTED_ACTIVE", "RECOVERING"):
                 row.mode = "NORMAL"
                 row.status = "READY"
             if metadata:

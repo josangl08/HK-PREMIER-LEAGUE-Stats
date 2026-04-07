@@ -1,5 +1,6 @@
 #!/usr/bin/env python
-# ABOUTME: Load, clear, and inspect assisted Transfermarkt cookie sessions.
+# ABOUTME: Load, clear, inspect, and reset assisted Transfermarkt cookie sessions.
+# ABOUTME: Supports reset-block to clear BLOCKED state after cooldown expires.
 
 from __future__ import annotations
 
@@ -26,6 +27,7 @@ def main() -> None:
 
     sub.add_parser("clear")
     sub.add_parser("status")
+    sub.add_parser("reset-block", help="Reset BLOCKED state after cooldown expires — use when system is stuck.")
 
     args = parser.parse_args()
     init_db()
@@ -54,6 +56,12 @@ def main() -> None:
         print(f"has_cookies={has_cookies}")
         print(f"assisted_session_loaded_at={status.assisted_session_loaded_at}")
         print(f"assisted_session_expires_at={status.assisted_session_expires_at}")
+        return
+
+    if args.command == "reset-block":
+        runtime.reset_block()
+        status = runtime.get_status()
+        print(f"Block reset. mode={status.mode} failure_count={status.failure_count}")
 
 
 if __name__ == "__main__":

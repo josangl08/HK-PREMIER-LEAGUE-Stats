@@ -143,7 +143,7 @@ class MatchWatcher:
             state.tm_retry_after = self._to_naive_utc(defer_until)
 
     def enqueue_current_season_bootstrap(self, days_ahead: int = 7) -> int:
-        """Queue active current-season squad players, prioritising teams with upcoming fixtures."""
+        """Queue all HK players with tm_id, prioritising those with upcoming fixtures."""
         session = SessionFactory()
         try:
             now = self._utcnow()
@@ -154,23 +154,14 @@ class MatchWatcher:
             priority_team_ids = {fix.home_team_id for fix in upcoming_fixtures} | {fix.away_team_id for fix in upcoming_fixtures}
 
             current_season = session.execute(select(Fixture.season_id).order_by(Fixture.date_utc.desc()).limit(1)).scalar_one_or_none()
-            active_team_ids = set(
-                session.execute(
-                    select(Fixture.home_team_id).where(Fixture.season_id == current_season)
-                ).scalars().all()
-            ) | set(
-                session.execute(
-                    select(Fixture.away_team_id).where(Fixture.season_id == current_season)
-                ).scalars().all()
-            )
-            if not active_team_ids:
-                return 0
 
+            # All HK players with a Transfermarkt ID — not filtered by fixture teams
+            # because some HK clubs may be absent from the fixtures table.
             players = session.execute(
                 select(Player).where(
                     and_(
-                        Player.current_team_id.in_(tuple(active_team_ids)),
                         Player.tm_id.is_not(None),
+                        Player.id.like("hk_%"),
                     )
                 )
             ).scalars().all()
@@ -199,7 +190,7 @@ class MatchWatcher:
             session.close()
 
     def enqueue_upcoming_opponents(self, days_ahead: int = 10) -> int:
-        """Queue players from teams with upcoming fixtures for scouting coverage."""
+        """Queue HK-based players from teams with upcoming fixtures for scouting coverage."""
         session = SessionFactory()
         try:
             now = self._utcnow()
@@ -211,8 +202,13 @@ class MatchWatcher:
             if not team_ids:
                 return 0
 
+            # Only enqueue HK-based players (hk_ prefix) — exclude foreign AFC Cup opponents.
             players = session.execute(
-                select(Player).where(and_(Player.current_team_id.in_(tuple(team_ids)), Player.tm_id.is_not(None)))
+                select(Player).where(and_(
+                    Player.current_team_id.in_(tuple(team_ids)),
+                    Player.tm_id.is_not(None),
+                    Player.id.like("hk_%"),
+                ))
             ).scalars().all()
             added = 0
             for player in players:
@@ -377,7 +373,7 @@ class MatchWatcher:
                 MatchUpdateQueue.next_attempt <= now,
                 or_(MatchUpdateQueue.retry_after.is_(None), MatchUpdateQueue.retry_after <= now),
             )
-            task_limit = 1 if assisted_active else 10
+            task_limit = 5 if assisted_active else 10
             stmt = None
             if assisted_active:
                 assisted_priority_stmt = (
@@ -393,6 +389,7 @@ class MatchWatcher:
                 )
                 tasks = session.execute(assisted_priority_stmt).scalars().all()
                 if not tasks:
+                    # Try non-bootstrap jobs first; fall back to bootstrap if nothing else ready.
                     stmt = (
                         select(MatchUpdateQueue)
                         .where(
@@ -404,6 +401,13 @@ class MatchWatcher:
                         .order_by(MatchUpdateQueue.priority.desc(), MatchUpdateQueue.next_attempt.asc())
                         .limit(task_limit)
                     )
+                    if session.execute(stmt).scalars().first() is None:
+                        stmt = (
+                            select(MatchUpdateQueue)
+                            .where(base_conditions)
+                            .order_by(MatchUpdateQueue.priority.desc(), MatchUpdateQueue.next_attempt.asc())
+                            .limit(task_limit)
+                        )
             else:
                 stmt = (
                     select(MatchUpdateQueue)
@@ -433,7 +437,7 @@ class MatchWatcher:
                 player_tasks[group_key].append(t)
             
             consecutive_hard_blocks = 0
-            hard_block_limit = 1 if assisted_active else 3
+            hard_block_limit = 2 if assisted_active else 3
             for group_key, p_tasks in player_tasks.items():
                 seed_task = p_tasks[0]
                 p_id = seed_task.player_id
@@ -481,7 +485,15 @@ class MatchWatcher:
                         ).scalar_one_or_none()
                         completed = bool(history_exists)
                     else:
-                        completed = bool(success)
+                        # A valid 200 response with no HK data means the player
+                        # genuinely has no HK competition history — treat as done.
+                        valid_empty = (
+                            not success
+                            and hard_http_status == 200
+                            and not hard_block_reason
+                            and self.refresh_manager.last_result_source == "network"
+                        )
+                        completed = bool(success) or valid_empty
 
                     if completed:
                         t.status = "COMPLETED"

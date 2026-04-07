@@ -168,6 +168,7 @@ window.dash_clientside = Object.assign({}, window.dash_clientside, {
                 var container = document.querySelector(".milestone-list-container");
                 var sections = document.querySelectorAll(".season-section");
                 if (!sections || !sections.length) return;
+                window._portalActiveSeasonYear = null;
 
                 window._seasonObserver = new IntersectionObserver(function(entries) {
                     var topYear = null;
@@ -182,15 +183,14 @@ window.dash_clientside = Object.assign({}, window.dash_clientside, {
                         }
                     });
                     if (!topYear) return;
-
-                    window.dash_clientside.set_props("active-year-store", {data: topYear});
+                    if (window._portalActiveSeasonYear === topYear) return;
+                    window._portalActiveSeasonYear = topYear;
 
                     var pills = document.querySelectorAll("#year-navigator-pills button");
                     pills.forEach(function(pill) {
                         var pillYear = pill.textContent.trim();
                         if (pillYear === topYear) {
                             pill.classList.add("active");
-                            pill.scrollIntoView({behavior: "smooth", inline: "center", block: "nearest"});
                         } else {
                             pill.classList.remove("active");
                         }
@@ -201,7 +201,7 @@ window.dash_clientside = Object.assign({}, window.dash_clientside, {
                     window._seasonObserver.observe(section);
                 });
             }, 400);
-            return window.dash_clientside.no_update;
+            return null;
         },
 
         refreshStageLucide: function(children) {

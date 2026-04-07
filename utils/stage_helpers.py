@@ -32,6 +32,60 @@ _umap_lock = threading.Lock()
 logger = logging.getLogger(__name__)
 
 
+_COUNTRY_TO_ISO2 = {
+    "argentina": "AR",
+    "australia": "AU",
+    "brazil": "BR",
+    "brasil": "BR",
+    "chile": "CL",
+    "china": "CN",
+    "colombia": "CO",
+    "croatia": "HR",
+    "england": "GB",
+    "france": "FR",
+    "germany": "DE",
+    "ghana": "GH",
+    "hong kong": "HK",
+    "hong kong, china": "HK",
+    "india": "IN",
+    "indonesia": "ID",
+    "iran": "IR",
+    "italy": "IT",
+    "japan": "JP",
+    "korea republic": "KR",
+    "south korea": "KR",
+    "north korea": "KP",
+    "macau": "MO",
+    "malaysia": "MY",
+    "mexico": "MX",
+    "morocco": "MA",
+    "netherlands": "NL",
+    "nigeria": "NG",
+    "norway": "NO",
+    "paraguay": "PY",
+    "philippines": "PH",
+    "poland": "PL",
+    "portugal": "PT",
+    "russia": "RU",
+    "scotland": "GB",
+    "serbia": "RS",
+    "singapore": "SG",
+    "spain": "ES",
+    "sweden": "SE",
+    "switzerland": "CH",
+    "taiwan": "TW",
+    "thailand": "TH",
+    "turkey": "TR",
+    "ukraine": "UA",
+    "united states": "US",
+    "usa": "US",
+    "uruguay": "UY",
+    "venezuela": "VE",
+    "vietnam": "VN",
+    "wales": "GB",
+}
+
+
 def _get_logged_in_player_id() -> str:
     try:
         player_id = getattr(current_user, "player_id", None)
@@ -47,6 +101,17 @@ def _clean_url(url: str) -> str:
     if not url:
         return url
     return _html_lib.unescape(url).rstrip('"').strip()
+
+
+def _country_to_flag(country_name: Any) -> str:
+    """Returns an emoji flag for a known country name; empty string if unknown."""
+    value = str(country_name or "").strip().lower()
+    if not value:
+        return ""
+    iso2 = _COUNTRY_TO_ISO2.get(value)
+    if not iso2 or len(iso2) != 2:
+        return ""
+    return chr(ord(iso2[0]) + 127397) + chr(ord(iso2[1]) + 127397)
 
 
 def _normalize_team_jersey_key(team_name: str) -> str:
@@ -78,6 +143,22 @@ def _normalize_team_jersey_key(team_name: str) -> str:
     if value in aliases:
         return aliases[value]
     return re.sub(r"[^a-z0-9]+", "", value)
+
+
+def _canonical_team_display_name(team_name: str) -> str:
+    """Normalizes legacy/raw team names to the preferred display label."""
+    value = str(team_name or "").strip()
+    if not value:
+        return value
+    normalized_key = _normalize_team_jersey_key(value)
+    display_aliases = {
+        "leeman": "Lee Man",
+        "northdt": "North District",
+        "easterndt": "Eastern",
+        "hkfc": "HKFC",
+        "taipo": "Tai Po",
+    }
+    return display_aliases.get(normalized_key, value)
 
 
 def _resolve_team_jersey(team_name: str, variant: str = "home") -> str:
@@ -2118,6 +2199,8 @@ def _fetch_dashboard_data(player_name: str, player_id: str) -> Dict:
         "team_name": None,
         "archetype": None,
         "age": None,
+        "nationality": None,
+        "birth_country": None,
         "foot": None,
         "height": None,
         "cutout_path": None,
@@ -2142,10 +2225,12 @@ def _fetch_dashboard_data(player_name: str, player_id: str) -> Dict:
         if player_obj:
             result["position_main"] = player_obj.position_main
             result["age"]           = player_obj.age
+            result["nationality"]   = player_obj.nationality
+            result["birth_country"] = player_obj.birth_country
             result["foot"]          = player_obj.foot
             result["height"]        = player_obj.height
             if player_obj.current_team:
-                result["team_name"] = player_obj.current_team.name
+                result["team_name"] = _canonical_team_display_name(player_obj.current_team.name)
 
             # Primary photo: blob > cutout_path > original_path
             primary_photo = next(
@@ -2596,7 +2681,7 @@ def _build_phase_momentum_row(career_phase_data: Dict) -> List:
 
 
 def _build_identity_hero(data: Dict, career_phase_data: Optional[Dict] = None) -> html.Div:
-    """§1 Identity Hero: cutout photo, name, position, team, archetype badge, physical attrs."""
+    """§1 Identity Hero: photo, identity snapshot, and compact metadata row."""
     pos_icons = {
         "Forward": "bi-lightning-charge-fill", "Winger": "bi-wind",
         "Midfielder": "bi-shuffle", "Defender": "bi-shield-fill",
@@ -2607,19 +2692,25 @@ def _build_identity_hero(data: Dict, career_phase_data: Optional[Dict] = None) -
     pos_label     = POSITION_FULL_NAMES.get(position_main.upper(), position_main) if position_main else pos_group
     archetype     = data.get("archetype") or pos_group or "Player"
     team_name     = data.get("team_name") or "—"
-    season        = data.get("current_season") or "—"
     cutout_path   = data.get("cutout_path")
 
     age    = data.get("age")
+    nationality = data.get("nationality") or data.get("birth_country")
     foot   = data.get("foot")
     height = data.get("height")
+    history_df = data.get("history_df", pd.DataFrame())
+    seasons_tracked = len(history_df) if isinstance(history_df, pd.DataFrame) and not history_df.empty else None
+    latest_recorded_season = None
+    if isinstance(history_df, pd.DataFrame) and not history_df.empty and "Season" in history_df.columns:
+        season_values = [str(season).strip() for season in history_df["Season"].tolist() if str(season).strip()]
+        latest_recorded_season = season_values[0] if season_values else None
 
     # ── Photo ──────────────────────────────────────────────────────────────
     photo_col = html.Div(
         html.Img(
             src=cutout_path,
             style={
-                "maxHeight": "120px",
+                "maxHeight": "152px",
                 "objectFit": "contain",
                 "filter": "drop-shadow(0 4px 12px rgba(0,0,0,0.4))",
                 "borderRadius": "12px",
@@ -2631,26 +2722,44 @@ def _build_identity_hero(data: Dict, career_phase_data: Optional[Dict] = None) -
                    "alignItems": "center", "justifyContent": "center"},
         ),
         style={"flexShrink": "0"},
+        className="career-identity-photo",
     )
 
-    # ── Archetype badge (legacy — shown only if cluster DNA section fails) ──
-    arch_badge = html.Span()
-
-    # ── Physical attrs ─────────────────────────────────────────────────────
-    def _attr_chip(icon: str, label: str, value) -> html.Span:
+    # ── Metadata row ──────────────────────────────────────────────────────
+    def _attr_chip(icon: str, label: str, value) -> html.Div:
         display = str(value) if value is not None else "–"
-        return html.Span([
-            html.I(className=f"bi {icon} me-1", style={"fontSize": "0.7rem"}),
-            html.Span(label, style={"fontSize": "0.65rem", "color": HKFATheme.TEXT_SECONDARY}),
-            html.Span(f" {display}", style={"fontSize": "0.72rem", "fontWeight": "600"}),
-        ], style={"marginRight": "10px"})
+        return html.Div([
+            html.Div([
+                html.I(className=f"bi {icon}", style={"fontSize": "0.78rem"}),
+                html.Span(label),
+            ], className="career-identity-meta__label"),
+            html.Div(display, className="career-identity-meta__value"),
+        ], className="career-identity-meta__item")
 
     height_str = f"{height} cm" if height else None
     attrs_row = html.Div([
-        _attr_chip("bi-calendar3",     "Age",    age),
+        _attr_chip("bi-calendar3", "Age", age),
+        _attr_chip("bi-rulers", "Height", height_str),
         _attr_chip("bi-arrow-left-right", "Foot", foot),
-        _attr_chip("bi-rulers",        "Height", height_str),
-    ], style={"display": "flex", "alignItems": "center", "marginTop": "6px", "flexWrap": "wrap"})
+        _attr_chip("bi-collection", "Seasons", seasons_tracked),
+    ], className="career-identity-meta")
+
+    nationality_flag = _country_to_flag(nationality)
+    nationality_row = html.Div(
+        [
+            html.Span(nationality_flag, title=str(nationality), className="career-identity-nationality__flag")
+            if nationality_flag else html.I(className="bi bi-flag-fill career-identity-nationality__icon"),
+            html.Span(str(nationality) if nationality is not None else "–", className="career-identity-nationality__name"),
+        ],
+        className="career-identity-nationality",
+    )
+    latest_season_row = html.Div(
+        [
+            html.Span("Last Season:", className="career-identity-last-season__label"),
+            html.Span(latest_recorded_season or "–", className="career-identity-last-season__value"),
+        ],
+        className="career-identity-last-season",
+    )
 
     # ── Info column ────────────────────────────────────────────────────────
     info_col = html.Div([
@@ -2658,27 +2767,30 @@ def _build_identity_hero(data: Dict, career_phase_data: Optional[Dict] = None) -
             "fontSize": "1.25rem", "fontWeight": "800",
             "color": HKFATheme.TEXT_PRIMARY, "lineHeight": "1.2",
         }),
-        html.Div(pos_label, style={"fontSize": "0.8rem", "color": HKFATheme.TEXT_SECONDARY, "marginTop": "2px"}),
+        html.Div(
+            html.Span(pos_label or "Player", className="career-identity-position-badge"),
+            style={"marginTop": "4px"},
+        ),
         html.Div([
             *([html.Img(src=_resolve_team_logo(team_name),
-                        style={"height": "16px", "objectFit": "contain", "marginRight": "5px", "verticalAlign": "middle"})]
+                        className="career-identity-team__logo")]
               if _resolve_team_logo(team_name) else
-              [html.I(className="bi bi-shield-fill me-1", style={"color": HKFATheme.ACCENT_BLUE, "fontSize": "0.72rem"})]),
-            html.Span(team_name, style={"fontSize": "0.8rem", "color": HKFATheme.TEXT_SECONDARY}),
-            html.Span(f"  ·  {season}", style={"fontSize": "0.72rem", "color": HKFATheme.TEXT_TERTIARY, "marginLeft": "6px"}),
-        ], style={"marginTop": "4px", "display": "flex", "alignItems": "center"}),
-        html.Div(arch_badge, style={"marginTop": "6px"}),
-        # ── Career phase badge + momentum tracker ─────────────────────────
-        *(_build_phase_momentum_row(career_phase_data) if career_phase_data else []),
-        attrs_row,
-    ], style={"flex": "1", "minWidth": "0"})
+              [html.I(className="bi bi-shield-fill career-identity-team__fallback")]),
+            html.Span(team_name, className="career-identity-team__name"),
+        ], className="career-identity-team"),
+        nationality_row,
+        latest_season_row,
+    ], style={"flex": "1", "minWidth": "0"}, className="career-identity-info")
 
     return html.Div([
-        html.H6([
-            html.I(className="bi bi-person-badge-fill me-2"),
-            html.Span("Player Profile", className="animate-glass-draw"),
-        ], className="mb-3 fw-semibold", style={"color": "var(--accent-cyan, #00d4ff)"}),
-        html.Div([photo_col, info_col], style={"display": "flex", "gap": "14px", "alignItems": "flex-start"}),
+        html.Div(
+            [
+                html.Span(html.I(className="bi bi-person-badge-fill"), className="career-dashboard-section__icon"),
+                html.H6("Player Profile", className="career-dashboard-section__title"),
+            ],
+            className="career-dashboard-section__title-row career-command-card__title-row",
+        ),
+        html.Div([photo_col, info_col, attrs_row], className="career-identity-layout"),
     ])
 
 
@@ -3401,6 +3513,396 @@ def render_strategic_intelligence(
     )
 
 
+def _build_career_evidence_button(evidence_key: str, label: str = "See evidence", source: str = "dashboard") -> dbc.Button:
+    return dbc.Button(
+        [label, html.I(className="bi bi-arrow-up-right ms-2")],
+        id={"type": "career-evidence-trigger", "key": evidence_key, "source": source},
+        color="link",
+        size="sm",
+        className="career-evidence-trigger-btn",
+        n_clicks=0,
+    )
+
+
+def _get_career_surface_meta(item: Any, section_label: str) -> Dict[str, str]:
+    evidence_key = str(getattr(item, "evidence_key", "") or "")
+    emphasis = str(getattr(item, "emphasis", "neutral") or "neutral")
+
+    if evidence_key in {"minutes_trend", "career_arc"}:
+        icon_class = "bi bi-graph-up-arrow"
+    elif evidence_key == "projection_outlook":
+        icon_class = "bi bi-compass"
+    elif evidence_key == "similarity_profiles":
+        icon_class = "bi bi-people"
+    elif evidence_key == "tactical_dna":
+        icon_class = "bi bi-diagram-3"
+    else:
+        icon_class = "bi bi-stars"
+
+    if section_label.lower() == "leverage":
+        tone_label = "Career Lever"
+    elif emphasis == "positive":
+        tone_label = "Positive Signal"
+    elif emphasis == "warning":
+        tone_label = "Risk Signal"
+    else:
+        tone_label = "Career Signal"
+
+    return {
+        "icon_class": icon_class,
+        "tone_label": tone_label,
+    }
+
+
+def _build_command_metrics_strip(data: Dict) -> html.Div:
+    items = [
+        ("Minutes", f"{int(data.get('minutes_played', 0) or 0):,}", "bi bi-stopwatch"),
+        ("Goals", str(int(data.get("goals", 0) or 0)), "bi bi-bullseye"),
+        ("Assists", str(int(data.get("assists", 0) or 0)), "bi bi-arrow-repeat"),
+    ]
+    return html.Div(
+        [
+            html.Div(
+                [
+                    html.Div(
+                        [
+                            html.Span(html.I(className=icon_class), className="career-command-metric__icon"),
+                            html.Span(label, className="career-command-metric__label"),
+                        ],
+                        className="career-command-metric__top",
+                    ),
+                    html.Span(value, className="career-command-metric__value"),
+                ],
+                className="career-command-metric",
+            )
+            for label, value, icon_class in items
+        ],
+        className="career-command-metrics",
+    )
+
+
+def _build_career_command(
+    data: Dict,
+    career_phase_data: Dict[str, Any],
+    brief: Any,
+) -> html.Div:
+    thesis = brief.career_thesis
+    trajectory_label = thesis.get("label", "Career Progression")
+    body = thesis.get("body", "")
+    support = thesis.get("support", "")
+    momentum = int(career_phase_data.get("momentum_score", 3) or 3)
+
+    return html.Div(
+        className="career-command-card",
+        children=[
+            html.Div(
+                className="career-command-card__hero",
+                children=[
+                    html.Div(_build_identity_hero(data, career_phase_data), className="career-command-card__identity"),
+                    html.Div(
+                        className="career-command-card__summary",
+                        children=[
+                            html.Div(
+                                [
+                                    html.Span(html.I(className="bi bi-graph-up-arrow"), className="career-dashboard-section__icon"),
+                                    html.H6(trajectory_label, className="career-dashboard-section__title career-command-card__title"),
+                                ],
+                                className="career-dashboard-section__title-row career-command-card__title-row",
+                            ),
+                            *(_build_phase_momentum_row(career_phase_data) if career_phase_data else []),
+                            html.P(body, className="career-command-card__body"),
+                            html.P(support, className="career-command-card__support"),
+                            html.Div(
+                                [
+                                    html.Div(
+                                        [
+                                            html.Span("Momentum", className="career-command-kpi__label"),
+                                            html.Span(f"{momentum}/5", className="career-command-kpi__value"),
+                                        ],
+                                        className="career-command-kpi",
+                                    ),
+                                    html.Div(
+                                        [
+                                            html.Span("Phase", className="career-command-kpi__label"),
+                                            html.Span(str(career_phase_data.get("career_phase", "unknown")).upper(), className="career-command-kpi__value"),
+                                        ],
+                                        className="career-command-kpi",
+                                    ),
+                                ],
+                                className="career-command-kpis",
+                            ),
+                        ],
+                    ),
+                ],
+            ),
+            _build_command_metrics_strip(data),
+        ],
+    )
+
+
+def _build_insight_card(item: Any, section_label: str, source: str = "dashboard") -> html.Div:
+    meta = _get_career_surface_meta(item, section_label)
+    stat_items = []
+    if getattr(item, "badge_value", "") and getattr(item, "badge_label", ""):
+        stat_items.append((item.badge_value, item.badge_label))
+    if getattr(item, "secondary_value", "") and getattr(item, "secondary_label", ""):
+        stat_items.append((item.secondary_value, item.secondary_label))
+    return html.Div(
+        className=f"career-dashboard-card career-dashboard-card--{getattr(item, 'emphasis', 'neutral')}",
+        children=[
+            html.Div(
+                [
+                    html.Div(
+                        [
+                            html.Span(html.I(className=meta["icon_class"]), className="career-dashboard-card__icon-glyph"),
+                            html.Div(
+                                [
+                                    html.Div(section_label, className="career-dashboard-card__eyebrow"),
+                                    html.Div(meta["tone_label"], className="career-dashboard-card__tone"),
+                                ],
+                                className="career-dashboard-card__meta",
+                            ),
+                        ],
+                        className="career-dashboard-card__top",
+                    ),
+                ]
+            ),
+            html.Div(item.title, className="career-dashboard-card__title"),
+            html.Div(
+                [
+                    html.Div(
+                        [
+                            html.Div(value, className="career-dashboard-card__stat-value"),
+                            html.Div(label, className="career-dashboard-card__stat-label"),
+                        ],
+                        className="career-dashboard-card__stat",
+                    )
+                    for value, label in stat_items
+                ],
+                className="career-dashboard-card__stats",
+            ) if stat_items else html.Span(),
+            html.P(item.body, className="career-dashboard-card__body"),
+            html.Div(
+                [
+                    html.Span(html.I(className="bi bi-activity"), className="career-dashboard-card__support-icon"),
+                    html.P(item.support, className="career-dashboard-card__support"),
+                ],
+                className="career-dashboard-card__support-wrap",
+            ),
+            html.Div(
+                _build_career_evidence_button(item.evidence_key, source=source),
+                className="career-dashboard-card__footer",
+            ),
+        ],
+    )
+
+
+def _build_minutes_trend_evidence(data: Dict) -> html.Div:
+    history_df = data.get("history_df", pd.DataFrame())
+    header = html.H6([
+        html.I(className="bi bi-stopwatch me-2"),
+        html.Span("Minutes Trend", className="animate-glass-draw"),
+    ], className="mb-3 fw-semibold", style={"color": "var(--accent-cyan, #00d4ff)"})
+
+    if history_df is None or history_df.empty:
+        return html.Div([header, html.P("Minutes history is not available.", className="text-muted small")])
+
+    minutes_col = next((c for c in history_df.columns if "minute" in c.lower()), None)
+    if not minutes_col or "Season" not in history_df.columns:
+        return html.Div([header, html.P("Minutes history is not available.", className="text-muted small")])
+
+    plot_df = history_df[["Season", minutes_col]].copy()
+    plot_df[minutes_col] = pd.to_numeric(plot_df[minutes_col], errors="coerce").fillna(0)
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=plot_df["Season"],
+        y=plot_df[minutes_col],
+        mode="lines+markers",
+        line=dict(color=HKFATheme.ACCENT_BLUE, width=3),
+        marker=dict(size=8, color=HKFATheme.ACCENT_CYAN if hasattr(HKFATheme, "ACCENT_CYAN") else HKFATheme.ACCENT_BLUE),
+        fill="tozeroy",
+        fillcolor="rgba(83, 228, 255, 0.12)",
+        name="Minutes",
+        hovertemplate="%{x}<br>%{y:.0f} minutes<extra></extra>",
+    ))
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=36, r=18, t=10, b=46),
+        height=280,
+        xaxis=dict(title=None, ticklabelstandoff=8),
+        yaxis=dict(title="Minutes", rangemode="tozero"),
+        hovermode="x unified",
+        showlegend=False,
+    )
+    fig = glass_figure_layout(fig)
+
+    latest_minutes = int(plot_df[minutes_col].iloc[-1]) if not plot_df.empty else 0
+    peak_minutes = int(plot_df[minutes_col].max()) if not plot_df.empty else 0
+    latest_season = str(plot_df["Season"].iloc[-1]) if not plot_df.empty else "—"
+
+    summary = html.Div(
+        [
+            html.Div(
+                [
+                    html.Div(f"{latest_minutes:,}", className="career-command-kpi__value"),
+                    html.Div(f"{latest_season} minutes", className="career-command-kpi__label"),
+                ],
+                className="career-command-kpi",
+            ),
+            html.Div(
+                [
+                    html.Div(f"{peak_minutes:,}", className="career-command-kpi__value"),
+                    html.Div("career peak", className="career-command-kpi__label"),
+                ],
+                className="career-command-kpi",
+            ),
+        ],
+        className="career-command-kpis",
+    )
+
+    return html.Div([
+        header,
+        summary,
+        dcc.Graph(
+            figure=fig,
+            config={"displayModeBar": False, "responsive": True},
+            className="w-100",
+            responsive=True,
+            style={"width": "100%", "minWidth": "0"},
+        ),
+    ])
+
+
+def _build_key_career_signals(brief: Any) -> html.Div:
+    return html.Div(
+        className="career-dashboard-section",
+        children=[
+            html.Div(
+                [
+                    html.Div(
+                        [
+                            html.Span(html.I(className="bi bi-broadcast-pin"), className="career-dashboard-section__icon"),
+                            html.H6("Key Career Signals", className="career-dashboard-section__title"),
+                        ],
+                        className="career-dashboard-section__title-row",
+                    ),
+                    html.P("Short, evidence-backed readings of what is changing in your career.", className="career-dashboard-section__subtitle"),
+                ],
+                className="career-dashboard-section__header",
+            ),
+            html.Div(
+                [_build_insight_card(item, "Signal") for item in brief.signals],
+                className="career-dashboard-grid career-dashboard-grid--signals",
+            ),
+        ],
+    )
+
+
+def _build_career_levers(brief: Any) -> html.Div:
+    return html.Div(
+        className="career-dashboard-section",
+        children=[
+            html.Div(
+                [
+                    html.Div(
+                        [
+                            html.Span(html.I(className="bi bi-lightning-charge"), className="career-dashboard-section__icon"),
+                            html.H6("Career Levers", className="career-dashboard-section__title"),
+                        ],
+                        className="career-dashboard-section__title-row",
+                    ),
+                    html.P("The most meaningful areas shaping your next step, backed by profile evidence.", className="career-dashboard-section__subtitle"),
+                ],
+                className="career-dashboard-section__header",
+            ),
+            html.Div(
+                [_build_insight_card(item, "Leverage") for item in brief.levers],
+                className="career-dashboard-grid career-dashboard-grid--levers",
+            ),
+        ],
+    )
+
+
+def _build_career_outlook(brief: Any) -> html.Div:
+    outlook = brief.outlook
+    return html.Div(
+        className="career-dashboard-section",
+        children=[
+            html.Div(
+                className="career-outlook-card",
+                children=[
+                    html.Div(
+                        [
+                            html.Span(html.I(className="bi bi-compass"), className="career-dashboard-section__icon"),
+                            html.Div(
+                                [
+                                    html.Div("Career Outlook", className="career-dashboard-card__eyebrow"),
+                                    html.Div("Strategic Horizon", className="career-dashboard-card__tone"),
+                                ],
+                                className="career-dashboard-card__meta",
+                            ),
+                        ],
+                        className="career-dashboard-card__top",
+                    ),
+                    html.Div(outlook.get("label", "Build"), className="career-outlook-card__title"),
+                    html.P(outlook.get("body", ""), className="career-dashboard-card__body"),
+                    html.Div(
+                        [
+                            html.Span(html.I(className="bi bi-graph-up"), className="career-dashboard-card__support-icon"),
+                            html.P(outlook.get("support", ""), className="career-dashboard-card__support"),
+                        ],
+                        className="career-dashboard-card__support-wrap",
+                    ),
+                    html.Div(
+                        _build_career_evidence_button(outlook.get("evidence_key", "career_arc")),
+                        className="career-dashboard-card__footer",
+                    ),
+                ],
+            )
+        ],
+    )
+
+
+def render_career_evidence_view(evidence_key: str, player_name: str, player_id: str) -> Dict[str, Any]:
+    """Returns modal metadata + content for a career evidence destination."""
+    from utils.career_intelligence import get_evidence_destination_meta
+
+    data = _fetch_dashboard_data(player_name, player_id)
+    meta = get_evidence_destination_meta(evidence_key)
+    key = meta["key"]
+
+    if key == "minutes_trend":
+        content = _build_minutes_trend_evidence(data)
+    elif key == "career_arc":
+        content = _build_career_arc(data)
+    elif key == "percentile_profile":
+        content = _build_league_standing(data)
+    elif key == "similarity_profiles":
+        content = _build_similar_players(data)
+    elif key == "projection_outlook":
+        content = _build_projection_section(data, player_id)
+    elif key == "tactical_dna":
+        content = html.Div(
+            [
+                _build_cluster_dna(data),
+                html.Hr(style={"borderColor": HKFATheme.BORDER_COLOR, "margin": "16px 0"}),
+                _build_similar_players(data),
+            ]
+        )
+    else:
+        content = html.Div(
+            html.P("Detailed evidence is not available for this insight yet.", className="text-muted small mb-0")
+        )
+
+    return {
+        "key": key,
+        "title": meta["title"],
+        "content": content,
+    }
+
+
 def render_player_dashboard(
     player_name: str,
     player_id: str,
@@ -3410,7 +3912,12 @@ def render_player_dashboard(
     Orchestrates the 6-section player dashboard for Estado A (no card open).
     Fetches data once and delegates to independent builders with per-section error isolation.
     """
-    from utils.career_intelligence import get_career_phase_data, get_career_signals, get_development_priorities
+    from utils.career_intelligence import (
+        get_career_phase_data,
+        get_career_signals,
+        get_development_priorities,
+        build_career_dashboard_brief,
+    )
 
     data = _fetch_dashboard_data(player_name, player_id)
 
@@ -3433,8 +3940,13 @@ def render_player_dashboard(
     except Exception as _dpe:
         logger.debug(f"development_priorities computation failed: {_dpe}")
 
-    # Gemini narrative from structured JSON store (body field), fallback to empty
-    gemini_narrative: str = data.get("gemini_narrative") or ""
+    dashboard_brief = build_career_dashboard_brief(
+        data,
+        career_phase_data or {},
+        career_signals,
+        development_priorities,
+        ai_payload=data.get("career_dashboard_ai_brief"),
+    )
 
     def _safe_build(builder_fn, *args, **kwargs) -> html.Div:
         try:
@@ -3444,25 +3956,14 @@ def render_player_dashboard(
             return html.P("Sección no disponible", className="text-muted small")
 
     sections = [
-        _safe_build(_build_identity_hero,       data, career_phase_data),
-        html.Hr(style={"borderColor": HKFATheme.BORDER_COLOR, "margin": "12px 0"}),
-        _safe_build(_build_cluster_dna,          data),
-        html.Hr(style={"borderColor": HKFATheme.BORDER_COLOR, "margin": "12px 0"}),
-        _safe_build(_build_season_pulse,         data),
-        html.Hr(style={"borderColor": HKFATheme.BORDER_COLOR, "margin": "12px 0"}),
-        _safe_build(_build_league_standing,      data),
-        html.Hr(style={"borderColor": HKFATheme.BORDER_COLOR, "margin": "12px 0"}),
-        _safe_build(render_strategic_intelligence, career_signals, development_priorities, gemini_narrative),
-        html.Hr(style={"borderColor": HKFATheme.BORDER_COLOR, "margin": "12px 0"}),
-        _safe_build(_build_career_arc,           data),
-        html.Hr(style={"borderColor": HKFATheme.BORDER_COLOR, "margin": "12px 0"}),
-        _safe_build(_build_projection_section,   data, player_id),
-        html.Hr(style={"borderColor": HKFATheme.BORDER_COLOR, "margin": "12px 0"}),
-        _safe_build(_build_similar_players,      data),
+        _safe_build(_build_career_command, data, career_phase_data or {}, dashboard_brief),
+        _safe_build(_build_key_career_signals, dashboard_brief),
+        _safe_build(_build_career_levers, dashboard_brief),
+        _safe_build(_build_career_outlook, dashboard_brief),
     ]
 
     return html.Div(
-        html.Div(sections, className="stage-view stage-view--dashboard pb-2"),
+        html.Div(sections, className="stage-view stage-view--dashboard stage-view--career-command pb-2"),
     )
 
 

@@ -39,12 +39,31 @@ def watcher_now():
     return datetime.utcnow()
 
 
+def _count_pending(job_types: set[str] | None = None) -> int:
+    from datetime import datetime
+    now = datetime.utcnow()
+    with SessionFactory() as session:
+        q = session.query(MatchUpdateQueue).filter(
+            MatchUpdateQueue.status.in_(("PENDING", "DEFERRED")),
+            MatchUpdateQueue.next_attempt <= now,
+        )
+        if job_types:
+            q = q.filter(MatchUpdateQueue.job_type.in_(tuple(job_types)))
+        return q.count()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run assisted Transfermarkt refresh flows.")
     parser.add_argument(
         "scope",
         choices=["priority", "users", "post-match", "all"],
         help="Which assisted queue preparation to run before processing",
+    )
+    parser.add_argument(
+        "--max-cycles",
+        type=int,
+        default=50,
+        help="Max process_queue() cycles to run (default: 50)",
     )
     args = parser.parse_args()
 
@@ -70,7 +89,32 @@ def main() -> None:
     if args.scope == "all":
         watcher.enqueue_current_season_bootstrap()
 
-    watcher.process_queue()
+    cycles = 0
+    idle_cycles = 0
+    while cycles < args.max_cycles:
+        pending = _count_pending()
+        if pending == 0:
+            print(f"Queue empty after {cycles} cycle(s).")
+            break
+        status = runtime.get_status()
+        if status.mode == "BLOCKED":
+            print(f"Transfermarkt BLOCKED after {cycles} cycle(s). Run again later or reset with: python scripts/tm_assisted_session.py reset-block")
+            break
+        pending_before = _count_pending()
+        print(f"Cycle {cycles + 1}/{args.max_cycles} — {pending} jobs ready...")
+        watcher.process_queue()
+        cycles += 1
+        pending_after = _count_pending()
+        if pending_after >= pending_before:
+            idle_cycles += 1
+            if idle_cycles >= 3:
+                print(f"No progress after {idle_cycles} cycles — all remaining jobs are deferred. Run again later.")
+                break
+        else:
+            idle_cycles = 0
+    else:
+        print(f"Reached max-cycles limit ({args.max_cycles}). Run again to continue.")
+
     if args.scope == "priority":
         print(f"Assisted refresh completed for scope={args.scope}; requeued_failed={requeued}")
     else:

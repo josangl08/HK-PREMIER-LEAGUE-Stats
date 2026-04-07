@@ -60,7 +60,11 @@ def render_t1_overlay(signal: OverlaySignal) -> html.Div:
                         children=[
                             dbc.Button(
                                 signal.cta_label,
-                                id={"type": "ai-overlay-t1-btn", "action": "cta"},
+                                id={
+                                    "type": "ai-overlay-t1-btn",
+                                    "action": "cta",
+                                    "evidence_key": signal.evidence_key or "career_arc",
+                                },
                                 color="primary",
                                 size="sm",
                                 className="flex-grow-1",
@@ -68,7 +72,7 @@ def render_t1_overlay(signal: OverlaySignal) -> html.Div:
                             ),
                             dbc.Button(
                                 "Entendido",
-                                id={"type": "ai-overlay-t1-btn", "action": "dismiss"},
+                                id={"type": "ai-overlay-t1-btn", "action": "dismiss", "evidence_key": ""},
                                 color="outline-light",
                                 size="sm",
                                 className="flex-shrink-0",
@@ -139,19 +143,19 @@ def render_t2_overlay(signal: OverlaySignal, signal_index: int = 0) -> html.Div:
                         },
                     ),
                     # CTA link
-                    html.A(
+                    dbc.Button(
                         [
                             signal.cta_label,
                             html.I(className="bi bi-arrow-right ms-1", style={"fontSize": "0.7rem"}),
                         ],
-                        id={"type": "ai-overlay-t2-cta", "index": signal_index},
-                        href="#",
-                        style={
-                            "fontSize": "0.75rem",
-                            "color": "#00f2ff",
-                            "textDecoration": "none",
-                            "fontWeight": "600",
+                        id={
+                            "type": "ai-overlay-t2-cta",
+                            "index": signal_index,
+                            "evidence_key": signal.evidence_key or "career_arc",
                         },
+                        color="link",
+                        className="p-0 ai-overlay-t2__cta",
+                        n_clicks=0,
                     ) if signal.cta_label else None,
                 ],
             ),
