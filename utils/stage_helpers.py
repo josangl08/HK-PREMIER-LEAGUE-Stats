@@ -1259,7 +1259,13 @@ def render_post_match(payload: Dict[str, Any]) -> html.Div:
             dbc.Row([
                 dbc.Col([
                     html.H6("Performance Radar", className="text-muted mb-2"),
-                    dcc.Graph(figure=radar_fig, config={"displayModeBar": False}, className="w-100"),
+                    dcc.Graph(
+                        figure=radar_fig,
+                        config={"displayModeBar": False, "responsive": True},
+                        className="w-100",
+                        responsive=True,
+                        style={"width": "100%", "minWidth": "0"},
+                    ),
                 ], width=12, md=7),
                 dbc.Col([
                     html.H6("Percentiles", className="text-muted mb-3"),
@@ -2559,7 +2565,37 @@ def _fetch_dashboard_data(player_name: str, player_id: str) -> Dict:
     return result
 
 
-def _build_identity_hero(data: Dict) -> html.Div:
+_PHASE_LABELS: Dict[str, str] = {
+    "development": "★ DESARROLLO",
+    "building":    "★ CRECIMIENTO",
+    "peak":        "★ PEAK PHASE",
+    "post-peak":   "★ VETERANO",
+    "unknown":     "★ ACTIVO",
+}
+
+
+def _build_phase_momentum_row(career_phase_data: Dict) -> List:
+    """Returns list of Dash elements for phase badge + 5-dot momentum tracker."""
+    phase = career_phase_data.get("career_phase", "unknown")
+    momentum = int(career_phase_data.get("momentum_score", 3))
+    momentum = max(0, min(5, momentum))
+
+    phase_label = _PHASE_LABELS.get(phase, "★ ACTIVO")
+
+    dots = [
+        html.Span(className=f"momentum-dot momentum-dot--filled" if i < momentum else "momentum-dot")
+        for i in range(5)
+    ]
+
+    return [
+        html.Div([
+            dbc.Badge(phase_label, className="career-phase-badge me-2"),
+            html.Div(dots, style={"display": "inline-flex", "gap": "4px", "alignItems": "center"}),
+        ], style={"display": "flex", "alignItems": "center", "marginTop": "6px", "flexWrap": "wrap"}),
+    ]
+
+
+def _build_identity_hero(data: Dict, career_phase_data: Optional[Dict] = None) -> html.Div:
     """§1 Identity Hero: cutout photo, name, position, team, archetype badge, physical attrs."""
     pos_icons = {
         "Forward": "bi-lightning-charge-fill", "Winger": "bi-wind",
@@ -2632,6 +2668,8 @@ def _build_identity_hero(data: Dict) -> html.Div:
             html.Span(f"  ·  {season}", style={"fontSize": "0.72rem", "color": HKFATheme.TEXT_TERTIARY, "marginLeft": "6px"}),
         ], style={"marginTop": "4px", "display": "flex", "alignItems": "center"}),
         html.Div(arch_badge, style={"marginTop": "6px"}),
+        # ── Career phase badge + momentum tracker ─────────────────────────
+        *(_build_phase_momentum_row(career_phase_data) if career_phase_data else []),
         attrs_row,
     ], style={"flex": "1", "minWidth": "0"})
 
@@ -3050,8 +3088,28 @@ def _build_career_arc(data: Dict) -> html.Div:
     return html.Div([
         header,
         dbc.Row([
-            dbc.Col(dcc.Graph(figure=trend_fig, config={"displayModeBar": False}, className="w-100"), width=12, lg=7),
-            dbc.Col(dcc.Graph(figure=radar_fig, config={"displayModeBar": False}, className="w-100"), width=12, lg=5),
+            dbc.Col(
+                dcc.Graph(
+                    figure=trend_fig,
+                    config={"displayModeBar": False, "responsive": True},
+                    className="w-100",
+                    responsive=True,
+                    style={"width": "100%", "minWidth": "0"},
+                ),
+                width=12,
+                lg=7,
+            ),
+            dbc.Col(
+                dcc.Graph(
+                    figure=radar_fig,
+                    config={"displayModeBar": False, "responsive": True},
+                    className="w-100",
+                    responsive=True,
+                    style={"width": "100%", "minWidth": "0"},
+                ),
+                width=12,
+                lg=5,
+            ),
         ]),
         evolution_el,
         insight_el,
@@ -3077,7 +3135,13 @@ def _build_projection_section(data: Dict, player_id: str) -> html.Div:
     proj_fig = get_projection_figure(player_id, current_season, current_season)
     return html.Div([
         header,
-        dcc.Graph(figure=proj_fig, config={"displayModeBar": False}, className="w-100"),
+        dcc.Graph(
+            figure=proj_fig,
+            config={"displayModeBar": False, "responsive": True},
+            className="w-100",
+            responsive=True,
+            style={"width": "100%", "minWidth": "0"},
+        ),
     ])
 
 
@@ -3208,13 +3272,133 @@ def _build_similar_players(data: Dict) -> html.Div:
 
         return html.Div([
             header,
-            dcc.Graph(figure=fig, config={"displayModeBar": False, "staticPlot": True}),
+            dcc.Graph(
+                figure=fig,
+                config={"displayModeBar": False, "staticPlot": True, "responsive": True},
+                responsive=True,
+                style={"width": "100%", "minWidth": "0"},
+            ),
             table
         ])
 
     except Exception as e:
         logger.warning(f"_build_similar_players Parallel Categories error: {e}")
         return html.Div([header, html.P("Mapping error. Reverting to basic view.", className="text-muted small")])
+
+
+_IMPACT_COLOR: Dict[str, str] = {
+    "alto":  "#ff6b6b",
+    "medio": "#ffd93d",
+    "bajo":  "#6bcb77",
+}
+
+
+def render_strategic_intelligence(
+    career_signals: Dict[str, Any],
+    development_priorities: List[Dict[str, Any]],
+    gemini_narrative: str,
+) -> dbc.Card:
+    """
+    Strategic Intelligence Dashboard Block.
+    Returns a dbc.Card with Priority Board (left) + Signal Panel (right) + IA Narrative row.
+    """
+    # ── Priority Board (left column) ─────────────────────────────────────────
+    top3 = development_priorities[:3]
+
+    def _priority_bar(item: Dict) -> html.Div:
+        metric    = item.get("metric", "—")
+        percentile = int(item.get("percentile", 50))
+        impact    = item.get("impact", "medio")
+        impact_color = _IMPACT_COLOR.get(impact, "#ffd93d")
+        return html.Div([
+            html.Div([
+                html.Span(metric, style={"fontSize": "0.75rem", "fontWeight": "600",
+                                         "color": HKFATheme.TEXT_PRIMARY}),
+                html.Span(f"Impacto: {impact.upper()}", className="impact-bar-label ms-2",
+                          style={"color": impact_color}),
+            ], style={"display": "flex", "justifyContent": "space-between", "alignItems": "center",
+                      "marginBottom": "4px"}),
+            dbc.Progress(value=percentile, max=100, color="info",
+                         style={"height": "6px", "marginBottom": "4px",
+                                "background": "rgba(255,255,255,0.08)"}),
+            dcc.Link(
+                "Comparar →",
+                href=f"/portal?stage=similarity&filter={metric}",
+                className="comparar-cta",
+                style={"fontSize": "0.7rem"},
+            ),
+        ], style={"marginBottom": "12px"})
+
+    priority_board = html.Div([
+        html.Div("Prioridades de Desarrollo", style={
+            "fontSize": "0.7rem", "fontWeight": "700", "textTransform": "uppercase",
+            "letterSpacing": "0.08em", "color": HKFATheme.ACCENT_BLUE, "marginBottom": "10px",
+        }),
+        *([_priority_bar(p) for p in top3] if top3 else
+          [html.P("Sin datos de percentiles", className="text-muted small")]),
+    ])
+
+    # ── Signal Panel (right column) ──────────────────────────────────────────
+    coach_conf   = career_signals.get("coach_confidence") or {}
+    transfer_win = career_signals.get("transfer_window") or {}
+    consistency  = career_signals.get("consistency_score") or {}
+
+    _dir_icons = {"up": "bi-arrow-up-circle-fill", "down": "bi-arrow-down-circle-fill",
+                  "stable": "bi-dash-circle-fill"}
+    _dir_colors = {"up": "#6bcb77", "down": "#ff6b6b", "stable": HKFATheme.TEXT_SECONDARY}
+    cc_dir = coach_conf.get("direction", "stable")
+
+    def _signal_row(icon: str, label: str, value: str, color: str = HKFATheme.TEXT_PRIMARY) -> html.Div:
+        return html.Div([
+            html.I(className=f"bi {icon} me-2", style={"color": color, "fontSize": "0.8rem"}),
+            html.Span(label, style={"fontSize": "0.72rem", "color": HKFATheme.TEXT_SECONDARY,
+                                    "marginRight": "6px"}),
+            html.Span(value, style={"fontSize": "0.75rem", "fontWeight": "600", "color": color}),
+        ], style={"marginBottom": "8px", "display": "flex", "alignItems": "center"})
+
+    signal_panel = html.Div([
+        html.Div("Señales Clave", style={
+            "fontSize": "0.7rem", "fontWeight": "700", "textTransform": "uppercase",
+            "letterSpacing": "0.08em", "color": HKFATheme.ACCENT_BLUE, "marginBottom": "10px",
+        }),
+        _signal_row(_dir_icons.get(cc_dir, "bi-dash-circle-fill"),
+                    "Confianza del entrenador:",
+                    coach_conf.get("label", "—"),
+                    _dir_colors.get(cc_dir, HKFATheme.TEXT_PRIMARY)),
+        _signal_row("bi-arrow-left-right",
+                    "Ventana de transferencia:",
+                    transfer_win.get("quality", "—"),
+                    HKFATheme.TEXT_PRIMARY),
+        _signal_row("bi-activity",
+                    "Consistencia:",
+                    consistency.get("level", "—"),
+                    HKFATheme.TEXT_PRIMARY),
+    ])
+
+    # ── IA Narrative row ─────────────────────────────────────────────────────
+    narrative_row = html.Div(
+        html.P(gemini_narrative or "Análisis estratégico no disponible.",
+               style={"fontSize": "0.78rem", "color": HKFATheme.TEXT_SECONDARY,
+                      "margin": "0", "lineHeight": "1.5"}),
+        className="ai-insight-card mt-3 p-3",
+        style={"borderRadius": "8px"},
+    ) if True else html.Span()
+
+    return dbc.Card(
+        dbc.CardBody([
+            html.H6([
+                html.I(className="bi bi-cpu-fill me-2"),
+                html.Span("Inteligencia Estratégica", className="animate-glass-draw"),
+            ], className="mb-3 fw-semibold", style={"color": "var(--accent-cyan, #00d4ff)"}),
+            dbc.Row([
+                dbc.Col(priority_board, md=6, className="border-end border-secondary"),
+                dbc.Col(signal_panel,   md=6),
+            ]),
+            narrative_row,
+        ]),
+        className="strategic-intel-card",
+        style={"background": "rgba(255,255,255,0.03)", "border": "1px solid rgba(255,255,255,0.08)"},
+    )
 
 
 def render_player_dashboard(
@@ -3226,7 +3410,31 @@ def render_player_dashboard(
     Orchestrates the 6-section player dashboard for Estado A (no card open).
     Fetches data once and delegates to independent builders with per-section error isolation.
     """
+    from utils.career_intelligence import get_career_phase_data, get_career_signals, get_development_priorities
+
     data = _fetch_dashboard_data(player_name, player_id)
+
+    # Compute career phase inline (pure function, no I/O)
+    career_phase_data: Optional[Dict] = None
+    try:
+        career_phase_data = get_career_phase_data(data, data.get("history_df", pd.DataFrame()))
+    except Exception as _cpe:
+        logger.debug(f"career_phase_data computation failed: {_cpe}")
+
+    # Compute career signals and development priorities for Strategic Intelligence block
+    career_signals: Dict = {}
+    development_priorities: List = []
+    try:
+        career_signals = get_career_signals(data, data.get("history_df", pd.DataFrame()), career_phase_data or {})
+    except Exception as _cse:
+        logger.debug(f"career_signals computation failed: {_cse}")
+    try:
+        development_priorities = get_development_priorities(data.get("percentiles_data") or {})
+    except Exception as _dpe:
+        logger.debug(f"development_priorities computation failed: {_dpe}")
+
+    # Gemini narrative from structured JSON store (body field), fallback to empty
+    gemini_narrative: str = data.get("gemini_narrative") or ""
 
     def _safe_build(builder_fn, *args, **kwargs) -> html.Div:
         try:
@@ -3236,13 +3444,15 @@ def render_player_dashboard(
             return html.P("Sección no disponible", className="text-muted small")
 
     sections = [
-        _safe_build(_build_identity_hero,       data),
+        _safe_build(_build_identity_hero,       data, career_phase_data),
         html.Hr(style={"borderColor": HKFATheme.BORDER_COLOR, "margin": "12px 0"}),
         _safe_build(_build_cluster_dna,          data),
         html.Hr(style={"borderColor": HKFATheme.BORDER_COLOR, "margin": "12px 0"}),
         _safe_build(_build_season_pulse,         data),
         html.Hr(style={"borderColor": HKFATheme.BORDER_COLOR, "margin": "12px 0"}),
         _safe_build(_build_league_standing,      data),
+        html.Hr(style={"borderColor": HKFATheme.BORDER_COLOR, "margin": "12px 0"}),
+        _safe_build(render_strategic_intelligence, career_signals, development_priorities, gemini_narrative),
         html.Hr(style={"borderColor": HKFATheme.BORDER_COLOR, "margin": "12px 0"}),
         _safe_build(_build_career_arc,           data),
         html.Hr(style={"borderColor": HKFATheme.BORDER_COLOR, "margin": "12px 0"}),
@@ -4284,14 +4494,26 @@ def render_career_insights(payload: Dict[str, Any], user_role: str = "player") -
     # ── Projection figure (context-aware: wrap_up vs projection mode) ──────
     projection_fig = get_projection_figure(player_id, season, current_season=current_season)
     projection_section = html.Div(
-        dcc.Graph(figure=projection_fig, config={"displayModeBar": False}, className="w-100"),
+        dcc.Graph(
+            figure=projection_fig,
+            config={"displayModeBar": False, "responsive": True},
+            className="w-100",
+            responsive=True,
+            style={"width": "100%", "minWidth": "0"},
+        ),
         className="mb-3",
     )
 
     # ── UMAP clustering figure ─────────────────────────────────────────────
     umap_fig = get_umap_figure(player_id)
     umap_section = html.Div(
-        dcc.Graph(figure=umap_fig, config={"displayModeBar": False}, className="w-100"),
+        dcc.Graph(
+            figure=umap_fig,
+            config={"displayModeBar": False, "responsive": True},
+            className="w-100",
+            responsive=True,
+            style={"width": "100%", "minWidth": "0"},
+        ),
         className="mb-3",
     )
 

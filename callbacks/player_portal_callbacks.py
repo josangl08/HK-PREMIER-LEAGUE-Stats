@@ -2,7 +2,7 @@
 # ABOUTME: Handles Timeline population, milestone selection, Stage rendering, sliding panels, year-scroll, and Action Node gallery.
 
 import logging
-from dash import Input, Output, State, callback, html, no_update, ALL, ctx, dcc
+from dash import Input, Output, State, callback, html, no_update, ALL, ctx, dcc, ClientsideFunction
 import dash_bootstrap_components as dbc
 from flask_login import current_user
 
@@ -143,6 +143,51 @@ def _get_career_parent_context(milestones_data, milestone) -> dict | None:
         "type": "career",
         "payload": fallback_career["payload"],
     }
+
+
+def _get_expand_ids_for_context(context) -> list[str]:
+    """Returns the timeline card ids that should remain expanded for a context."""
+    if not context:
+        return []
+
+    context_id = context.get("id")
+    context_type = context.get("type")
+    parent = context.get("parent") or {}
+    parent_id = parent.get("id")
+
+    if context_type == "career":
+        return [context_id] if context_id else []
+
+    expand_ids = []
+    if parent_id:
+        expand_ids.append(parent_id)
+    if context_id:
+        expand_ids.append(context_id)
+    return expand_ids
+
+
+def _get_default_expand_ids(milestones_data) -> list[str]:
+    """Returns the default expanded season when the timeline first loads."""
+    if not milestones_data:
+        return []
+
+    years = sorted(
+        {
+            m.get("group_year") or str(m.get("date", ""))[:4]
+            for m in milestones_data
+            if m.get("group_year") or m.get("date")
+        },
+        reverse=True,
+    )
+    most_recent_year = years[0] if years else None
+    if not most_recent_year:
+        return []
+
+    for milestone in milestones_data:
+        milestone_year = milestone.get("group_year") or str(milestone.get("date", ""))[:4]
+        if milestone.get("type") == "career" and milestone_year == most_recent_year and milestone.get("id"):
+            return [milestone["id"]]
+    return []
 
 
 def _render_season_team_assets(team_name: str):
@@ -1619,24 +1664,7 @@ def register_player_portal_callbacks(app):
     # Clientside: scroll year pill bar to active/current year             #
     # ------------------------------------------------------------------ #
     app.clientside_callback(
-        """
-        function(children, selected_year) {
-            if (!children || children.length === 0) return null;
-            var targetYear = selected_year ? selected_year.toString() : new Date().getFullYear().toString();
-            setTimeout(function() {
-                var bar = document.getElementById('year-navigator-pills');
-                if (!bar) return;
-                var buttons = bar.querySelectorAll('button');
-                for (var i = 0; i < buttons.length; i++) {
-                    if (buttons[i].textContent.trim() === targetYear) {
-                        buttons[i].scrollIntoView({behavior: 'smooth', inline: 'center', block: 'nearest'});
-                        break;
-                    }
-                }
-            }, 150);
-            return null;
-        }
-        """,
+        ClientsideFunction(namespace="playerPortal", function_name="scrollYearNavigator"),
         Output("year-nav-scroll-dummy", "data"),
         Input("year-navigator-pills", "children"),
         Input("selected-year-store", "data"),
@@ -1647,20 +1675,7 @@ def register_player_portal_callbacks(app):
     # Clientside: scroll milestone list to selected year section          #
     # ------------------------------------------------------------------ #
     app.clientside_callback(
-        """
-        function(selected_year) {
-            if (!selected_year) return null;
-            setTimeout(function() {
-                var container = document.querySelector('.milestone-list-container');
-                if (!container) return;
-                var target = container.querySelector('.year-' + selected_year);
-                if (target) {
-                    target.scrollIntoView({behavior: 'smooth', block: 'start'});
-                }
-            }, 150);
-            return null;
-        }
-        """,
+        ClientsideFunction(namespace="playerPortal", function_name="scrollTimelineToYear"),
         Output("year-timeline-scroll-dummy", "data"),
         Input("selected-year-store", "data"),
         prevent_initial_call=True,
@@ -1734,18 +1749,11 @@ def register_player_portal_callbacks(app):
             groups[year].append(m)
 
         sorted_years = sorted(groups.keys(), reverse=True)
-        most_recent_year = sorted_years[0] if sorted_years else None
-
-        # expand_ids: only career milestones in the most recent year start open
-        expand_ids = []
-        if most_recent_year:
-            for m in groups[most_recent_year]:
-                if m.get("type") == "career" and m.get("id"):
-                    expand_ids.append(m["id"])
+        expand_ids = _get_default_expand_ids(milestones_data)
+        expand_ids_set = set(expand_ids)
 
         sections = []
         for year in sorted_years:
-            is_recent = year == most_recent_year
             year_milestones = groups[year]
 
             # Separate career anchor from match milestones
@@ -1758,7 +1766,10 @@ def register_player_portal_callbacks(app):
 
             # Career milestone as season header
             if career_m:
-                career_item = _render_milestone_item(career_m, initial_open=is_recent)
+                career_item = _render_milestone_item(
+                    career_m,
+                    initial_open=career_m.get("id") in expand_ids_set,
+                )
                 career_id = career_m.get("id")
             else:
                 career_item = None
@@ -1767,7 +1778,11 @@ def register_player_portal_callbacks(app):
             # Render ALL match milestones; first 5 visible, rest hidden.
             if match_milestones:
                 match_items = [
-                    _render_milestone_item(m, initial_open=False, hidden=(i >= 5))
+                    _render_milestone_item(
+                        m,
+                        initial_open=m.get("id") in expand_ids_set,
+                        hidden=(i >= 5),
+                    )
                     for i, m in enumerate(match_milestones)
                 ]
                 if len(match_milestones) > 5:
@@ -1799,7 +1814,7 @@ def register_player_portal_callbacks(app):
 
                 if career_item:
                     # Wrap career + matches in a container that controls match visibility via is-expanded class
-                    expanded_cls = " is-expanded" if is_recent else ""
+                    expanded_cls = " is-expanded" if career_id in expand_ids_set else ""
                     items.append(
                         html.Div(
                             [career_item, matches_group],
@@ -1829,41 +1844,7 @@ def register_player_portal_callbacks(app):
     # Hides the Load More button when no hidden items remain.             #
     # ------------------------------------------------------------------ #
     app.clientside_callback(
-        """
-        function(n_clicks_list) {
-            var triggered = dash_clientside.callback_context.triggered_id;
-            if (!triggered || triggered.type !== 'load-more-btn') {
-                return window.dash_clientside.no_update;
-            }
-
-            // Guard: only proceed on a real click (n_clicks > 0).
-            // Dash 4.0 ALL-pattern callbacks can fire spuriously on component
-            // registration with all values at 0; a real click always has at least one > 0.
-            if (!n_clicks_list || !n_clicks_list.some(function(v) { return v > 0; })) {
-                return window.dash_clientside.no_update;
-            }
-
-            var year = triggered.year;
-            var season = document.querySelector('.season-section[data-year="' + year + '"]');
-            if (!season) return window.dash_clientside.no_update;
-
-            var hiddenItems = season.querySelectorAll('.timeline-item-hidden');
-            var shown = 0;
-            for (var i = 0; i < hiddenItems.length && shown < 10; i++) {
-                hiddenItems[i].style.removeProperty('display');
-                hiddenItems[i].classList.remove('timeline-item-hidden');
-                shown++;
-            }
-
-            var remaining = season.querySelectorAll('.timeline-item-hidden');
-            if (remaining.length === 0) {
-                var row = season.querySelector('.load-more-row');
-                if (row) row.style.display = 'none';
-            }
-
-            return window.dash_clientside.no_update;
-        }
-        """,
+        ClientsideFunction(namespace="playerPortal", function_name="loadMoreMilestones"),
         Output("timeline-pagination-store", "data", allow_duplicate=True),
         Input({"type": "load-more-btn", "year": ALL}, "n_clicks"),
         prevent_initial_call=True,
@@ -1987,176 +1968,47 @@ def register_player_portal_callbacks(app):
             return f"{base} {modifier}"
         return f"{base} glass-career"
 
-    # ------------------------------------------------------------------ #
-    # Phase 3: Clientside expand/collapse (Optimized for instant feel)   #
-    # Toggles is-expanded class on .timeline-event and .season-group-container.
-    # ------------------------------------------------------------------ #
+    @app.callback(
+        Output("timeline-expand-store", "data", allow_duplicate=True),
+        Input("timeline-context-store", "data"),
+        prevent_initial_call=True,
+    )
+    def sync_timeline_expand_store(context):
+        """Keeps timeline expansion aligned with the active stage context."""
+        return _get_expand_ids_for_context(context)
+
     app.clientside_callback(
-        """
-        function(n_clicks_list, expand_store) {
-            var triggered_id = dash_clientside.callback_context.triggered_id;
-            if (!triggered_id || triggered_id.type !== 'milestone-header') {
-                return window.dash_clientside.no_update;
-            }
-            var mid = triggered_id.index;
-            var open_ids = new Set(expand_store || []);
-
-            // Flexible selector for dictionary IDs
-            var selector = '[id*="index"][id*="' + mid + '"][id*="type"][id*="milestone-header"]';
-            var headerEl = document.querySelector(selector);
-            if (!headerEl) return window.dash_clientside.no_update;
-            
-            var eventContainer = headerEl.closest('.timeline-event');
-            if (!eventContainer) return window.dash_clientside.no_update;
-
-            var willOpen = !eventContainer.classList.contains('is-expanded');
-            
-            // Handle Accordion for Season Groups
-            var seasonContainer = eventContainer.closest('.season-group-container');
-            if (seasonContainer && seasonContainer.getAttribute('data-career-id') === mid) {
-                if (willOpen) {
-                    document.querySelectorAll('.season-group-container.is-expanded').forEach(function(el) {
-                        el.classList.remove('is-expanded');
-                        var cid = el.getAttribute('data-career-id');
-                        if (cid) open_ids.delete(cid);
-                        el.querySelectorAll('.timeline-event.is-expanded').forEach(function(e) { e.classList.remove('is-expanded'); });
-                    });
-                    seasonContainer.classList.add('is-expanded');
-                    eventContainer.classList.add('is-expanded');
-                    open_ids.add(mid);
-                } else {
-                    seasonContainer.classList.remove('is-expanded');
-                    eventContainer.classList.remove('is-expanded');
-                    open_ids.delete(mid);
-                }
-            } else {
-                if (willOpen) {
-                    eventContainer.classList.add('is-expanded');
-                    open_ids.add(mid);
-                } else {
-                    eventContainer.classList.remove('is-expanded');
-                    open_ids.delete(mid);
-                }
-            }
-
-            // Background store sync
-            window.dash_clientside.set_props('timeline-expand-store', {data: Array.from(open_ids)});
-            
-            return window.dash_clientside.no_update;
-        }
-        """,
-        Output("timeline-pagination-store", "data", allow_duplicate=True),
+        ClientsideFunction(namespace="playerPortal", function_name="toggleTimelineExpand"),
+        Output("timeline-expand-store", "data", allow_duplicate=True),
         Input({"type": "milestone-header", "index": ALL}, "n_clicks"),
         State("timeline-expand-store", "data"),
         prevent_initial_call=True,
     )
 
-    # ------------------------------------------------------------------ #
-    # Phase 3: Consolidates Intersection Observer & Lucide Init          #
-    # Registers an IntersectionObserver on .season-section divs.          #
-    # Updates active-year-store, pill active class, and scrolls pill.     #
-    # ------------------------------------------------------------------ #
     app.clientside_callback(
-        """
-        function(children) {
-            // 1. Re-init Lucide icons
-            setTimeout(function() {
-                if (window.lucide) { lucide.createIcons(); }
-            }, 150);
+        ClientsideFunction(namespace="playerPortal", function_name="syncTimelineExpandedClasses"),
+        Output("timeline-expand-visual-sync-dummy", "data"),
+        Input("timeline-expand-store", "data"),
+        Input("timeline-milestones", "children"),
+        prevent_initial_call=True,
+    )
 
-            // 2. Setup IntersectionObserver for scroll sync
-            setTimeout(function() {
-                if (window._seasonObserver) {
-                    window._seasonObserver.disconnect();
-                }
-                var container = document.querySelector('.milestone-list-container');
-                var sections = document.querySelectorAll('.season-section');
-                if (!sections || !sections.length) return;
-
-                window._seasonObserver = new IntersectionObserver(function(entries) {
-                    var topYear = null;
-                    var topPos = Infinity;
-                    entries.forEach(function(entry) {
-                        if (entry.isIntersecting) {
-                            var top = Math.abs(entry.boundingClientRect.top);
-                            if (top < topPos) {
-                                topPos = top;
-                                topYear = entry.target.getAttribute('data-year');
-                            }
-                        }
-                    });
-                    if (!topYear) return;
-                    
-                    window.dash_clientside.set_props('active-year-store', {data: topYear});
-                    
-                    var pills = document.querySelectorAll('#year-navigator-pills button');
-                    pills.forEach(function(pill) {
-                        var pillYear = pill.textContent.trim();
-                        if (pillYear === topYear) {
-                            pill.classList.add('active');
-                            pill.scrollIntoView({behavior: 'smooth', inline: 'center', block: 'nearest'});
-                        } else {
-                            pill.classList.remove('active');
-                        }
-                    });
-                }, {threshold: 0.2, root: container});
-
-                sections.forEach(function(s) {
-                    window._seasonObserver.observe(s);
-                });
-            }, 400);
-            return window.dash_clientside.no_update;
-        }
-        """,
+    app.clientside_callback(
+        ClientsideFunction(namespace="playerPortal", function_name="observeSeasonSections"),
         Output("active-year-store", "data"),
         Input("timeline-milestones", "children"),
         prevent_initial_call=True,
     )
 
     app.clientside_callback(
-        """
-        function(children) {
-            setTimeout(function() {
-                if (window.lucide) { lucide.createIcons(); }
-            }, 150);
-            return null;
-        }
-        """,
+        ClientsideFunction(namespace="playerPortal", function_name="refreshStageLucide"),
         Output("stage-lucide-refresh-dummy", "data"),
         Input("stage-content", "children"),
         prevent_initial_call=True,
     )
 
     app.clientside_callback(
-        """
-        function(n_clicks) {
-            if (!n_clicks) {
-                return window.dash_clientside.no_update;
-            }
-            var scroller = document.querySelector('.prematch-h2h-scroll');
-            if (!scroller) {
-                return window.dash_clientside.no_update;
-            }
-            var nextItem = scroller.querySelector('.prematch-h2h-item--future');
-            var nowItem = scroller.querySelector('.prematch-h2h-item--now');
-            var target = nextItem || nowItem;
-            if (!target) {
-                return window.dash_clientside.no_update;
-            }
-
-            var targetLeft = target.offsetLeft;
-            var targetWidth = target.offsetWidth;
-            var desired = Math.max(
-                0,
-                Math.min(
-                    scroller.scrollWidth - scroller.clientWidth,
-                    targetLeft + targetWidth - scroller.clientWidth + 22
-                )
-            );
-            scroller.scrollTo({ left: desired, behavior: 'smooth' });
-            return n_clicks;
-        }
-        """,
+        ClientsideFunction(namespace="playerPortal", function_name="scrollPrematchH2H"),
         Output("prematch-h2h-scroll-dummy", "data"),
         Input("prematch-h2h-today-btn", "n_clicks"),
         prevent_initial_call=True,
@@ -2203,23 +2055,7 @@ def register_player_portal_callbacks(app):
     # Clientside sliding panel navigation                                  #
     # ------------------------------------------------------------------ #
     app.clientside_callback(
-        """
-        function(detail_clicks, back_clicks) {
-            var triggered = dash_clientside.callback_context.triggered;
-            if (!triggered || triggered.length === 0) {
-                return [window.dash_clientside.no_update, window.dash_clientside.no_update];
-            }
-            var prop_id = triggered[0].prop_id || "";
-
-            if (prop_id.includes("milestone-detail-btn")) {
-                return ["portal-viewport show-stage", {"panel": "stage"}];
-            }
-            if (prop_id === "portal-back-btn.n_clicks") {
-                return ["portal-viewport", {"panel": "timeline"}];
-            }
-            return [window.dash_clientside.no_update, window.dash_clientside.no_update];
-        }
-        """,
+        ClientsideFunction(namespace="playerPortal", function_name="togglePortalViewport"),
         Output("portal-viewport", "className"),
         Output("portal-panel-state", "data"),
         Input({"type": "milestone-detail-btn", "index": ALL}, "n_clicks"),
@@ -2232,33 +2068,7 @@ def register_player_portal_callbacks(app):
     # store. One card open at a time; detail panels show/hide clientside. #
     # ------------------------------------------------------------------ #
     app.clientside_callback(
-        """
-        function(n_clicks_list, card_expand_store) {
-            var triggered_id = dash_clientside.callback_context.triggered_id;
-            if (!triggered_id || triggered_id.type !== 'card-header') {
-                return [window.dash_clientside.no_update, window.dash_clientside.no_update];
-            }
-            var mid = triggered_id.index;
-            var store = card_expand_store || {};
-            var isOpen = !!store[mid];
-
-            // Accordion: close all, then open the clicked one (unless it was already open)
-            var newStore = {};
-            if (!isOpen) {
-                newStore[mid] = true;
-            }
-
-            // Map new store to panel styles for all card-detail-panel outputs
-            var header_inputs = dash_clientside.callback_context.inputs_list[0];
-            var styles = header_inputs.map(function(inp) {
-                return newStore[inp.id.index]
-                    ? {display: 'block'}
-                    : {display: 'none'};
-            });
-
-            return [newStore, styles];
-        }
-        """,
+        ClientsideFunction(namespace="playerPortal", function_name="toggleCardDetailPanels"),
         Output("card-expand-store", "data"),
         Output({"type": "card-detail-panel", "index": ALL}, "style"),
         Input({"type": "card-header", "index": ALL}, "n_clicks"),
@@ -2564,7 +2374,7 @@ def register_career_intelligence_callbacks(app):
     import json
     from datetime import date, timedelta
     from dash import Input, Output, State, callback, ctx, no_update, ALL
-    from dash import clientside_callback, ClientsideFunction
+    from dash import clientside_callback
     from flask_login import current_user
 
     from utils.career_intelligence import (
@@ -2742,6 +2552,18 @@ def register_career_intelligence_callbacks(app):
         if isinstance(triggered_id, dict) and triggered_id.get("type") == "ai-overlay-t1-btn":
             updated_state = dict(session_state or {})
             updated_state["t1_dismissed_this_session"] = True
+            # Append to history so Insight Inbox can display it
+            if t1_data:
+                import json as _json
+                from datetime import datetime as _dt
+                history = list(updated_state.get("history", []))
+                history.append({
+                    "title": t1_data.get("title", ""),
+                    "body": t1_data.get("body", ""),
+                    "tier": t1_data.get("tier", 1),
+                    "timestamp": _dt.utcnow().isoformat(),
+                })
+                updated_state["history"] = history
             return None, {"display": "none"}, updated_state
 
         # t1-signal-store populated → show
@@ -2762,28 +2584,42 @@ def register_career_intelligence_callbacks(app):
     @app.callback(
         Output("ai-overlay-t2-container", "children"),
         Output("t2-overlay-queue", "data", allow_duplicate=True),
+        Output("insight-session-state", "data", allow_duplicate=True),
         Input("t2-overlay-queue", "data"),
         Input({"type": "ai-overlay-t2-dismiss", "index": ALL}, "n_clicks"),
+        State("insight-session-state", "data"),
         prevent_initial_call=True,
     )
-    def render_t2_overlays(queue, dismiss_clicks_list):
+    def render_t2_overlays(queue, dismiss_clicks_list, session_state):
         """
         Renders up to 2 T2 overlay cards from the queue with 400ms CSS stagger.
-        Dismiss [×] click removes that card and surfaces the next queued signal.
+        Dismiss [×] click removes that card, appends it to history, and surfaces next queued signal.
         """
         from utils.career_intelligence import OverlaySignal
         triggered_id = ctx.triggered_id
 
         queue = list(queue or [])
+        updated_session = no_update
 
         # Handle dismiss click
         if isinstance(triggered_id, dict) and triggered_id.get("type") == "ai-overlay-t2-dismiss":
             idx = triggered_id.get("index", 0)
             if idx < len(queue):
-                queue.pop(idx)
+                dismissed = queue.pop(idx)
+                # Append dismissed signal to insight history
+                from datetime import datetime as _dt
+                updated_session = dict(session_state or {})
+                history = list(updated_session.get("history", []))
+                history.append({
+                    "title": dismissed.get("title", ""),
+                    "body": dismissed.get("body", ""),
+                    "tier": dismissed.get("tier", 2),
+                    "timestamp": _dt.utcnow().isoformat(),
+                })
+                updated_session["history"] = history
 
         if not queue:
-            return [], queue
+            return [], queue, updated_session
 
         # Render up to 2 visible cards
         visible = queue[:2]
@@ -2798,7 +2634,7 @@ def register_career_intelligence_callbacks(app):
             )
             cards.append(render_t2_overlay(signal, signal_index=i))
 
-        return cards, queue
+        return cards, queue, updated_session
 
     # ── 7.4 T2 career-context gate ──────────────────────────────────────────
 
@@ -2819,41 +2655,85 @@ def register_career_intelligence_callbacks(app):
     # ── 7.5 IntersectionObserver clientside callback ─────────────────────────
 
     app.clientside_callback(
-        """
-        function(stage_content) {
-            // Observe the career arc section for scroll-into-view T2 trigger
-            if (!stage_content) return window.dash_clientside.no_update;
-
-            setTimeout(function() {
-                var careerArc = document.querySelector('.career-arc-section, [id*="career-arc"]');
-                if (!careerArc) return;
-
-                // Only register once per section
-                if (careerArc._t2ObserverRegistered) return;
-                careerArc._t2ObserverRegistered = true;
-
-                var observer = new IntersectionObserver(function(entries) {
-                    entries.forEach(function(entry) {
-                        if (entry.intersectionRatio >= 0.5) {
-                            // Push career-trajectory T2 signal to the queue store
-                            var store = document.getElementById('t2-overlay-queue');
-                            if (store && !store._careerTrajectoryQueued) {
-                                store._careerTrajectoryQueued = true;
-                                // Trigger via hidden input
-                                var event = new CustomEvent('career-arc-visible');
-                                document.dispatchEvent(event);
-                            }
-                        }
-                    });
-                }, {threshold: 0.5});
-
-                observer.observe(careerArc);
-            }, 300);
-
-            return window.dash_clientside.no_update;
-        }
-        """,
-        Output("stage-lucide-refresh-dummy", "data", allow_duplicate=True),
+        ClientsideFunction(namespace="playerPortal", function_name="observeCareerArc"),
+        Output("career-arc-observer-dummy", "data"),
         Input("stage-content", "children"),
         prevent_initial_call=True,
     )
+
+    # ── 13.3 Insight Inbox: Offcanvas toggle + badge count ──────────────────
+
+    @app.callback(
+        Output("insight-inbox-offcanvas", "is_open"),
+        Output("insight-inbox-count", "children"),
+        Output("insight-inbox-count", "style"),
+        Input("insight-inbox-btn", "n_clicks"),
+        State("insight-inbox-offcanvas", "is_open"),
+        State("insight-session-state", "data"),
+        prevent_initial_call=True,
+    )
+    def toggle_insight_inbox(n_clicks, is_open, session_state):
+        """Toggle Insight Inbox offcanvas and update badge count."""
+        history = (session_state or {}).get("history", [])
+        count = len(history)
+        badge_text = str(count) if count > 0 else ""
+        badge_style = {} if count > 0 else {"display": "none"}
+        return not is_open, badge_text, badge_style
+
+    # ── 13.5 Insight Inbox: body render callback ─────────────────────────────
+
+    @app.callback(
+        Output("insight-inbox-body", "children"),
+        Input("insight-session-state", "data"),
+    )
+    def render_insight_inbox_body(session_state):
+        """Renders dismissed insight history as inbox items in the Offcanvas."""
+        from datetime import datetime as _dt, timezone as _tz
+        history = list((session_state or {}).get("history", []))
+
+        if not history:
+            return html.P("Sin insights guardados aún.", className="text-muted small p-2")
+
+        items = []
+        for entry in reversed(history):
+            tier = entry.get("tier", 2)
+            title = entry.get("title", "—")
+            body = entry.get("body", "")
+            timestamp_raw = entry.get("timestamp", "")
+            tier_class = "insight-inbox-item--t1" if tier == 1 else "insight-inbox-item--t2"
+            tier_label = "CRITICAL" if tier == 1 else "TREND"
+
+            # Truncate body to 120 chars
+            body_short = (body[:117] + "…") if len(body) > 120 else body
+
+            # Relative timestamp
+            ts_display = ""
+            if timestamp_raw:
+                try:
+                    ts = _dt.fromisoformat(timestamp_raw)
+                    now = _dt.utcnow()
+                    diff = now - ts
+                    minutes = int(diff.total_seconds() // 60)
+                    if minutes < 1:
+                        ts_display = "Ahora"
+                    elif minutes < 60:
+                        ts_display = f"Hace {minutes} min"
+                    else:
+                        ts_display = f"Hace {minutes // 60} h"
+                except Exception:
+                    ts_display = ""
+
+            items.append(html.Div([
+                html.Div([
+                    html.Span(tier_label, style={
+                        "fontSize": "0.6rem", "fontWeight": "700",
+                        "textTransform": "uppercase", "letterSpacing": "0.06em",
+                        "opacity": "0.7",
+                    }),
+                    html.Span(ts_display, className="insight-inbox-timestamp ms-auto"),
+                ], style={"display": "flex", "alignItems": "center", "marginBottom": "4px"}),
+                html.Div(title, style={"fontSize": "0.8rem", "fontWeight": "700", "marginBottom": "4px"}),
+                html.Div(body_short, style={"fontSize": "0.75rem", "opacity": "0.75", "lineHeight": "1.4"}),
+            ], className=f"insight-inbox-item {tier_class}"))
+
+        return items

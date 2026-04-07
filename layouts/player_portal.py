@@ -35,7 +35,7 @@ def create_unified_year_navigator() -> html.Div:
 
 def _build_global_header() -> html.Div:
     """
-    Full-width sticky header. Only shows the portal title — no year nav.
+    Full-width sticky header. Shows portal title and Insight Inbox button.
     Year navigator has been moved into the timeline column.
     """
     return html.Div(
@@ -50,6 +50,23 @@ def _build_global_header() -> html.Div:
                 "Interactive Career Timeline",
                 className="text-muted ms-3 d-none d-md-block",
             ),
+            html.Div(className="ms-auto"),
+            dbc.Button(
+                id="insight-inbox-btn",
+                color="link",
+                className="p-1 position-relative",
+                style={"color": "var(--accent-cyan)", "fontSize": "1.1rem"},
+                children=[
+                    html.I(className="bi bi-bell-fill"),
+                    dbc.Badge(
+                        id="insight-inbox-count",
+                        color="danger",
+                        pill=True,
+                        className="position-absolute top-0 start-100 translate-middle",
+                        style={"fontSize": "0.55rem", "display": "none"},
+                    ),
+                ],
+            ),
         ],
     )
 
@@ -57,7 +74,7 @@ def _build_global_header() -> html.Div:
 def _build_timeline_column() -> html.Div:
     """Timeline column: sticky year navigator at top + scrollable milestone list."""
     return html.Div(
-        className="timeline-column pb-3",
+        className="timeline-column pb-0",
         children=[
             # Year navigator — sticky at top of timeline column, above events
             html.Div(
@@ -68,28 +85,9 @@ def _build_timeline_column() -> html.Div:
             html.Div(
                 className="milestone-list-container px-3",
                 children=[
-                    dcc.Loading(
-                        id="timeline-loading",
-                        type="dot",
-                        delay_show=250,
-                        color="var(--accent-cyan)",
-                        parent_className="timeline-loading-parent",
-                        parent_style={"width": "100%", "display": "block"},
-                        style={"width": "100%", "display": "block"},
-                        overlay_style={
-                            "visibility": "visible",
-                            "filter": "none",
-                            "background": "transparent",
-                            "display": "flex",
-                            "alignItems": "flex-start",
-                            "justifyContent": "flex-end",
-                            "padding": "6px 8px",
-                        },
-                        className="timeline-loading-frame",
-                        children=html.Div(
-                            id="timeline-milestones",
-                            children=[create_skeleton_timeline(8)],
-                        ),
+                    html.Div(
+                        id="timeline-milestones",
+                        children=[create_skeleton_timeline(8)],
                     ),
                 ],
             ),
@@ -100,7 +98,7 @@ def _build_timeline_column() -> html.Div:
 def _build_stage_column() -> html.Div:
     """Stage column: back button (mobile only) + dynamic stage content + overlay containers."""
     return html.Div(
-        className="stage-column px-3 pb-3",
+        className="stage-column px-3 pb-0",
         style={"position": "relative"},
         children=[
             dcc.Store(id="timeline-context-store"),
@@ -129,32 +127,13 @@ def _build_stage_column() -> html.Div:
                 className="btn btn-sm btn-outline-secondary mb-2",
                 n_clicks=0,
             ),
-            dcc.Loading(
-                id="stage-loading",
-                type="dot",
-                delay_show=250,
-                color="var(--accent-cyan)",
-                parent_className="stage-loading-parent",
-                parent_style={"width": "100%", "display": "block"},
-                style={"width": "100%", "display": "block"},
-                overlay_style={
-                    "visibility": "visible",
-                    "filter": "none",
-                    "background": "transparent",
-                    "display": "flex",
-                    "alignItems": "flex-start",
-                    "justifyContent": "flex-end",
-                    "padding": "8px 10px",
-                },
-                className="stage-loading-frame mb-3",
+            html.Div(
+                id="stage-shell",
+                className="glass-card glass-career stage-shell",
                 children=html.Div(
-                    id="stage-shell",
-                    className="glass-card glass-career stage-shell",
-                    children=html.Div(
-                        id="stage-content",
-                        className="stage-frame",
-                        children=[create_skeleton_stage()],
-                    ),
+                    id="stage-content",
+                    className="stage-frame",
+                    children=[create_skeleton_stage()],
                 ),
             ),
             html.Div(id="stage-decision-nodes"),
@@ -182,10 +161,12 @@ def create_player_portal_layout(user_role: str = "player") -> html.Div:
             dcc.Store(id="prematch-h2h-scroll-dummy"),
             dcc.Store(id="portal-panel-state", data={"panel": "timeline"}),
             dcc.Store(id="timeline-expand-store", data=[]),
+            dcc.Store(id="timeline-expand-visual-sync-dummy"),
             dcc.Store(id="active-year-store", data=None),
             dcc.Store(id="card-expand-store", data={}),
             dcc.Store(id="timeline-pagination-store", storage_type="memory"),
             dcc.Store(id="stage-lucide-refresh-dummy"),
+            dcc.Store(id="career-arc-observer-dummy"),
             dcc.Store(id="card-editor-state", storage_type="memory"),
             # Stores the player photo album (original paths, bgrm paths, selections)
             dcc.Store(id="player-photos-store", storage_type="local"),
@@ -238,6 +219,16 @@ def create_player_portal_layout(user_role: str = "player") -> html.Div:
                 is_open=False,
                 centered=True,
                 size="lg",
+            ),
+            # Insight Inbox Offcanvas (Notification Center)
+            dbc.Offcanvas(
+                id="insight-inbox-offcanvas",
+                placement="end",
+                title="Insight History",
+                is_open=False,
+                children=[
+                    html.Div(id="insight-inbox-body"),
+                ],
             ),
         ],
     )

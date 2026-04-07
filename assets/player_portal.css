@@ -41,6 +41,7 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
 :root {
     --accent-cyan-rgb: 0, 242, 255;
     --navbar-height: 60px;
+    --portal-desktop-height: calc(100dvh - var(--navbar-height) - 170px);
 }
 
 /* ── Viewport container ───────────────────────────────────────── */
@@ -50,7 +51,7 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
 }
 
 #portal-viewport {
-    padding: 20px;
+    padding: 20px 20px 2px;
 }
 
 /* Mobile: sliding panels (200% wide, translate to show stage) */
@@ -63,6 +64,11 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
 .portal-viewport > .timeline-column,
 .portal-viewport > .stage-column {
     width: 50%;
+}
+
+.timeline-column,
+.stage-column {
+    min-width: 0;
 }
 
 .portal-viewport.show-stage {
@@ -88,6 +94,17 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
     width: 100%;
     max-width: 100%;
     box-sizing: border-box;
+    height: auto;
+    overflow: visible;
+}
+
+.stage-frame {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+}
+
+.stage-frame::-webkit-scrollbar {
+    display: none;
 }
 
 .stage-view {
@@ -95,6 +112,16 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
     width: 100%;
     max-width: 100%;
     box-sizing: border-box;
+    min-width: 0;
+}
+
+.stage-frame .js-plotly-plot,
+.stage-frame .plot-container,
+.stage-frame .svg-container,
+.stage-frame .dash-graph {
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
 }
 
 .stage-shell:hover {
@@ -137,6 +164,39 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
     box-sizing: border-box;
 }
 
+#stage-content[data-dash-is-loading="true"]::after {
+    content: "";
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent-cyan, #00d4ff);
+    box-shadow: 0 0 0 0 rgba(0, 212, 255, 0.55);
+    animation: portal-stage-loading-pulse 1.1s ease-in-out infinite;
+    pointer-events: none;
+    z-index: 2;
+}
+
+@keyframes portal-stage-loading-pulse {
+    0% {
+        opacity: 0.35;
+        transform: scale(0.92);
+        box-shadow: 0 0 0 0 rgba(0, 212, 255, 0.35);
+    }
+    70% {
+        opacity: 0.95;
+        transform: scale(1);
+        box-shadow: 0 0 0 7px rgba(0, 212, 255, 0);
+    }
+    100% {
+        opacity: 0.35;
+        transform: scale(0.92);
+        box-shadow: 0 0 0 0 rgba(0, 212, 255, 0);
+    }
+}
+
 #stage-shell.glass-card {
     padding: 18px !important;
     margin-bottom: 0 !important;
@@ -158,22 +218,77 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
         grid-template-columns: 25% 75%;
         width: 100%;
         transform: none !important;
+        align-items: stretch;
+        min-height: var(--portal-desktop-height);
+        height: var(--portal-desktop-height);
     }
     .portal-viewport > .timeline-column,
     .portal-viewport > .stage-column {
         width: 100%;
+    }
+    .timeline-column {
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        height: 100%;
+    }
+    .stage-column {
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        height: 100%;
+        overflow: hidden;
     }
     #portal-back-button {
         display: none !important;
     }
 
     .stage-shell {
-        min-height: calc(100vh - var(--navbar-height) - 160px);
+        min-height: 0;
+        height: 100%;
+        flex: 1 1 auto;
         padding: 22px !important;
+    }
+
+    .stage-frame {
+        height: 100%;
+        min-height: 0;
+        overflow-y: auto;
+        overflow-x: hidden;
+        scrollbar-gutter: stable;
     }
 
     #stage-shell.glass-card {
         padding: 22px !important;
+    }
+
+    .timeline-year-nav {
+        flex: 0 0 auto;
+    }
+
+    .milestone-list-container {
+        flex: 1 1 auto;
+        min-height: 0;
+        max-height: calc(var(--portal-desktop-height) - 52px);
+    }
+}
+
+@media (max-width: 767.98px) {
+    .portal-viewport,
+    .timeline-column,
+    .stage-column {
+        height: auto;
+        min-height: 0;
+    }
+
+    .stage-shell {
+        min-height: 0;
+        height: auto;
+    }
+
+    .milestone-list-container {
+        max-height: none;
+        overflow: visible;
     }
 }
 
@@ -260,6 +375,18 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
     /* Hide scrollbar on all browsers */
     scrollbar-width: none;
     -ms-overflow-style: none;
+    mask-image: linear-gradient(
+        to bottom,
+        black 0%,
+        black calc(100% - 36px),
+        transparent 100%
+    );
+    -webkit-mask-image: linear-gradient(
+        to bottom,
+        black 0%,
+        black calc(100% - 36px),
+        transparent 100%
+    );
 }
 
 .milestone-list-container::-webkit-scrollbar {
@@ -268,6 +395,21 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
 
 .portal-skeleton-timeline {
     width: 100%;
+}
+
+#timeline-milestones[data-dash-is-loading="true"]::after {
+    content: "";
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent-cyan, #00d4ff);
+    box-shadow: 0 0 0 0 rgba(0, 212, 255, 0.55);
+    animation: portal-stage-loading-pulse 1.1s ease-in-out infinite;
+    pointer-events: none;
+    z-index: 2;
 }
 
 /* 1.3 Year Navigator Pills */
@@ -1923,4 +2065,167 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
 @keyframes slideInRight {
     from { transform: translateX(30px); opacity: 0; }
     to { transform: translateX(0); opacity: 1; }
+}
+
+/* ── 11.3: Hero Phase Identity ─────────────────────────────── */
+.career-phase-badge {
+    background: linear-gradient(135deg, #00f2ff, #7b2ff7) !important;
+    border: none !important;
+    color: #ffffff !important;
+    font-size: 0.65rem !important;
+    font-weight: 800 !important;
+    padding: 3px 8px !important;
+    border-radius: 999px !important;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    box-shadow: 0 2px 8px rgba(0, 242, 255, 0.3);
+    vertical-align: middle;
+}
+
+.momentum-tracker {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    margin-left: 8px;
+    vertical-align: middle;
+}
+
+.momentum-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    background: transparent;
+    transition: all 0.3s ease;
+}
+
+.momentum-dot--filled {
+    background: #00f2ff;
+    border-color: #00f2ff;
+    box-shadow: 0 0 6px rgba(0, 242, 255, 0.6);
+}
+
+/* ── 12.4: Strategic Intelligence Dashboard Block ──────────── */
+.strategic-intel-card {
+    background: rgba(15, 15, 20, 0.65) !important;
+    backdrop-filter: blur(16px) !important;
+    border: 1px solid rgba(255, 255, 255, 0.08) !important;
+    border-radius: 14px !important;
+    margin-top: 24px;
+    margin-bottom: 24px;
+    overflow: hidden;
+}
+
+.strategic-intel-card .card-body {
+    padding: 1.25rem !important;
+}
+
+.impact-bar-label {
+    font-size: 0.62rem;
+    color: var(--text-secondary, #9ca3af);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-top: 2px;
+}
+
+.comparar-cta {
+    color: #00f2ff !important;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-decoration: none;
+    transition: all 0.2s;
+    display: inline-flex;
+    align-items: center;
+}
+
+.comparar-cta:hover {
+    color: #ffffff !important;
+    text-decoration: underline !important;
+}
+
+/* ── 13.6: Insight Inbox (Notification Center) ─────────────── */
+#insight-inbox-offcanvas {
+    background: rgba(20, 20, 25, 0.95) !important;
+    backdrop-filter: blur(20px);
+    border-left: 1px solid rgba(255, 255, 255, 0.1) !important;
+    width: 380px !important;
+    max-width: 90vw;
+}
+
+#insight-inbox-offcanvas .offcanvas-header {
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    padding: 1.25rem;
+}
+
+#insight-inbox-offcanvas .offcanvas-title {
+    color: #ffffff;
+    font-weight: 700;
+}
+
+#insight-inbox-offcanvas .btn-close {
+    filter: invert(1) grayscale(100%) brightness(200%);
+}
+
+.insight-inbox-item {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    border-radius: 12px;
+    padding: 14px;
+    margin-bottom: 12px;
+    position: relative;
+    transition: background 0.2s, transform 0.2s;
+    cursor: pointer;
+}
+
+.insight-inbox-item:hover {
+    background: rgba(255, 255, 255, 0.06);
+    transform: translateY(-2px);
+}
+
+.insight-inbox-item--t1 {
+    border-left: 4px solid #ff4d4d !important;
+}
+
+.insight-inbox-item--t2 {
+    border-left: 4px solid #00f2ff !important;
+}
+
+.insight-inbox-timestamp {
+    font-size: 0.65rem;
+    color: rgba(255, 255, 255, 0.4);
+    display: block;
+    margin-top: 8px;
+}
+
+/* ── Insight Bell Button ──────────────────────────────────── */
+#insight-inbox-btn {
+    position: relative;
+    background: transparent !important;
+    border: 1px solid rgba(255, 255, 255, 0.12) !important;
+    border-radius: 50% !important;
+    width: 38px;
+    height: 38px;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: rgba(255, 255, 255, 0.7);
+    transition: all 0.2s;
+}
+
+#insight-inbox-btn:hover {
+    background: rgba(255, 255, 255, 0.05) !important;
+    color: #00f2ff;
+    border-color: rgba(0, 242, 255, 0.3) !important;
+}
+
+#insight-inbox-count {
+    position: absolute;
+    top: -4px;
+    right: -4px;
+    background-color: #ff4d4d !important;
+    border-radius: 50% !important;
+    padding: 0.25em 0.5em !important;
+    font-size: 0.6rem !important;
+    border: 2px solid #1a1a1a;
 }
