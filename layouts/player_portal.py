@@ -33,44 +33,6 @@ def create_unified_year_navigator() -> html.Div:
     )
 
 
-def _build_global_header() -> html.Div:
-    """
-    Full-width sticky header. Shows portal title and Insight Inbox button.
-    Year navigator has been moved into the timeline column.
-    """
-    return html.Div(
-        className="portal-global-header d-flex align-items-center",
-        children=[
-            html.I(
-                **{"data-lucide": "user-circle", "className": "lucide-header-icon me-2"},
-                style={"color": "var(--accent-cyan)"},
-            ),
-            html.H5("Player Portal", className="mb-0 fw-bold"),
-            html.Small(
-                "Interactive Career Timeline",
-                className="text-muted ms-3 d-none d-md-block",
-            ),
-            html.Div(className="ms-auto"),
-            dbc.Button(
-                id="insight-inbox-btn",
-                color="link",
-                className="p-1 position-relative",
-                style={"color": "var(--accent-cyan)", "fontSize": "1.1rem"},
-                children=[
-                    html.I(className="bi bi-bell-fill"),
-                    dbc.Badge(
-                        id="insight-inbox-count",
-                        color="danger",
-                        pill=True,
-                        className="position-absolute top-0 start-100 translate-middle",
-                        style={"fontSize": "0.55rem", "display": "none"},
-                    ),
-                ],
-            ),
-        ],
-    )
-
-
 def _build_timeline_column() -> html.Div:
     """Timeline column: sticky year navigator at top + scrollable milestone list."""
     return html.Div(
@@ -179,8 +141,6 @@ def create_player_portal_layout(user_role: str = "player") -> html.Div:
             # Polls sync status for newly registered players (stops after data is ready)
             dcc.Interval(id="sync-poll-interval", interval=8000, n_intervals=0, max_intervals=30, disabled=True),
 
-            # Full-width sticky title header (outside Container)
-            _build_global_header(),
             _build_sync_status_banner(),
 
             # Portal Viewport — no horizontal padding on container

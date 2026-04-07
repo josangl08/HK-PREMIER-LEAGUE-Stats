@@ -40,8 +40,8 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
 
 :root {
     --accent-cyan-rgb: 0, 242, 255;
-    --navbar-height: 60px;
-    --portal-desktop-height: calc(100dvh - var(--navbar-height) - 170px);
+    --navbar-height: 72px;
+    --portal-desktop-height: calc(100dvh - var(--navbar-height) - 39px);
 }
 
 /* ── Viewport container ───────────────────────────────────────── */
@@ -51,7 +51,7 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
 }
 
 #portal-viewport {
-    padding: 20px 20px 2px;
+    padding: 20px 20px 15px;
 }
 
 /* Mobile: sliding panels (200% wide, translate to show stage) */
@@ -302,23 +302,6 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
     padding-left: 0 !important;
     padding-right: 0 !important;
 }
-
-/* ── Full-width sticky title header ───────────────────────────── */
-.portal-global-header {
-    position: sticky;
-    top: 0;
-    z-index: 1050;
-    width: 100%;
-    background: var(--background-primary, #1a1a1a);
-    backdrop-filter: blur(8px);
-    padding-top: 30px;
-    padding-bottom: 30px;
-    padding-left: 1rem;
-    padding-right: 1rem;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-}
-
-.lucide-header-icon { width: 22px; height: 22px; }
 
 /* ── Season asset modal ───────────────────────────────────────── */
 #season-asset-modal .modal-content {

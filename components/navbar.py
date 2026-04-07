@@ -17,10 +17,16 @@ def create_navbar(pathname):
     elif user_role == 'agent':
         home_href = "/agent-portal"
 
+    home_label = "Home"
+    home_icon = "bi-house"
+    if user_role == 'player':
+        home_label = "Player Portal"
+        home_icon = "bi-person-circle"
+
     nav_items = [
         dbc.NavItem(
             dbc.NavLink(
-                [html.I(className="bi bi-house me-2"), "Home"],
+                [html.I(className=f"bi {home_icon} me-2"), home_label],
                 href=home_href,
                 active=pathname == home_href,
                 className="me-3 text-decoration-none",
@@ -82,6 +88,24 @@ def create_navbar(pathname):
     # Agregar información de usuario y botón de logout
     nav_right = dbc.Nav(
         [
+            dbc.NavItem(
+                dbc.Button(
+                    [
+                        html.I(className="bi bi-bell-fill"),
+                        dbc.Badge(
+                            id="insight-inbox-count",
+                            color="danger",
+                            pill=True,
+                            className="position-absolute top-0 start-100 translate-middle",
+                            style={"fontSize": "0.55rem", "display": "none"},
+                        ),
+                    ],
+                    id="insight-inbox-btn",
+                    color="link",
+                    className="p-1 position-relative me-3" + ("" if pathname == "/player-portal" else " d-none"),
+                    style={"color": "var(--accent-cyan)", "fontSize": "1.1rem"},
+                ),
+            ),
             dbc.NavItem(
                 [
                     html.Span(
