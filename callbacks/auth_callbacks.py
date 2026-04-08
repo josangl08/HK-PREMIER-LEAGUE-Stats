@@ -140,6 +140,18 @@ def login_callback(n_clicks, username, password):
         if user:
             login_user(user)
             logger.info(f"Login exitoso para {username} (role={user.role})")
+            
+            # Disparo de IdentityResolver (Task 3.3) para vincular IDs externos bajo demanda
+            if user.role == 'player' and user.player_id:
+                import threading
+                from utils.player_index import IdentityResolver
+                def _bg_resolve(pid):
+                    try:
+                        IdentityResolver().resolve_external_ids(pid)
+                    except Exception as exc:
+                        logger.warning(f"Background IdentityResolver failed for {pid}: {exc}")
+                threading.Thread(target=_bg_resolve, args=(user.player_id,), daemon=True).start()
+
             redirect_path = '/player-portal' if user.role == 'player' else '/agent-portal' if user.role == 'agent' else '/'
             return None, 'success', redirect_path
         else:

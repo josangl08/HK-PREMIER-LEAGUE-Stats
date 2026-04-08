@@ -103,6 +103,7 @@ def run(dry_run: bool = False) -> None:
                 nationality=nat_hint,
                 birth_year=birth_year,
                 position=pos_hint,
+                team_id=player.current_team_id or "",
             )
 
             if not found_tm_id:

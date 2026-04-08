@@ -48,7 +48,7 @@ def init_db():
     logger.info(f"Inicializando base de datos en: {DATABASE_URL}")
     Base.metadata.create_all(bind=engine)
     logger.info("Tablas creadas/verificadas exitosamente.")
-    # Migración idempotente: añadir photo_data si no existe
+    # Migración: añadir photo_data si no existe
     if DATABASE_URL.startswith("sqlite"):
         with engine.connect() as conn:
             try:
@@ -57,6 +57,21 @@ def init_db():
                 logger.info("Migración: columna photo_data añadida a player_photos.")
             except Exception:
                 pass  # La columna ya existe
+
+            # Migración: añadir besoccer_id y sofascore_id a players si no existen
+            try:
+                conn.execute(text("ALTER TABLE players ADD COLUMN besoccer_id VARCHAR(100)"))
+                conn.commit()
+                logger.info("Migración: columna besoccer_id añadida a players.")
+            except Exception:
+                pass
+
+            try:
+                conn.execute(text("ALTER TABLE players ADD COLUMN sofascore_id INTEGER"))
+                conn.commit()
+                logger.info("Migración: columna sofascore_id añadida a players.")
+            except Exception:
+                pass
 
             # Migración: hacer original_path nullable (SQLite no soporta ALTER COLUMN)
             cols = conn.execute(text("PRAGMA table_info(player_photos)")).fetchall()

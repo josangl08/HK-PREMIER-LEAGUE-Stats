@@ -1,5 +1,5 @@
 # ABOUTME: Helper functions for rendering Stage scenarios, AI widgets, and image gallery (Feature G).
-# ABOUTME: Renders player dashboard (default), post-match, pre-match, career-insights, and Action Node gallery views.
+# ABOUTME: Renders player dashboard (default), post-match (Doble Capa: High-Fidelity/Fallback), pre-match, career-insights, and Action Node gallery views.
 
 import logging
 import os
@@ -21,6 +21,10 @@ from sqlalchemy import select
 from utils.app_context import get_hong_kong_data_manager
 from utils.chart_helpers import apply_hkfa_theme, glass_figure_layout, HKFATheme
 import dash_cytoscape as cyto
+from utils.ai_services.evidence_router import get_evidence_destination_meta, normalize_evidence_key
+from utils.ai_services.llm_client import generate_gemini_content
+from utils.ai_services.orchestration import parse_structured_json
+from utils.ai_services.prompt_builders import build_career_narrative_prompt
 from utils.ai_helpers import umap_scatter_chart, constellation_chart, _build_knn_edges
 from data.processors.hong_kong_processor import POSITION_FULL_NAMES
 from utils.competition_helpers import get_competition_logo, normalize_competition
@@ -101,6 +105,38 @@ def _clean_url(url: str) -> str:
     if not url:
         return url
     return _html_lib.unescape(url).rstrip('"').strip()
+
+
+def _normalize_season_label(season_value: Any) -> str:
+    """Normalizes season identifiers to the canonical YYYY-YY display format when possible."""
+    raw = str(season_value or "").strip()
+    if not raw:
+        return ""
+    match = re.fullmatch(r"(\d{4})[-/](\d{2,4})", raw)
+    if not match:
+        return raw
+    start_year = int(match.group(1))
+    end_token = match.group(2)
+    expected_short = f"{(start_year + 1) % 100:02d}"
+    if len(end_token) == 4:
+        end_year = int(end_token)
+        if end_year not in {start_year, start_year + 1}:
+            end_year = start_year + 1
+        return f"{start_year}-{end_year % 100:02d}"
+    if len(end_token) == 2:
+        if end_token != expected_short:
+            return f"{start_year}-{expected_short}"
+        return f"{start_year}-{end_token}"
+    return raw
+
+
+def _season_sort_key(season_value: Any) -> tuple[int, int, str]:
+    """Returns a stable sort key for season labels."""
+    normalized = _normalize_season_label(season_value)
+    match = re.fullmatch(r"(\d{4})-(\d{2})", normalized)
+    if not match:
+        return (-1, -1, normalized)
+    return (int(match.group(1)), int(match.group(2)), normalized)
 
 
 def _country_to_flag(country_name: Any) -> str:
@@ -564,7 +600,7 @@ def _fetch_player_season_history(player_name: str) -> pd.DataFrame:
             rows = []
             for stat_obj, _name in results:
                 row = {
-                    "Season": stat_obj.season_id,
+                    "Season": _normalize_season_label(stat_obj.season_id),
                     "Goals": stat_obj.goals or 0,
                     "Assists": stat_obj.assists or 0,
                     "Minutes played": stat_obj.minutes_played or 0,
@@ -598,9 +634,15 @@ def _fetch_player_season_history(player_name: str) -> pd.DataFrame:
                             row["Prevented goals"] = round(float(xg_against) - float(goals_conceded), 2)
                 rows.append(row)
             df = pd.DataFrame(rows) if rows else pd.DataFrame()
-            # Sort by season string ascending (e.g. "2018-19" < "2020-21")
+            # Sort by normalized season ascending.
             if not df.empty and "Season" in df.columns:
-                df = df.sort_values("Season").reset_index(drop=True)
+                df["Season"] = df["Season"].apply(_normalize_season_label)
+                df = (
+                    df.assign(_season_sort=df["Season"].apply(_season_sort_key))
+                    .sort_values("_season_sort")
+                    .drop(columns="_season_sort")
+                    .reset_index(drop=True)
+                )
             return df
         finally:
             session.close()
@@ -1016,13 +1058,6 @@ def _generate_career_insight(
             return None
 
     try:
-        from utils.ai_config import GOOGLE_API_KEY, AI_DEFAULTS
-        if not GOOGLE_API_KEY:
-            return _template_fallback()
-
-        from google import genai  # type: ignore
-        from google.genai import types as genai_types  # type: ignore
-
         # ── Build brief stats string ───────────────────────────────────────
         brief_stats = ""
         if not history_df.empty and primary_metric in history_df.columns:
@@ -1033,45 +1068,26 @@ def _generate_career_insight(
                 parts.append(f"{r['Season']}: {val:.1f}")
             brief_stats = ", ".join(parts)
 
-        trend_str    = form_trend.get("trend", "stable") if form_trend else "unknown"
-        slope_str    = f"{form_trend.get('slope', 0.0):+.3f}" if form_trend else "N/A"
-        t_score      = f"{round((transferability or {}).get('score', 0) * 100)}%" if transferability else "N/A"
-        t_label      = (transferability or {}).get("label", "")
-
-        prompt = (
-            f"Football scout context. Player: {player_name} ({pos_group}).\n"
-            f"Last 5-match form trend: {trend_str} (slope {slope_str}).\n"
-            f"Transferability Score for a higher-tier league: {t_score} ({t_label}).\n"
-            f"Season {primary_metric.split(',')[0].strip()} history: {brief_stats}.\n"
-            f"Return a JSON object (no markdown, no extra text) with these fields:\n"
-            f"  title: short headline (max 10 words)\n"
-            f"  body: exactly 2 sentences of tactical insight for a professional scout, "
-            f"focusing on development trajectory and transfer potential\n"
-            f"  tier: integer 1 or 2 (1 = critical/high urgency, 2 = informational)\n"
-            f"  cta_label: call-to-action label string (e.g. 'Ver análisis →')\n"
-            f"  urgency: float 0.0–1.0 indicating signal priority\n"
-            f"Example: {{\"title\": \"Ascending striker profile\", \"body\": \"...\", "
-            f"\"tier\": 2, \"cta_label\": \"Ver análisis →\", \"urgency\": 0.6}}"
+        prompt = build_career_narrative_prompt(
+            player_name=player_name,
+            position_group=pos_group,
+            primary_metric=primary_metric,
+            brief_stats=brief_stats,
+            form_trend=form_trend,
+            transferability=transferability,
         )
-
-        client = genai.Client(api_key=GOOGLE_API_KEY)
-        model_name = AI_DEFAULTS.get("gemini", {}).get("model", "gemini-2.5-flash")
-        response = client.models.generate_content(
-            model=model_name,
-            contents=prompt,
-            config=genai_types.GenerateContentConfig(temperature=0.6, max_output_tokens=300),
+        raw_text = generate_gemini_content(
+            prompt,
+            temperature=0.6,
+            max_output_tokens=300,
+            response_mime_type="application/json",
         )
-        raw_text = response.text.strip()
         if raw_text:
-            # Try to parse structured JSON response
-            try:
-                import json as _json
-                structured = _json.loads(raw_text)
-                # Return body as the display text (overlay system consumes full dict separately)
+            structured = parse_structured_json(raw_text)
+            if isinstance(structured, dict):
                 return structured.get("body", raw_text)
-            except (ValueError, TypeError, KeyError):
-                logger.debug("_generate_career_insight: JSON parse failed, using raw text")
-                return raw_text
+            logger.debug("_generate_career_insight: JSON parse failed, using raw text")
+            return raw_text
 
     except Exception as e:
         logger.debug(f"_generate_career_insight Gemini error: {e}")
@@ -1176,65 +1192,253 @@ def _build_delta_kpis(
     )
 
 
+def _render_rating_sparkline(ratings: List[float]) -> html.Div:
+    """Renders a small sparkline of ratings (0-10) using CSS/HTML for maximum speed."""
+    if not ratings:
+        return html.Div("—", className="text-muted small")
+    
+    # Simple line-based visualization
+    max_r = 10.0
+    height = 24
+    width = 80
+    
+    svg_points = " ".join([f"{(i/(len(ratings)-1))*width if len(ratings)>1 else width/2},{height-(r/max_r)*height}" for i, r in enumerate(ratings)])
+    
+    return html.Div([
+        html.Div([
+            html.Small("Trend", className="postmatch-sparkline-label"),
+            html.Img(src=f"data:image/svg+xml;base64,{_build_sparkline_svg(ratings)}", className="postmatch-sparkline-img")
+        ])
+    ], className="postmatch-trend-sparkline d-inline-block ms-3")
+
+def _build_sparkline_svg(ratings: List[float]) -> str:
+    import base64
+    width, height = 80, 24
+    max_r = 10.0
+    if len(ratings) < 2:
+        return ""
+    
+    points = []
+    for i, r in enumerate(ratings):
+        x = (i / (len(ratings) - 1)) * width
+        y = height - (r / max_r) * height
+        points.append(f"{x},{y}")
+    
+    path = " ".join(points)
+    svg = f'<svg width="{width}" height="{height}" xmlns="http://www.w3.org/2000/svg"><polyline points="{path}" fill="none" stroke="{HKFATheme.POSITIVE}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+    return base64.b64encode(svg.encode('utf-8')).decode('utf-8')
+
 def render_post_match(payload: Dict[str, Any]) -> html.Div:
     """
     Renders the Post-Match analysis stage.
-    Shows a match header, Radar Chart, and Percentile bars for the player's season stats.
+    Implements Double Layer logic: High-Fidelity (A) or Fallback (B) layout.
     """
     opponent = payload.get("opponent", "Opponent")
     date_str = payload.get("kickoff_display") or str(payload.get("date", ""))[:10]
     home = payload.get("home_team", "")
     away = payload.get("away_team", "")
+    result = payload.get("result", "—")
+    stadium = payload.get("stadium", "")
+    competition = payload.get("competition", "HK Premier League")
+    competition_logo = payload.get("competition_logo") or get_competition_logo(competition)
+    
+    home_logo = payload.get("home_logo") or _resolve_team_logo(home)
+    away_logo = payload.get("away_logo") or _resolve_team_logo(away)
+    
     player_stats = payload.get("player_stats") or {}
+    intel_meta = payload.get("intelligence_meta", {})
+    is_high_fidelity = intel_meta.get("is_high_fidelity", False)
 
-    # ── Match header card ──────────────────────────────────────────────────
-    match_label = f"{home} vs {away}" if home and away else f"vs {opponent}"
-    header = dbc.Card([
-        dbc.CardBody([
-            dbc.Row([
-                dbc.Col(html.Div([
-                    html.Span(match_label, className="fw-bold fs-5"),
-                ]), width="auto"),
-                dbc.Col(html.Small(date_str, className="text-muted"), width="auto", className="ms-auto"),
-            ], align="center"),
-        ])
-    ], className="mb-3 border-0 shadow-sm")
+    # ── Rating-based glass modifier ─────────────────────────────────────────
+    # TASK 4.5: Always use glass-success for the overall Stage container
+    glass_modifier = "glass-success"
 
-    # ── Performance stats from data manager ───────────────────────────────
-    perf = player_stats.get("performance_stats", {})
-    percentiles = player_stats.get("percentiles", {})
+    # High-Fidelity rating colors (for internal badges)
+    rating = payload.get("rating") or player_stats.get("performance_stats", {}).get("rating")
+    try:
+        rating_val = float(rating) if rating is not None else None
+    except (ValueError, TypeError):
+        rating_val = None
+    
     basic = player_stats.get("basic_info", {})
     player_name = basic.get("name", "Player")
     position = basic.get("position_primary", basic.get("position", ""))
 
-    # Radar: use available numeric stats normalized 0-100 via percentiles
-    radar_metrics = ["Goals", "Assists", "Accurate passes, %", "Minutes played"]
+    # ── Sparkline: recent rating trend from raw_data ───────────────────────
+    sparkline_el = None
+    try:
+        from models.db_models import MatchHistory as _MH
+        from utils.db_engine import SessionFactory as _SF
+        player_id_logged = _get_logged_in_player_id()
+        if player_id_logged:
+            with _SF() as _sess:
+                recent_matches = (
+                    _sess.query(_MH)
+                    .filter(_MH.player_id == player_id_logged, _MH.raw_data.isnot(None))
+                    .order_by(_MH.date.desc())
+                    .limit(10)
+                    .all()
+                )
+            recent_ratings: List[float] = []
+            for _m in recent_matches:
+                _raw = _m.raw_data or {}
+                _r = _raw.get("besoccer_rating") or _raw.get("rating") or _raw.get("sofascore_rating")
+                if _r is not None:
+                    try:
+                        recent_ratings.append(float(_r))
+                    except (ValueError, TypeError):
+                        pass
+                if len(recent_ratings) >= 5:
+                    break
+            if recent_ratings:
+                sparkline_el = _render_rating_sparkline(list(reversed(recent_ratings)))
+    except Exception:
+        pass
+
+    # ── ESCENARIO A: HIGH-FIDELITY (Sofascore/BeSoccer) ──────────────────────
+    if is_high_fidelity:
+        from utils.chart_helpers import create_match_heatmap
+        
+        # ── RICH HEADER (Copied from Pre-Match logic) ──────────────────────
+        home_jersey = _resolve_team_jersey(home, "home")
+        away_jersey = _resolve_team_jersey(away, "home")
+        
+        def _team_block_post(name: str, logo: str, align: str, jersey: str = "") -> html.Div:
+            justify = "flex-start" if align == "left" else "flex-end"
+            crest_block = html.Div([
+                html.Img(src=logo, style={"width": "72px", "height": "72px", "objectFit": "contain"}) if logo else html.Div(
+                    name[:2].upper(),
+                    style={
+                        "width": "72px", "height": "72px", "borderRadius": "50%",
+                        "display": "flex", "alignItems": "center", "justifyContent": "center",
+                        "background": "rgba(255,255,255,0.08)", "color": "#f3f7fb", "fontWeight": "800",
+                    },
+                ),
+                html.Div(name or "TBC", style={"color": "#f4f8fc", "fontWeight": "700", "fontSize": "0.95rem", "textAlign": "center", "marginTop": "8px", "width": "80px"}),
+            ], style={"display": "flex", "flexDirection": "column", "alignItems": "center", "justifyContent": "center"})
+            return html.Div([
+                html.Div([
+                    html.Img(src=jersey, style={"width": "64px", "height": "64px", "objectFit": "contain", "opacity": "0.9"}) if jersey and align == "right" else None,
+                    crest_block,
+                    html.Img(src=jersey, style={"width": "64px", "height": "64px", "objectFit": "contain", "opacity": "0.9"}) if jersey and align == "left" else None,
+                ], style={"display": "flex", "justifyContent": justify, "alignItems": "center", "gap": "12px"}),
+            ], style={"flex": "1", "textAlign": "center", "display": "flex", "flexDirection": "column", "alignItems": "center"})
+
+        rich_header = html.Div([
+            # Competition row
+            html.Div([
+                html.Img(src=competition_logo, style={"width": "32px", "height": "32px", "objectFit": "contain", "marginRight": "10px"}) if competition_logo else None,
+                html.Div(competition, style={"color": "#f6f8fb", "fontWeight": "600", "fontSize": "0.9rem"}),
+            ], style={"display": "flex", "alignItems": "center", "justifyContent": "center", "marginBottom": "15px"}),
+            
+            # Scorers/Teams row
+            html.Div([
+                _team_block_post(home, home_logo, "right", home_jersey),
+                html.Div([
+                    html.Div(result, style={"color": "#f4f8fc", "fontSize": "2.4rem", "fontWeight": "900", "letterSpacing": "0.05em", "lineHeight": "1"}),
+                    html.Div("FINAL", style={"color": HKFATheme.POSITIVE, "fontWeight": "700", "fontSize": "0.65rem", "letterSpacing": "0.15em", "marginTop": "5px"}),
+                ], style={"flex": "0 0 120px", "display": "flex", "flexDirection": "column", "alignItems": "center", "justifyContent": "center"}),
+                _team_block_post(away, away_logo, "left", away_jersey),
+            ], style={"display": "flex", "alignItems": "center", "justifyContent": "center", "gap": "15px"}),
+            
+            # Meta footer
+            html.Div([
+                html.Small([html.I(className="bi bi-calendar3 me-1"), date_str], className="me-3"),
+                html.Small([html.I(className="bi bi-geo-alt me-1"), stadium or "Stadium"], className=""),
+            ], style={"color": "rgba(255,255,255,0.5)", "textAlign": "center", "marginTop": "15px", "fontSize": "0.75rem"})
+        ], className="postmatch-header-rich glass-card glass-success p-3 mb-3")
+
+        heatmap_data = payload.get("heatmap", [])
+        heatmap_fig = create_match_heatmap(heatmap_data, height=350)
+        
+        # Rating Big Badge
+        rating_badge = html.Div([
+            html.Div([
+                html.Div("RATING", style={"fontSize": "0.6rem", "fontWeight": "700", "opacity": "0.7"}),
+                html.Div(f"{rating:.1f}" if rating else "—", style={"fontSize": "2.2rem", "fontWeight": "800", "lineHeight": "1"}),
+            ]),
+            sparkline_el
+        ], className="text-center p-3 rounded-3 d-flex align-items-center justify-content-center gap-3", style={
+            "background": "rgba(255,255,255,0.05)",
+            "border": f"1px solid {HKFATheme.POSITIVE if (rating_val or 0) >= 7.0 else (HKFATheme.NEGATIVE if (rating_val or 0) < 6.0 else HKFATheme.WARNING)}",
+            "color": HKFATheme.POSITIVE if (rating_val or 0) >= 7.0 else (HKFATheme.NEGATIVE if (rating_val or 0) < 6.0 else HKFATheme.WARNING),
+            "minWidth": "100px"
+        })
+
+        match_stats = payload.get("match_stats", {})
+        # Filter key stats for display (Corrected Sofascore keys)
+        display_stats = {
+            "Total Passes": f"{match_stats.get('totalPass', 0)} ({match_stats.get('accuratePasses', 0)})",
+            "Dribbles": f"{match_stats.get('successfulDribbles', 0)}/{match_stats.get('totalDribbles', 0)}",
+            "Duels Won": f"{match_stats.get('duelWon', 0)}/{match_stats.get('duelTotal', 0)}",
+            "Tackles": str(match_stats.get('tackles', 0)),
+            "Interceptions": str(match_stats.get('interceptions', 0)),
+        }
+
+        stats_rows = [
+            html.Div([
+                html.Span(k, className="small portal-text-muted"),
+                html.Span(v, className="small fw-bold float-end")
+            ], className="mb-2 border-bottom border-secondary border-opacity-10 pb-1")
+            for k, v in display_stats.items()
+        ]
+
+        return html.Div([
+            rich_header,
+            dbc.Row([
+                dbc.Col([
+                    html.Div([
+                        rating_badge,
+                        html.Div(stats_rows, className="mt-4 px-2")
+                    ], className="h-100 glass-card postmatch-stats-col")
+                ], width=12, md=4),
+                dbc.Col([
+                    html.Div([
+                        html.I(className="bi bi-geo-fill me-2 postmatch-accent-icon"),
+                        html.Span("Heatmap", className="postmatch-section-title"),
+                    ], className="postmatch-section-header mb-2 px-3"),
+                    dcc.Graph(figure=heatmap_fig, config={"displayModeBar": False}, className="w-100")
+                ], width=12, md=8, className="glass-card postmatch-heatmap-col")
+            ], className="g-3"),
+            html.Div([
+                html.Small([
+                    html.I(className="bi bi-stars me-1 postmatch-accent-icon"),
+                    "Datos de alta fidelidad proporcionados por Sofascore/BeSoccer Intelligence."
+                ], className="portal-text-muted")
+            ], className="mt-3 text-center")
+        ], className=f"stage-view stage-view--postmatch {glass_modifier}".strip())
+
+    # ── ESCENARIO B: FALLBACK (Transfermarkt Regular) ───────────────────────
+    # Radar adaptativo por posición (Task 4.3)
+    dm_f = get_hong_kong_data_manager()
+    pos_group = _get_position_group(player_name, dm_f)
+    
+    perf = player_stats.get("performance_stats", {})
+    percentiles = player_stats.get("percentiles", {})
+
+    # Define metrics based on position group for adaptive radar
+    position_radar_map = {
+        "Forward": ["Goals", "xG", "Shots on target, %", "Goal conversion, %"],
+        "Winger": ["Goals", "Assists", "Dribbles per 90", "Successful dribbles, %"],
+        "Midfielder": ["Assists", "xA", "Accurate passes, %", "Key passes per 90"],
+        "Defender": ["Interceptions per 90", "Defensive duels won, %", "Aerial duels won, %", "Shots blocked per 90"],
+        "Goalkeeper": ["Save rate, %", "Clean sheets", "Prevented goals per 90", "xG against per 90"]
+    }
+    
+    radar_metrics = position_radar_map.get(pos_group, ["Goals", "Assists", "Accurate passes, %", "Minutes played"])
     radar_values = [percentiles.get(m, 50) for m in radar_metrics]
-    radar_labels = ["Goals", "Assists", "Pass Accuracy", "Minutes"]
+    radar_labels = [m.split(",")[0].split(" per")[0].strip() for m in radar_metrics]
 
     from utils.chart_helpers import create_radar_chart
     radar_fig = glass_figure_layout(create_radar_chart(
         values=radar_values,
         metrics=radar_labels,
-        title=f"{player_name} — Season Percentiles",
+        title=f"{player_name} — Position Percentiles",
         name=player_name,
     ))
 
     from utils.chart_helpers import create_percentile_bars
-    percentile_display = {
-        "Goals": percentiles.get("Goals", 0),
-        "Assists": percentiles.get("Assists", 0),
-        "Pass %": percentiles.get("Accurate passes, %", 0),
-        "Minutes": percentiles.get("Minutes played", 0),
-    }
-
-    # ── Rating-based glass modifier ─────────────────────────────────────────
-    rating = payload.get("rating") or player_stats.get("performance_stats", {}).get("rating")
-    try:
-        rating = float(rating) if rating is not None else None
-    except (ValueError, TypeError):
-        rating = None
-    glass_modifier = "glass-danger" if (rating is not None and rating < 6.0) else "glass-success"
+    percentile_display = {m: percentiles.get(m, 0) for m in radar_metrics}
 
     # ── KPI icons with animate-glass-pulse (task 6.4) ─────────────────────
     kpi_icon = html.I(className="bi bi-person-fill me-1 animate-glass-pulse")
@@ -1327,19 +1531,56 @@ def render_post_match(payload: Dict[str, Any]) -> html.Div:
     except Exception as e:
         logger.debug(f"render_post_match enrichment error: {e}")
 
+    # ── Sparkline: recent rating trend from raw_data ───────────────────────
+    sparkline_el = None
+    try:
+        from models.db_models import MatchHistory as _MH
+        from utils.db_engine import SessionFactory as _SF
+        player_id_logged = _get_logged_in_player_id()
+        if player_id_logged:
+            with _SF() as _sess:
+                recent_matches = (
+                    _sess.query(_MH)
+                    .filter(_MH.player_id == player_id_logged, _MH.raw_data.isnot(None))
+                    .order_by(_MH.date.desc())
+                    .limit(10)
+                    .all()
+                )
+            recent_ratings: List[float] = []
+            for _m in recent_matches:
+                _raw = _m.raw_data or {}
+                _r = _raw.get("besoccer_rating") or _raw.get("rating") or _raw.get("sofascore_rating")
+                if _r is not None:
+                    try:
+                        recent_ratings.append(float(_r))
+                    except (ValueError, TypeError):
+                        pass
+                if len(recent_ratings) >= 5:
+                    break
+            if recent_ratings:
+                sparkline_el = _render_rating_sparkline(list(reversed(recent_ratings)))
+    except Exception:
+        pass
+
     # ── Layout ─────────────────────────────────────────────────────────────
     return html.Div([
             header,
-            html.P([
-                kpi_icon,
-                html.Span(f"{player_name}", className="fw-semibold me-2"),
-                html.Small(position, className="text-muted badge bg-secondary"),
-            ], className="mb-2"),
+            html.Div([
+                html.Div([
+                    kpi_icon,
+                    html.Span(f"{player_name}", className="fw-semibold me-2"),
+                    html.Small(position, className="portal-text-muted badge postmatch-position-badge"),
+                ], className="d-inline-flex align-items-center"),
+                sparkline_el,
+            ], className="postmatch-player-row mb-2"),
             performance_badge,
             vs_avg_row,
             dbc.Row([
                 dbc.Col([
-                    html.H6("Performance Radar", className="text-muted mb-2"),
+                    html.Div([
+                        html.I(className="bi bi-broadcast me-2 postmatch-accent-icon"),
+                        html.Span("Performance Radar", className="postmatch-section-title"),
+                    ], className="postmatch-section-header mb-2"),
                     dcc.Graph(
                         figure=radar_fig,
                         config={"displayModeBar": False, "responsive": True},
@@ -1347,12 +1588,15 @@ def render_post_match(payload: Dict[str, Any]) -> html.Div:
                         responsive=True,
                         style={"width": "100%", "minWidth": "0"},
                     ),
-                ], width=12, md=7),
+                ], width=12, md=7, className="glass-card postmatch-radar-col"),
                 dbc.Col([
-                    html.H6("Percentiles", className="text-muted mb-3"),
+                    html.Div([
+                        html.I(className="bi bi-bar-chart-steps me-2 postmatch-accent-icon"),
+                        html.Span("Percentiles", className="postmatch-section-title"),
+                    ], className="postmatch-section-header mb-3"),
                     create_percentile_bars(percentile_display),
-                ], width=12, md=5),
-            ]),
+                ], width=12, md=5, className="glass-card postmatch-percentile-col"),
+            ], className="g-3"),
         ],
         className=f"stage-view stage-view--postmatch {glass_modifier}".strip(),
     )
@@ -1561,6 +1805,77 @@ def _get_recent_form_summary(player_id: str, limit: int = 5) -> Dict[str, Any]:
         summary["xa_per90"] = summary["xa_total"] * factor
 
     return summary
+
+
+def _summarize_recent_match_window(matches: List[Any]) -> Dict[str, Any]:
+    """Builds an aggregate recent-form summary from raw MatchHistory rows."""
+    summary = {
+        "matches": 0,
+        "goals_total": 0,
+        "assists_total": 0,
+        "minutes_total": 0,
+        "goal_contributions_total": 0,
+    }
+    if not matches:
+        return summary
+
+    for match in matches:
+        goals = int(getattr(match, "goals", 0) or 0)
+        assists = int(getattr(match, "assists", 0) or 0)
+        minutes = int(getattr(match, "minutes_played", 0) or 0)
+        summary["matches"] += 1
+        summary["goals_total"] += goals
+        summary["assists_total"] += assists
+        summary["minutes_total"] += minutes
+        summary["goal_contributions_total"] += goals + assists
+    return summary
+
+
+def _compute_window_delta_pct(current_total: float, previous_total: float) -> float:
+    """Returns percentage delta between two rolling windows."""
+    try:
+        current_val = float(current_total)
+        previous_val = float(previous_total)
+    except (TypeError, ValueError):
+        return 0.0
+    if previous_val == 0:
+        return 0.0
+    return round(((current_val - previous_val) / abs(previous_val)) * 100.0, 2)
+
+
+def _build_recent_form_windows(matches: List[Any]) -> Dict[str, Any]:
+    """Builds recent form windows for last 5, previous 5, and last 10 comparisons."""
+    latest_ten = list(matches[:10]) if matches else []
+    latest_five = latest_ten[:5]
+    previous_five = latest_ten[5:10]
+
+    payload = {
+        "last5": _summarize_recent_match_window(latest_five),
+        "previous5": _summarize_recent_match_window(previous_five),
+        "last10": _summarize_recent_match_window(latest_ten),
+        "comparisons": {},
+    }
+    if len(latest_five) == 5 and len(previous_five) == 5:
+        payload["comparisons"]["last5_vs_previous5"] = {
+            "matches": 10,
+            "minutes_trend_pct": _compute_window_delta_pct(
+                payload["last5"]["minutes_total"],
+                payload["previous5"]["minutes_total"],
+            ),
+            "goals_trend_pct": _compute_window_delta_pct(
+                payload["last5"]["goals_total"],
+                payload["previous5"]["goals_total"],
+            ),
+            "assists_trend_pct": _compute_window_delta_pct(
+                payload["last5"]["assists_total"],
+                payload["previous5"]["assists_total"],
+            ),
+            "goal_contributions_trend_pct": _compute_window_delta_pct(
+                payload["last5"]["goal_contributions_total"],
+                payload["previous5"]["goal_contributions_total"],
+            ),
+        }
+    return payload
 
 
 def _coerce_cutoff_datetime(payload: Dict[str, Any]) -> Optional[pd.Timestamp]:
@@ -2199,6 +2514,7 @@ def _fetch_dashboard_data(player_name: str, player_id: str) -> Dict:
         "team_name": None,
         "archetype": None,
         "age": None,
+        "birth_date": None,
         "nationality": None,
         "birth_country": None,
         "foot": None,
@@ -2209,6 +2525,7 @@ def _fetch_dashboard_data(player_name: str, player_id: str) -> Dict:
         "assists": 0,
         "minutes_played": 0,
         "last5_results": [],
+        "recent_form_windows": {},
         "percentiles_data": {},
         "history_df": pd.DataFrame(),
     }
@@ -2225,6 +2542,7 @@ def _fetch_dashboard_data(player_name: str, player_id: str) -> Dict:
         if player_obj:
             result["position_main"] = player_obj.position_main
             result["age"]           = player_obj.age
+            result["birth_date"]    = player_obj.birth_date
             result["nationality"]   = player_obj.nationality
             result["birth_country"] = player_obj.birth_country
             result["foot"]          = player_obj.foot
@@ -2269,7 +2587,7 @@ def _fetch_dashboard_data(player_name: str, player_id: str) -> Dict:
             select(MatchHistory)
             .where(MatchHistory.player_id == player_id)
             .order_by(MatchHistory.date.desc())
-            .limit(5)
+            .limit(10)
         )
         matches = session.execute(stmt_mh).scalars().all()
         
@@ -2278,7 +2596,8 @@ def _fetch_dashboard_data(player_name: str, player_id: str) -> Dict:
         player_team = result.get("team_name")
         import re
         
-        for m in reversed(matches):
+        latest_five_matches = matches[:5]
+        for m in reversed(latest_five_matches):
             res_str = m.result or ""
             if not res_str: continue
             
@@ -2319,6 +2638,7 @@ def _fetch_dashboard_data(player_name: str, player_id: str) -> Dict:
             last5_data.append({"outcome": outcome, "score": score_display})
                 
         result["last5_results"] = last5_data
+        result["recent_form_windows"] = _build_recent_form_windows(matches)
 
     except Exception as e:
         logger.warning(f"_fetch_dashboard_data DB error for '{player_name}': {e}")
@@ -2549,6 +2869,21 @@ def _fetch_dashboard_data(player_name: str, player_id: str) -> Dict:
                 
     # ── Multi-season history (separate session inside helper) ──────────────
     result["history_df"] = _fetch_player_season_history(player_name)
+    if isinstance(result["history_df"], pd.DataFrame) and not result["history_df"].empty:
+        for column in ("Birthday", "birth_date", "date_of_birth", "birthday"):
+            if column in result["history_df"].columns:
+                series = result["history_df"][column].dropna()
+                if not series.empty:
+                    try:
+                        birth_dt = pd.to_datetime(series.iloc[0], errors="coerce")
+                        if pd.notna(birth_dt):
+                            today = pd.Timestamp.today()
+                            result["age"] = int(
+                                today.year - birth_dt.year - ((today.month, today.day) < (birth_dt.month, birth_dt.day))
+                            )
+                    except Exception:
+                        pass
+                break
 
     # ── Similar players metadata (pre-fetched for Parallel Categories chart) ─
     # Gemini task 3.1 reads data["similar_players_meta"] to build the chart
@@ -2664,20 +2999,37 @@ def _build_phase_momentum_row(career_phase_data: Dict) -> List:
     phase = career_phase_data.get("career_phase", "unknown")
     momentum = int(career_phase_data.get("momentum_score", 3))
     momentum = max(0, min(5, momentum))
-
     phase_label = _PHASE_LABELS.get(phase, "★ ACTIVO")
-
-    dots = [
-        html.Span(className=f"momentum-dot momentum-dot--filled" if i < momentum else "momentum-dot")
-        for i in range(5)
-    ]
 
     return [
         html.Div([
-            dbc.Badge(phase_label, className="career-phase-badge me-2"),
-            html.Div(dots, style={"display": "inline-flex", "gap": "4px", "alignItems": "center"}),
+            _build_phase_badge(phase_label, class_name="career-phase-badge me-2"),
+            _build_momentum_dots(momentum),
         ], style={"display": "flex", "alignItems": "center", "marginTop": "6px", "flexWrap": "wrap"}),
     ]
+
+
+def _format_career_phase_display(career_phase_data: Dict[str, Any]) -> str:
+    """Returns a user-facing phase label without exposing raw unknown states."""
+    phase = str((career_phase_data or {}).get("career_phase") or "").strip().lower()
+    if not phase or phase == "unknown":
+        return "Context Pending"
+    return phase.title()
+
+
+def _build_phase_badge(phase_label: str, class_name: str = "career-phase-badge") -> dbc.Badge:
+    """Returns the styled phase badge for career progression surfaces."""
+    return dbc.Badge(phase_label, className=class_name)
+
+
+def _build_momentum_dots(momentum: int) -> html.Div:
+    """Returns a 5-dot momentum tracker."""
+    momentum = max(0, min(5, int(momentum or 0)))
+    dots = [
+        html.Span(className="momentum-dot momentum-dot--filled" if i < momentum else "momentum-dot")
+        for i in range(5)
+    ]
+    return html.Div(dots, className="career-command-kpi__dots")
 
 
 def _build_identity_hero(data: Dict, career_phase_data: Optional[Dict] = None) -> html.Div:
@@ -2694,16 +3046,32 @@ def _build_identity_hero(data: Dict, career_phase_data: Optional[Dict] = None) -
     team_name     = data.get("team_name") or "—"
     cutout_path   = data.get("cutout_path")
 
-    age    = data.get("age")
+    raw_birth = data.get("birth_date") or data.get("date_of_birth") or data.get("Birthday") or data.get("birthday")
+    age = data.get("age")
+    history_df = data.get("history_df", pd.DataFrame())
+    if not raw_birth and isinstance(history_df, pd.DataFrame) and not history_df.empty:
+        for column in ("Birthday", "birth_date", "date_of_birth", "birthday"):
+            if column in history_df.columns:
+                series = history_df[column].dropna()
+                if not series.empty:
+                    raw_birth = series.iloc[0]
+                    break
+    if raw_birth:
+        try:
+            birth_dt = pd.to_datetime(raw_birth, errors="coerce")
+            if pd.notna(birth_dt):
+                today = pd.Timestamp.today()
+                age = int(today.year - birth_dt.year - ((today.month, today.day) < (birth_dt.month, birth_dt.day)))
+        except Exception:
+            pass
     nationality = data.get("nationality") or data.get("birth_country")
     foot   = data.get("foot")
     height = data.get("height")
-    history_df = data.get("history_df", pd.DataFrame())
     seasons_tracked = len(history_df) if isinstance(history_df, pd.DataFrame) and not history_df.empty else None
     latest_recorded_season = None
     if isinstance(history_df, pd.DataFrame) and not history_df.empty and "Season" in history_df.columns:
-        season_values = [str(season).strip() for season in history_df["Season"].tolist() if str(season).strip()]
-        latest_recorded_season = season_values[0] if season_values else None
+        season_values = [_normalize_season_label(season) for season in history_df["Season"].tolist() if str(season).strip()]
+        latest_recorded_season = season_values[-1] if season_values else None
 
     # ── Photo ──────────────────────────────────────────────────────────────
     photo_col = html.Div(
@@ -3513,10 +3881,20 @@ def render_strategic_intelligence(
     )
 
 
-def _build_career_evidence_button(evidence_key: str, label: str = "See evidence", source: str = "dashboard") -> dbc.Button:
+def _build_career_evidence_button(
+    evidence_key: str,
+    label: str = "See evidence",
+    source: str = "dashboard",
+    trigger_index: str = "",
+) -> dbc.Button:
     return dbc.Button(
         [label, html.I(className="bi bi-arrow-up-right ms-2")],
-        id={"type": "career-evidence-trigger", "key": evidence_key, "source": source},
+        id={
+            "type": "career-evidence-trigger",
+            "key": evidence_key,
+            "source": source,
+            "index": trigger_index or normalize_evidence_key(evidence_key),
+        },
         color="link",
         size="sm",
         className="career-evidence-trigger-btn",
@@ -3554,31 +3932,367 @@ def _get_career_surface_meta(item: Any, section_label: str) -> Dict[str, str]:
     }
 
 
-def _build_command_metrics_strip(data: Dict) -> html.Div:
-    items = [
-        ("Minutes", f"{int(data.get('minutes_played', 0) or 0):,}", "bi bi-stopwatch"),
-        ("Goals", str(int(data.get("goals", 0) or 0)), "bi bi-bullseye"),
-        ("Assists", str(int(data.get("assists", 0) or 0)), "bi bi-arrow-repeat"),
+def _safe_float_or_none(value: Any) -> Optional[float]:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(result):
+        return None
+    return result
+
+
+def _career_kpi_specs_for_position(pos_group: str) -> List[Dict[str, Any]]:
+    common_specs = [
+        {"key": "matches", "label": "Matches", "secondary_label": "Minutes/Match", "primary": {"kind": "sum", "columns": ["Matches played"], "decimals": 0}, "secondary": {"kind": "weighted_avg", "columns": ["Minutes_per_Match"], "decimals": 1}, "icon_name": "bi bi-calendar2-week", "accent_color": HKFATheme.ACCENT_GOLD},
+        {"key": "goals", "label": "Goals", "secondary_label": "Goals/90", "primary": {"kind": "sum", "columns": ["Goals"], "decimals": 0}, "secondary": {"kind": "per90_sum", "columns": ["Goals"], "decimals": 2}, "icon_name": "soccer-ball", "accent_color": HKFATheme.ACCENT_RED},
+        {"key": "assists", "label": "Assists", "secondary_label": "Assists/90", "primary": {"kind": "sum", "columns": ["Assists"], "decimals": 0}, "secondary": {"kind": "per90_sum", "columns": ["Assists"], "decimals": 2}, "icon_name": "sport-shoe", "accent_color": HKFATheme.ACCENT_BLUE},
     ]
+    if pos_group == "Goalkeeper":
+        return [
+            {"key": "matches", "label": "Matches", "secondary_label": "Minutes/Match", "primary": {"kind": "sum", "columns": ["Matches played"], "decimals": 0}, "secondary": {"kind": "weighted_avg", "columns": ["Minutes_per_Match"], "decimals": 1}, "icon_name": "bi bi-calendar2-week", "accent_color": HKFATheme.ACCENT_GOLD},
+            {"key": "conceded", "label": "Goals Conceded", "secondary_label": "Conceded/90", "primary": {"kind": "sum", "columns": ["Goals conceded"], "decimals": 0}, "secondary": {"kind": "weighted_avg", "columns": ["Conceded goals per 90"], "decimals": 2}, "icon_name": "bi bi-bullseye", "accent_color": HKFATheme.NEGATIVE},
+            {"key": "xga", "label": "xG Against", "secondary_label": "xGA/90", "primary": {"kind": "sum", "columns": ["xG against"], "decimals": 2}, "secondary": {"kind": "weighted_avg", "columns": ["xG against per 90"], "decimals": 2}, "icon_name": "bi bi-grid-3x3-gap", "accent_color": "#f97316"},
+            {"key": "prevented", "label": "Prevented/90", "secondary_label": "Shots Against", "primary": {"kind": "weighted_avg", "columns": ["Prevented goals per 90"], "decimals": 2}, "secondary": {"kind": "sum", "columns": ["Shots against"], "decimals": 0}, "icon_name": "bi bi-hand-index-thumb", "accent_color": HKFATheme.POSITIVE},
+            {"key": "back_passes", "label": "Back Passes/90", "secondary_label": "Save Rate", "primary": {"kind": "weighted_avg", "columns": ["Back passes received as GK per 90"], "decimals": 1}, "secondary": {"kind": "weighted_avg", "columns": ["Save rate, %"], "decimals": 1, "pct": True}, "icon_name": "bi bi-arrow-counterclockwise", "accent_color": HKFATheme.ACCENT_BLUE},
+            {"key": "gk_passing", "label": "Pass Accuracy", "secondary_label": "Long Pass Accuracy", "primary": {"kind": "weighted_avg", "columns": ["Accurate passes, %"], "decimals": 1, "pct": True}, "secondary": {"kind": "weighted_avg", "columns": ["Accurate long passes, %"], "decimals": 1, "pct": True}, "icon_name": "bi bi-send", "accent_color": "#60a5fa"},
+        ]
+    if pos_group in {"Forward", "Winger"}:
+        return common_specs + [
+            {"key": "xg", "label": "xG/90", "secondary_label": "Conversion", "primary": {"kind": "per90_sum", "columns": ["xG"], "decimals": 2}, "secondary": {"kind": "weighted_avg", "columns": ["Goal conversion, %"], "decimals": 1, "pct": True}, "icon_name": "bi bi-graph-up-arrow", "accent_color": "#ef4444"},
+            {"key": "shot_accuracy", "label": "Shot Accuracy", "secondary_label": "Progressive Runs/90", "primary": {"kind": "weighted_avg", "columns": ["Shots on target, %"], "decimals": 1, "pct": True}, "secondary": {"kind": "weighted_avg", "columns": ["Progressive runs per 90"], "decimals": 1}, "icon_name": "bi bi-crosshair2", "accent_color": "#22c55e"},
+            {"key": "dribbles", "label": "Dribbles/90", "secondary_label": "Dribble Success", "primary": {"kind": "weighted_avg", "columns": ["Dribbles per 90"], "decimals": 1}, "secondary": {"kind": "weighted_avg", "columns": ["Successful dribbles, %"], "decimals": 1, "pct": True}, "icon_name": "bi bi-lightning-charge", "accent_color": "#06b6d4"},
+        ]
+    if pos_group == "Midfielder":
+        return common_specs + [
+            {"key": "passing", "label": "Pass Accuracy", "secondary_label": "Prog. Passes/90", "primary": {"kind": "weighted_avg", "columns": ["Accurate passes, %"], "decimals": 1, "pct": True}, "secondary": {"kind": "weighted_avg", "columns": ["Progressive passes per 90"], "decimals": 1}, "icon_name": "bi bi-bezier2", "accent_color": "#60a5fa"},
+            {"key": "duels", "label": "Duels Won", "secondary_label": "Interceptions/90", "primary": {"kind": "weighted_avg", "columns": ["Duels won, %"], "decimals": 1, "pct": True}, "secondary": {"kind": "weighted_avg", "columns": ["Interceptions per 90"], "decimals": 1}, "icon_name": "bi bi-shield-check", "accent_color": "#14b8a6"},
+            {"key": "attacking_actions", "label": "Attacking Actions/90", "secondary_label": "Prog. Runs/90", "primary": {"kind": "weighted_avg", "columns": ["Successful attacking actions per 90"], "decimals": 1}, "secondary": {"kind": "weighted_avg", "columns": ["Progressive runs per 90"], "decimals": 1}, "icon_name": "bi bi-magic", "accent_color": "#a855f7"},
+        ]
+    return common_specs + [
+        {"key": "def_duels", "label": "Duels Won", "secondary_label": "Aerial Won", "primary": {"kind": "weighted_avg", "columns": ["Duels won, %"], "decimals": 1, "pct": True}, "secondary": {"kind": "weighted_avg", "columns": ["Aerial duels won, %"], "decimals": 1, "pct": True}, "icon_name": "bi bi-shield", "accent_color": "#14b8a6"},
+        {"key": "def_interceptions", "label": "Interceptions/90", "secondary_label": "Pass Accuracy", "primary": {"kind": "weighted_avg", "columns": ["Interceptions per 90"], "decimals": 1}, "secondary": {"kind": "weighted_avg", "columns": ["Accurate passes, %"], "decimals": 1, "pct": True}, "icon_name": "bi bi-signpost-split", "accent_color": "#f59e0b"},
+        {"key": "forward_passing", "label": "Forward Passes/90", "secondary_label": "Accurate Fwd Passes", "primary": {"kind": "weighted_avg", "columns": ["Forward passes per 90"], "decimals": 1}, "secondary": {"kind": "weighted_avg", "columns": ["Accurate forward passes, %"], "decimals": 1, "pct": True}, "icon_name": "bi bi-arrow-up-right-circle", "accent_color": "#60a5fa"},
+    ]
+
+
+def _career_kpi_metric_series(history_df: pd.DataFrame, metric_spec: Dict[str, Any]) -> Optional[pd.Series]:
+    if not isinstance(history_df, pd.DataFrame) or history_df.empty or "Season" not in history_df.columns:
+        return None
+    plot_df = history_df.copy()
+    plot_df["Season"] = plot_df["Season"].apply(_normalize_season_label)
+    plot_df = plot_df.assign(_season_sort=plot_df["Season"].apply(_season_sort_key)).sort_values("_season_sort")
+    minutes = pd.to_numeric(plot_df.get("Minutes played"), errors="coerce") if "Minutes played" in plot_df.columns else None
+    kind = metric_spec.get("kind")
+    chosen_column = next((column for column in metric_spec.get("columns", []) if column in plot_df.columns), None)
+    if kind == "per90_sum":
+        if not chosen_column or minutes is None:
+            return None
+        numerator = pd.to_numeric(plot_df[chosen_column], errors="coerce")
+        series = numerator * 90.0 / minutes.replace(0, np.nan)
+    elif chosen_column:
+        series = pd.to_numeric(plot_df[chosen_column], errors="coerce")
+    else:
+        return None
+    return pd.Series(series.values, index=plot_df["Season"]).dropna()
+
+
+def _career_kpi_metric_aggregate(history_df: pd.DataFrame, metric_spec: Dict[str, Any]) -> Optional[float]:
+    series = _career_kpi_metric_series(history_df, metric_spec)
+    if series is None or series.empty:
+        return None
+    kind = metric_spec.get("kind")
+    if kind == "sum":
+        value = float(series.sum())
+    elif kind == "weighted_avg":
+        if "Minutes played" not in history_df.columns:
+            value = float(series.mean())
+        else:
+            plot_df = history_df.copy()
+            plot_df["Season"] = plot_df["Season"].apply(_normalize_season_label)
+            plot_df = plot_df.assign(_season_sort=plot_df["Season"].apply(_season_sort_key)).sort_values("_season_sort")
+            minute_map = pd.Series(pd.to_numeric(plot_df.get("Minutes played"), errors="coerce").values, index=plot_df["Season"])
+            common_index = series.index.intersection(minute_map.index)
+            weights = minute_map.loc[common_index].astype(float)
+            metric_values = series.loc[common_index].astype(float)
+            valid_mask = weights > 0
+            value = float(np.average(metric_values[valid_mask], weights=weights[valid_mask])) if valid_mask.any() else float(metric_values.mean())
+    else:
+        value = float(series.iloc[-1])
+    return None if pd.isna(value) else value
+
+
+def _format_kpi_metric_value(value: Optional[float], metric_spec: Dict[str, Any]) -> str:
+    if value is None:
+        return "—"
+    decimals = int(metric_spec.get("decimals", 0))
+    if metric_spec.get("pct"):
+        return f"{value:.{decimals}f}%"
+    if decimals == 0:
+        return f"{int(round(value)):,}"
+    return f"{value:.{decimals}f}"
+
+
+def _metric_icon_node(icon_name: str, accent_color: str) -> Any:
+    if icon_name == "soccer-ball":
+        return html.Img(src="/assets/icons/soccer-ball.svg", style={"width": "18px", "height": "18px", "display": "block", "opacity": "0.95"})
+    if icon_name == "sport-shoe":
+        return html.I(**{"data-lucide": "sport-shoe", "style": {"width": "18px", "height": "18px", "display": "block", "color": accent_color, "opacity": "0.95"}})
+    return html.I(className=icon_name)
+
+
+def _metric_card(label: str, value: str, sub_label: str, sub_value: str, icon_name: str, accent_color: str) -> html.Div:
     return html.Div(
         [
             html.Div(
                 [
-                    html.Div(
-                        [
-                            html.Span(html.I(className=icon_class), className="career-command-metric__icon"),
-                            html.Span(label, className="career-command-metric__label"),
-                        ],
-                        className="career-command-metric__top",
-                    ),
-                    html.Span(value, className="career-command-metric__value"),
+                    html.Span(_metric_icon_node(icon_name, accent_color), className="career-command-metric__icon", style={"--metric-accent": accent_color}),
+                    html.Span(label, className="career-command-metric__label"),
                 ],
-                className="career-command-metric",
+                className="career-command-metric__top",
+            ),
+            html.Span(value, className="career-command-metric__value"),
+            html.Div(
+                [
+                    html.Span(sub_label, className="career-command-metric__sub-label"),
+                    html.Span(sub_value, className="career-command-metric__sub-value"),
+                ],
+                className="career-command-metric__sub",
+            ),
+        ],
+        className="career-command-metric",
+    )
+
+
+def _build_career_kpi_trend_view(player_name: str, player_id: str, metric_key: str) -> Dict[str, Any]:
+    data = _fetch_dashboard_data(player_name, player_id)
+    history_df = data.get("history_df", pd.DataFrame())
+    pos_group = str(data.get("pos_group") or "")
+    spec = next((item for item in _career_kpi_specs_for_position(pos_group) if item["key"] == metric_key), None)
+    if spec is None or not isinstance(history_df, pd.DataFrame) or history_df.empty:
+        return {"title": "KPI Trend", "content": html.P("Career KPI history is not available.", className="text-muted small mb-0")}
+    primary_series = _career_kpi_metric_series(history_df, spec["primary"])
+    secondary_series = _career_kpi_metric_series(history_df, spec["secondary"])
+    if primary_series is None or secondary_series is None or primary_series.empty or secondary_series.empty:
+        return {"title": f"{spec['label']} Trend", "content": html.P("Trend detail is not available for this KPI.", className="text-muted small mb-0")}
+    seasons = list(dict.fromkeys(list(primary_series.index) + list(secondary_series.index)))
+    plot_df = pd.DataFrame({"Season": seasons})
+    plot_df = plot_df.assign(_season_sort=plot_df["Season"].apply(_season_sort_key)).sort_values("_season_sort")
+    plot_df[spec["label"]] = plot_df["Season"].map(primary_series)
+    plot_df[spec["secondary_label"]] = plot_df["Season"].map(secondary_series)
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=plot_df["Season"],
+            y=plot_df[spec["label"]],
+            mode="lines+markers",
+            name=spec["label"],
+            line=dict(color=spec["accent_color"], width=3, shape="spline", smoothing=0.8),
+            marker=dict(size=8, color=spec["accent_color"]),
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=plot_df["Season"],
+            y=plot_df[spec["secondary_label"]],
+            mode="lines+markers",
+            name=spec["secondary_label"],
+            line=dict(color="rgba(225, 236, 255, 0.78)", width=2.5, dash="dot", shape="spline", smoothing=0.8),
+            marker=dict(size=7, color="rgba(225, 236, 255, 0.92)"),
+            yaxis="y2",
+        )
+    )
+    fig.update_layout(
+        xaxis_title="Season",
+        yaxis_title=spec["label"],
+        height=360,
+        margin=dict(t=20, r=56, b=42, l=128),
+        showlegend=True,
+    )
+    fig.update_layout(
+        yaxis2=dict(
+            title=dict(text=spec["secondary_label"], font=dict(color="rgba(225, 236, 255, 0.76)")),
+            overlaying="y",
+            side="right",
+            showgrid=False,
+            tickfont=dict(color="rgba(225, 236, 255, 0.76)"),
+        )
+    )
+    fig = glass_figure_layout(fig)
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        legend=dict(
+            bgcolor="rgba(0,0,0,0)",
+            bordercolor="rgba(255,255,255,0.08)",
+            borderwidth=1,
+            x=-0.14,
+            y=0.78,
+            xanchor="left",
+            yanchor="top",
+            orientation="v",
+            font=dict(size=14, color="rgba(245, 250, 255, 0.94)"),
+        ),
+    )
+    summary = html.Div(
+        [
+            html.Div([html.Span(spec["label"], className="career-kpi-trend-summary__label"), html.Span(_format_kpi_metric_value(_career_kpi_metric_aggregate(history_df, spec["primary"]), spec["primary"]), className="career-kpi-trend-summary__value")], className="career-kpi-trend-summary__item"),
+            html.Div([html.Span(spec["secondary_label"], className="career-kpi-trend-summary__label"), html.Span(_format_kpi_metric_value(_career_kpi_metric_aggregate(history_df, spec["secondary"]), spec["secondary"]), className="career-kpi-trend-summary__value")], className="career-kpi-trend-summary__item"),
+        ],
+        className="career-kpi-trend-summary",
+    )
+    return {
+        "title": f"{spec['label']} Trend",
+        "content": html.Div(
+            [
+                summary,
+                dcc.Graph(figure=fig, config={"displayModeBar": False}, className="career-kpi-trend-panel"),
+            ]
+        ),
+    }
+
+
+def _build_command_metrics_strip(data: Dict) -> html.Div:
+    history_df = data.get("history_df", pd.DataFrame())
+    pos_group = str(data.get("pos_group") or "")
+    items = []
+    for spec in _career_kpi_specs_for_position(pos_group):
+        items.append(
+            (
+                spec["key"],
+                spec["label"],
+                _format_kpi_metric_value(_career_kpi_metric_aggregate(history_df, spec["primary"]), spec["primary"]),
+                spec["secondary_label"],
+                _format_kpi_metric_value(_career_kpi_metric_aggregate(history_df, spec["secondary"]), spec["secondary"]),
+                spec["icon_name"],
+                spec["accent_color"],
             )
-            for label, value, icon_class in items
+        )
+    return html.Div(
+        [
+            html.Button(
+                _metric_card(label, value, sub_label, sub_value, icon_name, accent_color),
+                id={"type": "career-kpi-trigger", "metric_key": metric_key},
+                className="career-command-metric-button",
+                n_clicks=0,
+                type="button",
+            )
+            for metric_key, label, value, sub_label, sub_value, icon_name, accent_color in items
         ],
         className="career-command-metrics",
     )
+
+
+def _build_career_progression_summary(data: Dict[str, Any], career_phase_data: Dict[str, Any]) -> str:
+    phase = str((career_phase_data or {}).get("career_phase") or "unknown").lower()
+    momentum = int((career_phase_data or {}).get("momentum_score") or 3)
+    goals = int(data.get("goals", 0) or 0)
+    assists = int(data.get("assists", 0) or 0)
+    minutes = int(data.get("minutes_played", 0) or 0)
+    production = []
+    if goals:
+        production.append(f"{goals} career goals")
+    if assists:
+        production.append(f"{assists} assists")
+    if minutes:
+        production.append(f"{minutes:,} minutes")
+    production_text = ", ".join(production[:2]) if production else "the long-term record"
+    if phase == "post-peak" and momentum >= 4:
+        return f"You are beyond the standard peak window, but {production_text} still support strong momentum."
+    if phase == "peak" and momentum >= 4:
+        return f"You are in your peak phase, and {production_text} are reinforcing that status."
+    if phase == "peak" and momentum <= 2:
+        return f"You are still in your peak phase, but {production_text} are no longer translating into strong momentum."
+    if phase == "building" and momentum >= 4:
+        return f"You are still building your career, and {production_text} are now pushing momentum upward."
+    if phase == "building" and momentum <= 2:
+        return f"You are still building your career, and {production_text} have not yet turned into stronger momentum."
+    if phase == "building":
+        return f"You are still building your career, with {production_text} giving you a stable base."
+    if phase == "development":
+        return f"You are in an early development phase, and {production_text} are still shaping the direction of your career."
+    if phase == "post-peak":
+        return f"You are past the standard peak window, and {production_text} are now being tested by mixed momentum."
+    return f"Your career phase is still being defined, with {production_text} as the clearest current reference."
+
+
+def _build_career_thesis_chip(item: Dict[str, Any]) -> html.Span:
+    tone = str(item.get("tone") or "neutral")
+    label = str(item.get("label") or "").strip()
+    value = str(item.get("value") or "").strip()
+    return html.Span(
+        [html.Span(label, className="career-command-chip__label"), html.Span(value, className="career-command-chip__value")],
+        className=f"career-command-chip career-command-chip--{tone}",
+    )
+
+
+def _build_support_chip(label: str, value: str, tone: str = "neutral") -> Dict[str, Any]:
+    return {"label": label, "value": value, "tone": tone}
+
+
+def _build_career_thesis_support_groups(data: Dict[str, Any], career_phase_data: Dict[str, Any], thesis: Dict[str, Any]) -> Optional[html.Div]:
+    items = [item for item in [*(thesis.get("drivers") or []), *(thesis.get("risks") or [])] if isinstance(item, dict)]
+    features = (career_phase_data or {}).get("progression_features")
+    if hasattr(features, "peak_range"):
+        peak_range = getattr(features, "peak_range", ())
+        position_group = getattr(features, "position_group", "")
+    elif isinstance(features, dict):
+        peak_range = features.get("peak_range") or ()
+        position_group = features.get("position_group") or ""
+    else:
+        peak_range = ()
+        position_group = data.get("pos_group") or ""
+
+    momentum_keywords = {"trend", "role signal", "consistency", "goal contribution", "attacking output", "minutes"}
+    momentum_items = [
+        item for item in items
+        if any(keyword in str(item.get("label") or "").lower() for keyword in momentum_keywords)
+    ][:5]
+
+    phase_items: List[Dict[str, Any]] = []
+    age = career_phase_data.get("age") or data.get("age")
+    if age:
+        phase_items.append(_build_support_chip("Age", str(age), "neutral"))
+    if position_group:
+        phase_items.append(_build_support_chip("Position", str(position_group), "neutral"))
+    if isinstance(peak_range, (tuple, list)) and len(peak_range) == 2:
+        phase_items.append(_build_support_chip("Peak window", f"{peak_range[0]}-{peak_range[1]}", "neutral"))
+    phase_label = _format_career_phase_display(career_phase_data)
+    if phase_label:
+        phase_items.append(_build_support_chip("Resolved phase", phase_label, "neutral"))
+
+    synthesis_items: List[Dict[str, Any]] = []
+    minutes = int(data.get("minutes_played", 0) or 0)
+    goals = int(data.get("goals", 0) or 0)
+    assists = int(data.get("assists", 0) or 0)
+    if goals:
+        synthesis_items.append(_build_support_chip("Career goals", str(goals), "positive"))
+    if assists:
+        synthesis_items.append(_build_support_chip("Career assists", str(assists), "positive"))
+    if minutes:
+        synthesis_items.append(_build_support_chip("Career minutes", f"{minutes:,}", "positive"))
+
+    groups_payload = [
+        ("Momentum is based on", momentum_items),
+        ("Career phase is based on", phase_items),
+        ("Career synthesis is based on", synthesis_items),
+    ]
+    groups: List[Any] = []
+    for title, chips in groups_payload:
+        if not chips:
+            continue
+        groups.append(
+            html.Div(
+                [
+                    html.Div(title, className="career-command-chip-group__title"),
+                    html.Div([_build_career_thesis_chip(item) for item in chips], className="career-command-chip-group__chips"),
+                ],
+                className="career-command-chip-group",
+            )
+        )
+    if not groups:
+        return None
+    return html.Div(groups, className="career-command-card__chips")
 
 
 def _build_career_command(
@@ -3587,10 +4301,11 @@ def _build_career_command(
     brief: Any,
 ) -> html.Div:
     thesis = brief.career_thesis
-    trajectory_label = thesis.get("label", "Career Progression")
-    body = thesis.get("body", "")
-    support = thesis.get("support", "")
+    trajectory_label = "Career Progression"
+    body = _build_career_progression_summary(data, career_phase_data)
     momentum = int(career_phase_data.get("momentum_score", 3) or 3)
+    phase_display = _format_career_phase_display(career_phase_data)
+    chips_block = _build_career_thesis_support_groups(data, career_phase_data, thesis)
 
     return html.Div(
         className="career-command-card",
@@ -3609,28 +4324,35 @@ def _build_career_command(
                                 ],
                                 className="career-dashboard-section__title-row career-command-card__title-row",
                             ),
-                            *(_build_phase_momentum_row(career_phase_data) if career_phase_data else []),
-                            html.P(body, className="career-command-card__body"),
-                            html.P(support, className="career-command-card__support"),
                             html.Div(
                                 [
                                     html.Div(
-                                        [
-                                            html.Span("Momentum", className="career-command-kpi__label"),
-                                            html.Span(f"{momentum}/5", className="career-command-kpi__value"),
-                                        ],
-                                        className="career-command-kpi",
+                                        html.P(body, className="career-command-card__body"),
+                                        className="career-command-card__headline-panel",
                                     ),
                                     html.Div(
                                         [
-                                            html.Span("Phase", className="career-command-kpi__label"),
-                                            html.Span(str(career_phase_data.get("career_phase", "unknown")).upper(), className="career-command-kpi__value"),
+                                            html.Div(
+                                                [
+                                                    html.Span("Momentum", className="career-command-kpi__label"),
+                                                    _build_momentum_dots(momentum),
+                                                ],
+                                                className="career-command-kpi",
+                                            ),
+                                            html.Div(
+                                                [
+                                                    html.Span("Phase", className="career-command-kpi__label"),
+                                                    _build_phase_badge(phase_display, class_name="career-phase-badge career-phase-badge--inline"),
+                                                ],
+                                                className="career-command-kpi",
+                                            ),
                                         ],
-                                        className="career-command-kpi",
+                                        className="career-command-kpis career-command-kpis--side",
                                     ),
                                 ],
-                                className="career-command-kpis",
+                                className="career-command-card__headline-layout",
                             ),
+                            chips_block,
                         ],
                     ),
                 ],
@@ -3642,6 +4364,7 @@ def _build_career_command(
 
 def _build_insight_card(item: Any, section_label: str, source: str = "dashboard") -> html.Div:
     meta = _get_career_surface_meta(item, section_label)
+    llm_generated = bool(getattr(item, "llm_generated", False))
     stat_items = []
     if getattr(item, "badge_value", "") and getattr(item, "badge_label", ""):
         stat_items.append((item.badge_value, item.badge_label))
@@ -3658,7 +4381,13 @@ def _build_insight_card(item: Any, section_label: str, source: str = "dashboard"
                             html.Div(
                                 [
                                     html.Div(section_label, className="career-dashboard-card__eyebrow"),
-                                    html.Div(meta["tone_label"], className="career-dashboard-card__tone"),
+                                    html.Div(
+                                        [
+                                            html.Span(meta["tone_label"]),
+                                            _build_ai_origin_badge(llm_generated),
+                                        ],
+                                        className="career-dashboard-card__tone",
+                                    ),
                                 ],
                                 className="career-dashboard-card__meta",
                             ),
@@ -3690,7 +4419,11 @@ def _build_insight_card(item: Any, section_label: str, source: str = "dashboard"
                 className="career-dashboard-card__support-wrap",
             ),
             html.Div(
-                _build_career_evidence_button(item.evidence_key, source=source),
+                _build_career_evidence_button(
+                    item.evidence_key,
+                    source=source,
+                    trigger_index=f"{section_label.lower()}:{getattr(item, 'title', '')}",
+                ),
                 className="career-dashboard-card__footer",
             ),
         ],
@@ -3827,6 +4560,7 @@ def _build_career_levers(brief: Any) -> html.Div:
 
 def _build_career_outlook(brief: Any) -> html.Div:
     outlook = brief.outlook
+    llm_generated = bool(outlook.get("llm_generated", False))
     return html.Div(
         className="career-dashboard-section",
         children=[
@@ -3839,7 +4573,13 @@ def _build_career_outlook(brief: Any) -> html.Div:
                             html.Div(
                                 [
                                     html.Div("Career Outlook", className="career-dashboard-card__eyebrow"),
-                                    html.Div("Strategic Horizon", className="career-dashboard-card__tone"),
+                                    html.Div(
+                                        [
+                                            html.Span("Strategic Horizon"),
+                                            _build_ai_origin_badge(llm_generated),
+                                        ],
+                                        className="career-dashboard-card__tone",
+                                    ),
                                 ],
                                 className="career-dashboard-card__meta",
                             ),
@@ -3856,7 +4596,10 @@ def _build_career_outlook(brief: Any) -> html.Div:
                         className="career-dashboard-card__support-wrap",
                     ),
                     html.Div(
-                        _build_career_evidence_button(outlook.get("evidence_key", "career_arc")),
+                        _build_career_evidence_button(
+                            outlook.get("evidence_key", "career_arc"),
+                            trigger_index=f"outlook:{outlook.get('label', 'career-outlook')}",
+                        ),
                         className="career-dashboard-card__footer",
                     ),
                 ],
@@ -3865,10 +4608,22 @@ def _build_career_outlook(brief: Any) -> html.Div:
     )
 
 
+def _build_ai_origin_badge(llm_generated: bool) -> html.Span:
+    """Renders a subtle origin badge when content comes from the shared LLM layer."""
+    if not llm_generated:
+        return html.Span()
+    return html.Span(
+        [
+            html.I(className="bi bi-stars"),
+            html.Span("AI"),
+        ],
+        className="career-ai-origin-badge",
+        title="This copy was synthesized by the shared AI layer and validated before render.",
+    )
+
+
 def render_career_evidence_view(evidence_key: str, player_name: str, player_id: str) -> Dict[str, Any]:
     """Returns modal metadata + content for a career evidence destination."""
-    from utils.career_intelligence import get_evidence_destination_meta
-
     data = _fetch_dashboard_data(player_name, player_id)
     meta = get_evidence_destination_meta(evidence_key)
     key = meta["key"]

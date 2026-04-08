@@ -196,6 +196,18 @@ def create_player_portal_layout(user_role: str = "player") -> html.Div:
                 scrollable=True,
                 className="career-evidence-modal",
             ),
+            dbc.Modal(
+                [
+                    dbc.ModalHeader(dbc.ModalTitle(id="career-kpi-trend-modal-title"), close_button=True),
+                    dbc.ModalBody(id="career-kpi-trend-modal-body", className="career-evidence-modal-body"),
+                ],
+                id="career-kpi-trend-modal",
+                is_open=False,
+                centered=True,
+                size="xl",
+                scrollable=True,
+                className="career-evidence-modal",
+            ),
             # Insight Inbox Offcanvas (Notification Center)
             dbc.Offcanvas(
                 id="insight-inbox-offcanvas",

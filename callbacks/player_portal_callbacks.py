@@ -9,6 +9,7 @@ from flask_login import current_user
 from data.aggregators.timeline_aggregator import TimelineAggregator
 from data.aggregators.hong_kong_aggregator import get_h2h_record
 from data.managers.transfermarkt_runtime_manager import TransfermarktRuntimeManager
+from utils.ai_services.evidence_router import normalize_evidence_key
 from utils.stage_helpers import (
     render_post_match,
     render_pre_match,
@@ -16,6 +17,7 @@ from utils.stage_helpers import (
     render_career_overview,
     render_player_dashboard,
     render_career_evidence_view,
+    _build_career_kpi_trend_view,
     get_cached_image_path,
     render_image_gallery,
     _get_position_group,
@@ -1963,14 +1965,9 @@ def register_player_portal_callbacks(app):
         if m_type == "pre-match":
             return f"{base} glass-prematch"
         if m_type == "post-match":
-            payload = context.get("payload", {}) or {}
-            rating = payload.get("rating") or ((payload.get("player_stats") or {}).get("performance_stats", {}) or {}).get("rating")
-            try:
-                rating = float(rating) if rating is not None else None
-            except (TypeError, ValueError):
-                rating = None
-            modifier = "glass-danger" if (rating is not None and rating < 6.0) else "glass-success"
-            return f"{base} {modifier}"
+            # TASK 4.5: Consistently use glass-success for all post-match stages
+            # to maintain semantic category (Post-Match = Green), similar to Pre-Match = Blue.
+            return f"{base} glass-success"
         return f"{base} stage-shell--career"
 
     @app.callback(
@@ -2308,6 +2305,13 @@ def _serialize_milestones(milestones: list) -> list:
         if hasattr(payload.get("date"), "isoformat"):
             payload["date"] = payload["date"].isoformat()
 
+        # Ensure intelligence metrics are properly typed for JS (Task 3.2)
+        if "rating" in payload and payload["rating"] is not None:
+            try:
+                payload["rating"] = float(payload["rating"])
+            except (ValueError, TypeError):
+                pass
+
         # Handle nested matches serialization
         if "matches" in payload:
             serialized_matches = []
@@ -2538,7 +2542,7 @@ def register_career_intelligence_callbacks(app):
     @app.callback(
         Output("portal-overlay-store", "data"),
         Input("insight-inbox-btn", "n_clicks"),
-        Input({"type": "career-evidence-trigger", "key": ALL, "source": ALL}, "n_clicks"),
+        Input({"type": "career-evidence-trigger", "key": ALL, "source": ALL, "index": ALL}, "n_clicks"),
         Input({"type": "ai-overlay-t1-btn", "action": ALL, "evidence_key": ALL}, "n_clicks"),
         Input({"type": "ai-overlay-t2-cta", "index": ALL, "evidence_key": ALL}, "n_clicks"),
         Input("career-evidence-modal-close", "n_clicks"),
@@ -2622,6 +2626,30 @@ def register_career_intelligence_callbacks(app):
             logger.warning(f"career evidence modal error: {exc}")
             return "Evidence", html.P("Detailed evidence is not available right now.", className="text-muted small mb-0"), True, False
 
+    @app.callback(
+        Output("career-kpi-trend-modal-title", "children"),
+        Output("career-kpi-trend-modal-body", "children"),
+        Output("career-kpi-trend-modal", "is_open"),
+        Input({"type": "career-kpi-trigger", "metric_key": ALL}, "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def render_career_kpi_trend_modal(_):
+        triggered_id = ctx.triggered_id
+        trigger_value = ctx.triggered[0].get("value", 0) if ctx.triggered else 0
+        if not isinstance(triggered_id, dict) or triggered_id.get("type") != "career-kpi-trigger" or not trigger_value:
+            return no_update, no_update, no_update
+
+        player_id, player_name, _ = _get_active_player_identity()
+        if not player_id or not player_name:
+            return "KPI Trend", html.P("Player KPI history is not available.", className="text-muted small mb-0"), True
+
+        try:
+            payload = _build_career_kpi_trend_view(player_name, player_id, triggered_id.get("metric_key", "matches"))
+            return payload["title"], payload["content"], True
+        except Exception as exc:
+            logger.warning(f"career kpi trend modal error: {exc}")
+            return "KPI Trend", html.P("Trend detail is not available right now.", className="text-muted small mb-0"), True
+
     # ── 7.2 T1 render/dismiss callback ──────────────────────────────────────
 
     @app.callback(
@@ -2655,7 +2683,7 @@ def register_career_intelligence_callbacks(app):
                     "title": t1_data.get("title", ""),
                     "body": t1_data.get("body", ""),
                     "tier": t1_data.get("tier", 1),
-                    "evidence_key": t1_data.get("evidence_key", "career_arc"),
+                    "evidence_key": normalize_evidence_key(t1_data.get("evidence_key", "career_arc")),
                     "timestamp": _dt.utcnow().isoformat(),
                 })
                 updated_state["history"] = history
@@ -2710,7 +2738,7 @@ def register_career_intelligence_callbacks(app):
                     "title": dismissed.get("title", ""),
                     "body": dismissed.get("body", ""),
                     "tier": dismissed.get("tier", 2),
-                    "evidence_key": dismissed.get("evidence_key", "career_arc"),
+                    "evidence_key": normalize_evidence_key(dismissed.get("evidence_key", "career_arc")),
                     "timestamp": _dt.utcnow().isoformat(),
                 })
                 updated_session["history"] = history
@@ -2795,7 +2823,7 @@ def register_career_intelligence_callbacks(app):
             tier = entry.get("tier", 2)
             title = entry.get("title", "—")
             body = entry.get("body", "")
-            evidence_key = entry.get("evidence_key", "career_arc")
+            evidence_key = normalize_evidence_key(entry.get("evidence_key", "career_arc"))
             timestamp_raw = entry.get("timestamp", "")
             tier_class = "insight-inbox-item--t1" if tier == 1 else "insight-inbox-item--t2"
             tier_label = "CRITICAL" if tier == 1 else "TREND"
@@ -2833,7 +2861,12 @@ def register_career_intelligence_callbacks(app):
                 html.Div(body_short, style={"fontSize": "0.75rem", "opacity": "0.75", "lineHeight": "1.4"}),
                 dbc.Button(
                     "See evidence",
-                    id={"type": "career-evidence-trigger", "key": evidence_key, "source": "inbox"},
+                    id={
+                        "type": "career-evidence-trigger",
+                        "key": evidence_key,
+                        "source": "inbox",
+                        "index": f"inbox:{timestamp_raw or title}",
+                    },
                     color="link",
                     className="insight-inbox-item__cta px-0 mt-2",
                     n_clicks=0,

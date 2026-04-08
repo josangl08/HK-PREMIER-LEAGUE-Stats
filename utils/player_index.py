@@ -3,7 +3,7 @@
 
 import logging
 import re
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from sqlalchemy import func, select
 from models.db_models import Player, PlayerSeasonStat
 from utils.db_engine import SessionFactory
@@ -130,6 +130,60 @@ class PlayerIndex:
         """
         logger.debug("PlayerIndex.build() is now a no-op (data managed in SQL).")
         return True
+
+class IdentityResolver:
+    """
+    Automates the discovery and linking of external IDs (BeSoccer, Sofascore)
+    for players in the database.
+    """
+    def __init__(self):
+        # Lazy imports to avoid circular dependencies
+        from data.extractors.besoccer_extractor import BeSoccerExtractor
+        from data.extractors.sofascore_extractor import SofascoreExtractor
+        self.besoccer = BeSoccerExtractor()
+        self.sofascore = SofascoreExtractor()
+
+    def resolve_external_ids(self, player_id: str, force: bool = False) -> Dict[str, Any]:
+        """
+        Attempts to find and persist BeSoccer and Sofascore IDs for a player.
+        """
+        session = SessionFactory()
+        try:
+            player = session.get(Player, player_id)
+            if not player:
+                return {}
+
+            results = {}
+            team_name = player.current_team.name if player.current_team else None
+
+            # 1. BeSoccer Discovery
+            if force or not player.besoccer_id:
+                logger.info(f"Resolving BeSoccer ID for {player.name}...")
+                bs_id = self.besoccer.search_player(player.name, team_name=team_name)
+                if bs_id:
+                    player.besoccer_id = bs_id
+                    results['besoccer_id'] = bs_id
+                    logger.info(f"✓ BeSoccer ID found: {bs_id}")
+
+            # 2. Sofascore Discovery
+            if force or not player.sofascore_id:
+                logger.info(f"Resolving Sofascore ID for {player.name}...")
+                ss_id = self.sofascore.search_player(player.name)
+                if ss_id:
+                    player.sofascore_id = ss_id
+                    results['sofascore_id'] = ss_id
+                    logger.info(f"✓ Sofascore ID found: {ss_id}")
+
+            if results:
+                session.commit()
+            
+            return results
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error resolving external IDs for {player_id}: {e}")
+            return {}
+        finally:
+            session.close()
 
 # Module-level singleton for backward compatibility
 _player_index = PlayerIndex()

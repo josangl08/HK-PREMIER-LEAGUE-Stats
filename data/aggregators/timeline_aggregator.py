@@ -272,6 +272,15 @@ class TimelineAggregator:
                 away_obj = resolve_team(away_tm)
                 raw = m.raw_data or {}
                 
+                # Check for sofascore intelligence
+                ss_intel = raw.get("sofascore_intelligence", {})
+                ss_stats = ss_intel.get("statistics", {})
+                ss_heatmap = ss_intel.get("heatmap", [])
+                
+                # High-fidelity is only True if we have real stats and a non-empty heatmap
+                has_granular = bool(ss_stats.get("accuratePasses") or ss_stats.get("totalPass"))
+                is_high_fidelity = bool(ss_heatmap) and has_granular
+
                 timeline.append({
                     "type": "post-match",
                     "label": f"Result: {m.opponent}",
@@ -300,6 +309,21 @@ class TimelineAggregator:
                         "subbed_out": raw.get("subbed_out"),
                         "absence_reason": m.status if m.status != "Jugado" else None,
                         "confirmation_status": "Confirmed" if m.minutes_played > 0 else "Not played",
+                        # Intelligence data injection (Task 3.1)
+                        "rating": raw.get("besoccer_rating") or raw.get("rating") or ss_stats.get("rating"),
+                        "heatmap": ss_heatmap,
+                        "match_stats": ss_stats or raw.get("player_stats"),
+                        "intelligence_meta": {
+                            "has_besoccer": "besoccer_rating" in raw,
+                            "has_sofascore": bool(ss_intel),
+                            "is_high_fidelity": is_high_fidelity
+                        },
+                        "player_stats": {
+                            "basic_info": {
+                                "name": player_name,
+                                "position_primary": player.position_main
+                            }
+                        }
                     }
                 })
 

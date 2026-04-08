@@ -96,7 +96,7 @@ AI_DEFAULTS = {
     },
     # Track 3 — GenAI
     "gemini": {
-        "model": "gemini-3-flash-preview",
+        "model": "gemini-2.5-pro",
         "temperature": 0.7,
         "max_output_tokens": 2048,
     },

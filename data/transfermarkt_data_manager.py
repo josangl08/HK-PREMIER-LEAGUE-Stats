@@ -259,7 +259,14 @@ class TransfermarktDataManager:
                     existing.red_cards = m.get('red_cards', 0)
                     existing.position = m.get('position')
                     existing.status = m.get('status', 'Jugado')
-                    existing.raw_data = m
+                    
+                    # PRESERVAR INTELIGENCIA: Combinar raw_data existente con el nuevo
+                    if existing.raw_data and isinstance(existing.raw_data, dict):
+                        merged_raw = existing.raw_data.copy()
+                        merged_raw.update(m)
+                        existing.raw_data = merged_raw
+                    else:
+                        existing.raw_data = m
             
             session.commit()
         except Exception as e:

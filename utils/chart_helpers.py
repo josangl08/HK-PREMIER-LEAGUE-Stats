@@ -511,6 +511,70 @@ def create_heatmap(
     return fig
 
 
+def create_match_heatmap(
+    heatmap_points: List[Dict[str, Any]],
+    title: str = "",
+    height: int = 450
+) -> go.Figure:
+    """
+    Renders a football field heatmap based on Sofascore coordinates.
+    heatmap_points: list of {x, y, value} where x,y are usually 0-100.
+    """
+    fig = go.Figure()
+
+    if heatmap_points and isinstance(heatmap_points, list):
+        try:
+            df = pd.DataFrame(heatmap_points)
+            if not df.empty and 'x' in df.columns and 'y' in df.columns:
+                # Sofascore uses a coordinate system where (0,0) is top-left usually.
+                # But for Plotly density, we want a grid.
+                fig.add_trace(go.Histogram2dContour(
+                    x=df['x'],
+                    y=df['y'],
+                    z=df.get('value', [1]*len(df)),
+                    histfunc="sum",
+                    colorscale='Hot',
+                    ncontours=20,
+                    line=dict(width=0),
+                    opacity=0.8,
+                    showscale=False,
+                    hoverinfo='skip'
+                ))
+        except Exception as e:
+            logger.warning(f"Error drawing heatmap contour: {e}")
+
+    # Draw Pitch Markings (White, subtle)
+    # Pitch dimensions: 100x100 for simplicity in mapping
+    line_style = dict(color="rgba(255,255,255,0.4)", width=2)
+    
+    # Outer boundary
+    fig.add_shape(type="rect", x0=0, y0=0, x1=100, y1=100, line=line_style)
+    # Half-way line
+    fig.add_shape(type="line", x0=50, y0=0, x1=50, y1=100, line=line_style)
+    # Center circle
+    fig.add_shape(type="circle", x0=40, y0=40, x1=60, y1=60, line=line_style)
+    # Penalty areas (Home)
+    fig.add_shape(type="rect", x0=0, y0=20, x1=16, y1=80, line=line_style)
+    # Penalty areas (Away)
+    fig.add_shape(type="rect", x0=84, y0=20, x1=100, y1=80, line=line_style)
+    # Goals
+    fig.add_shape(type="rect", x0=-2, y0=42, x1=0, y1=58, line=line_style, fillcolor="rgba(255,255,255,0.1)")
+    fig.add_shape(type="rect", x0=100, y0=42, x1=102, y1=58, line=line_style, fillcolor="rgba(255,255,255,0.1)")
+
+    fig.update_layout(
+        title=title,
+        height=height,
+        xaxis=dict(range=[-5, 105], showgrid=False, zeroline=False, showticklabels=False),
+        yaxis=dict(range=[-5, 105], showgrid=False, zeroline=False, showticklabels=False, scaleanchor="x", scaleratio=1),
+        margin=dict(l=10, r=10, t=40, b=10),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        hovermode=False
+    )
+
+    return fig
+
+
 # ============================================================================
 # SECTION 3: DATA NORMALIZATION UTILITIES
 # ============================================================================

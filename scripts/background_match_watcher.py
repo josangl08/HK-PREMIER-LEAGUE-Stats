@@ -498,6 +498,7 @@ class MatchWatcher:
                     if completed:
                         t.status = "COMPLETED"
                         t.tm_status = "READY"
+                        t.last_attempt = now
                         logger.info(f"✓ Task completed for {t.player_id} ({t.job_type})")
                         self.runtime.record_success(
                             metadata={"player_id": t.player_id, "job_type": t.job_type}

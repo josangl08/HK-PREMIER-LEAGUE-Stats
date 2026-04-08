@@ -102,6 +102,7 @@ class TransfermarktRefreshManager:
                 nationality=player.nationality or player.birth_country or "",
                 birth_year=birth_year,
                 position=player.position_main or "",
+                team_id=player.current_team_id or "",
             )
             if found:
                 player.tm_id = found

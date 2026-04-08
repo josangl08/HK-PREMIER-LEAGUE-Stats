@@ -188,6 +188,8 @@ tmp/
 *.csv
 data/archive/
 data/database.db
+data/database.db-wal
+data/database.db-shm
 data/historical_records/*.json
 
 # Archivos IDE específicos

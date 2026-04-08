@@ -11,6 +11,12 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from utils.ai_services.evidence_router import (
+    EVIDENCE_DESTINATIONS,
+    get_evidence_destination_meta,
+    normalize_evidence_key,
+)
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Data structures
@@ -32,6 +38,8 @@ class DashboardInsightItem:
     body: str
     support: str
     evidence_key: str
+    llm_generated: bool = False
+    source_model: str = ""
     emphasis: str = "neutral"
     badge_value: str = ""
     badge_label: str = ""
@@ -41,26 +49,70 @@ class DashboardInsightItem:
 
 @dataclass
 class CareerDashboardBrief:
-    career_thesis: Dict[str, str]
+    career_thesis: Dict[str, Any]
     signals: List[DashboardInsightItem]
     levers: List[DashboardInsightItem]
-    outlook: Dict[str, str]
+    outlook: Dict[str, Any]
+
+
+@dataclass(frozen=True)
+class CareerProgressionFeatures:
+    age: int
+    position_group: str
+    peak_range: Tuple[int, int]
+    base_phase: str
+    base_momentum: int
+    minutes_trend_pct: float
+    primary_metric: str
+    primary_metric_trend_pct: float
+    secondary_metric: str
+    secondary_metric_trend_pct: float
+    attacking_output_trend_pct: float
+    consistency_level: str
+    consistency_cv: float
+    coach_confidence_label: str
+    coach_confidence_direction: str
+    coach_confidence_delta_pct: float
+    transfer_window_quality: str
+    late_peak_candidate: bool
+    recent_minutes_delta_pct: float
+    recent_goal_contributions_delta_pct: float
+    recent_sample_size: int
+    season_count: int
+    latest_minutes: int
+    latest_primary_metric: float
+    evidence_flags: List[str]
+
+
+@dataclass(frozen=True)
+class CareerProgressionResolution:
+    base_phase: str
+    resolved_phase: str
+    base_momentum: int
+    resolved_momentum: int
+    ai_used: bool
+    ai_model: str
+    adjustment_applied: bool
+    adjustment_reason: str
+    confidence: str
+    supporting_factors: List[str]
+    contradictions: List[str]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Constants
 # ──────────────────────────────────────────────────────────────────────────────
 
-# Position peak windows: (peak_start, peak_end)
+# Position peak windows calibrated for the HK context using local season-age curves.
 _PEAK_WINDOWS: Dict[str, Tuple[int, int]] = {
-    "Forward":    (23, 27),
-    "Winger":     (23, 27),
-    "Midfielder": (24, 29),
-    "Defender":   (25, 30),
-    "Goalkeeper": (27, 33),
+    "Forward":    (27, 33),
+    "Winger":     (26, 32),
+    "Midfielder": (27, 34),
+    "Defender":   (28, 35),
+    "Goalkeeper": (30, 36),
 }
 
-_DEFAULT_PEAK = (24, 29)  # Midfielder default for unknown positions
+_DEFAULT_PEAK = (27, 33)  # Broad HK outfield default for unknown positions
 
 # Primary metric per position group (column name in history_df)
 _PRIMARY_METRICS: Dict[str, str] = {
@@ -69,6 +121,14 @@ _PRIMARY_METRICS: Dict[str, str] = {
     "Midfielder": "Key passes",
     "Defender":   "Duels won",
     "Goalkeeper": "Save percentage",
+}
+
+_SECONDARY_METRICS: Dict[str, Tuple[str, ...]] = {
+    "Forward": ("xG", "Shots on target", "Assists"),
+    "Winger": ("Assists", "Key passes", "Progressive runs"),
+    "Midfielder": ("Assists", "Pass accuracy", "Progressive runs"),
+    "Defender": ("Interceptions", "Tackles", "Pass accuracy"),
+    "Goalkeeper": ("Save percentage", "Pass accuracy", "Interceptions"),
 }
 
 # Correlation table: metric → estimated Pearson correlation with minutes_played
@@ -88,16 +148,6 @@ METRIC_CORRELATION_TABLE: Dict[str, float] = {
     "xA":                 0.49,
     "Minutes played":     1.00,
 }
-
-EVIDENCE_DESTINATIONS: Dict[str, Dict[str, str]] = {
-    "career_arc": {"title": "Career Arc", "group": "trajectory"},
-    "minutes_trend": {"title": "Minutes Trend", "group": "trajectory"},
-    "percentile_profile": {"title": "Percentile Profile", "group": "profile"},
-    "similarity_profiles": {"title": "Similarity Profiles", "group": "comparison"},
-    "projection_outlook": {"title": "Season Projection", "group": "projection"},
-    "tactical_dna": {"title": "Tactical DNA", "group": "identity"},
-}
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -129,9 +179,23 @@ def _get_birth_date(player: Any) -> Optional[date]:
     """Returns the player's birth date from a dict or ORM object."""
     val = None
     if isinstance(player, dict):
-        val = player.get("birth_date") or player.get("date_of_birth")
+        val = player.get("birth_date") or player.get("date_of_birth") or player.get("Birthday") or player.get("birthday")
+        if val is None:
+            history_df = player.get("history_df")
+            if isinstance(history_df, pd.DataFrame) and not history_df.empty:
+                for column in ("Birthday", "birth_date", "date_of_birth", "birthday"):
+                    if column in history_df.columns:
+                        series = history_df[column].dropna()
+                        if not series.empty:
+                            val = series.iloc[0]
+                            break
     else:
-        val = getattr(player, "birth_date", None) or getattr(player, "date_of_birth", None)
+        val = (
+            getattr(player, "birth_date", None)
+            or getattr(player, "date_of_birth", None)
+            or getattr(player, "Birthday", None)
+            or getattr(player, "birthday", None)
+        )
     if val is None:
         return None
     if isinstance(val, datetime):
@@ -144,12 +208,297 @@ def _get_birth_date(player: Any) -> Optional[date]:
         return None
 
 
+def _get_player_age(player: Any) -> Optional[int]:
+    """Returns the player's age from a dict or ORM object when available."""
+    if isinstance(player, dict):
+        raw_age = player.get("age")
+    else:
+        raw_age = getattr(player, "age", None)
+    try:
+        age = int(raw_age)
+    except (TypeError, ValueError):
+        return None
+    return age if age > 0 else None
+
+
 def _compute_age(birth_date: date, reference: Optional[date] = None) -> int:
     ref = reference or date.today()
     age = ref.year - birth_date.year
     if (ref.month, ref.day) < (birth_date.month, birth_date.day):
         age -= 1
     return age
+
+
+def _resolve_age_and_peak_range(player: Any) -> Tuple[Optional[int], Tuple[int, int], str]:
+    """Returns resolved age, peak range, and normalized position group."""
+    pos_group = _resolve_position_group(player)
+    peak_range = _PEAK_WINDOWS.get(pos_group, _DEFAULT_PEAK)
+    birth = _get_birth_date(player)
+    age = _compute_age(birth) if birth is not None else _get_player_age(player)
+    return age, peak_range, pos_group
+
+
+def _compute_base_career_phase(age: Optional[int], peak_range: Tuple[int, int]) -> str:
+    """Returns the base phase from age and the positional peak window."""
+    if age is None:
+        return "unknown"
+    peak_start, peak_end = peak_range
+    if age < peak_start - 3:
+        return "development"
+    if age < peak_start:
+        return "building"
+    if age <= peak_end:
+        return "peak"
+    return "post-peak"
+
+
+def _find_metric_column(history_df: pd.DataFrame, candidates: Tuple[str, ...]) -> Optional[str]:
+    """Finds the first available metric column matching the candidates."""
+    for candidate in candidates:
+        if candidate in history_df.columns:
+            return candidate
+    lowered = {str(col).strip().lower(): col for col in history_df.columns}
+    for candidate in candidates:
+        matched = lowered.get(candidate.strip().lower())
+        if matched:
+            return str(matched)
+    return None
+
+
+def _compute_weighted_trend_pct(history_df: pd.DataFrame, metric: str) -> float:
+    """Computes weighted YoY trend percentage for a metric."""
+    if history_df is None or history_df.empty or metric not in history_df.columns:
+        return 0.0
+    values = history_df[metric].dropna().tolist()
+    if len(values) < 2:
+        return 0.0
+
+    deltas: List[float] = []
+    weights: List[float] = []
+    for i in range(1, len(values)):
+        prev = values[i - 1]
+        curr = values[i]
+        if prev in (None, 0):
+            continue
+        try:
+            delta_pct = (float(curr) - float(prev)) / abs(float(prev)) * 100
+        except (TypeError, ValueError, ZeroDivisionError):
+            continue
+        weight = 0.6 ** (len(values) - 1 - i)
+        deltas.append(delta_pct)
+        weights.append(weight)
+
+    if not deltas or not weights:
+        return 0.0
+    total_weight = sum(weights)
+    return round(sum(delta * weight for delta, weight in zip(deltas, weights)) / total_weight, 2)
+
+
+def _get_latest_metric_value(history_df: pd.DataFrame, metric: str) -> float:
+    """Returns the most recent metric value."""
+    if history_df is None or history_df.empty or metric not in history_df.columns:
+        return 0.0
+    try:
+        return float(history_df[metric].dropna().iloc[-1])
+    except (IndexError, TypeError, ValueError):
+        return 0.0
+
+
+def _extract_recent_form_comparison(player: Any) -> Dict[str, Any]:
+    """Returns last-5-vs-previous-5 comparison data when available."""
+    if isinstance(player, dict):
+        recent_windows = player.get("recent_form_windows") or {}
+    else:
+        recent_windows = getattr(player, "recent_form_windows", None) or {}
+    if not isinstance(recent_windows, dict):
+        return {}
+    comparisons = recent_windows.get("comparisons") or {}
+    if not isinstance(comparisons, dict):
+        return {}
+    comparison = comparisons.get("last5_vs_previous5") or {}
+    return comparison if isinstance(comparison, dict) else {}
+
+
+def _compute_composite_momentum_score(
+    primary_trend_pct: float,
+    secondary_trend_pct: float,
+    attacking_output_trend_pct: float,
+    minutes_trend_pct: float,
+    consistency_level: str,
+    coach_direction: str,
+    coach_delta_pct: float,
+    recent_minutes_delta_pct: float = 0.0,
+    recent_goal_contributions_delta_pct: float = 0.0,
+    position_group: str = "",
+) -> int:
+    """Builds a 0-5 momentum score from multiple deterministic signals."""
+    score = 3.0
+    attacking_weight = 0.0 if str(position_group or "") == "Goalkeeper" else 0.25
+    score += max(-1.0, min(1.0, primary_trend_pct / 25.0)) * 1.15
+    score += max(-1.0, min(1.0, secondary_trend_pct / 25.0)) * 0.55
+    score += max(-1.0, min(1.0, attacking_output_trend_pct / 25.0)) * attacking_weight
+    score += max(-1.0, min(1.0, minutes_trend_pct / 20.0)) * 0.95
+    score += max(-1.0, min(1.0, recent_minutes_delta_pct / 22.0)) * 0.3
+    if attacking_weight:
+        score += max(-1.0, min(1.0, recent_goal_contributions_delta_pct / 30.0)) * 0.35
+    score += {"ALTA": 0.35, "MODERADA": 0.0, "BAJA": -0.45}.get(str(consistency_level or "MODERADA"), 0.0)
+    score += {"up": 0.35, "stable": 0.0, "down": -0.4}.get(str(coach_direction or "stable"), 0.0)
+    if coach_delta_pct <= -45:
+        score -= 1.0
+    elif coach_delta_pct <= -25:
+        score -= 0.55
+    elif coach_delta_pct >= 20:
+        score += 0.15
+    if primary_trend_pct >= 35:
+        score += 0.45
+    elif primary_trend_pct <= -30:
+        score -= 0.3
+    if attacking_weight and attacking_output_trend_pct >= 25:
+        score += 0.2
+    elif attacking_weight and attacking_output_trend_pct <= -25:
+        score -= 0.2
+    if coach_delta_pct <= -45 and str(consistency_level or "MODERADA") == "BAJA":
+        score = min(score, 4.0)
+    return max(0, min(5, int(round(score))))
+
+
+def _compute_attacking_output_trend_pct(history_df: pd.DataFrame, position_group: str) -> float:
+    """Computes weighted trend for combined goals + assists in outfield roles."""
+    if str(position_group or "") == "Goalkeeper":
+        return 0.0
+    if history_df is None or history_df.empty:
+        return 0.0
+
+    goals_col = _find_metric_column(history_df, ("Goals",))
+    assists_col = _find_metric_column(history_df, ("Assists",))
+    if str(position_group or "") in {"Forward", "Winger"}:
+        return _compute_weighted_trend_pct(history_df, assists_col) if assists_col else 0.0
+    if not goals_col and not assists_col:
+        return 0.0
+
+    combined = pd.DataFrame(index=history_df.index)
+    if goals_col:
+        combined["goals_value"] = pd.to_numeric(history_df[goals_col], errors="coerce").fillna(0.0)
+    if assists_col:
+        combined["assists_value"] = pd.to_numeric(history_df[assists_col], errors="coerce").fillna(0.0)
+    combined["attacking_output"] = combined.sum(axis=1)
+    return _compute_weighted_trend_pct(combined, "attacking_output")
+
+
+def build_career_progression_features(
+    player: Any,
+    history_df: pd.DataFrame,
+    career_signals: Optional[Dict[str, Any]] = None,
+) -> CareerProgressionFeatures:
+    """Builds deterministic progression features for downstream AI assessment and resolution."""
+    age, peak_range, pos_group = _resolve_age_and_peak_range(player)
+    base_phase = _compute_base_career_phase(age, peak_range)
+    history_df = history_df if isinstance(history_df, pd.DataFrame) else pd.DataFrame()
+    season_count = len(history_df) if not history_df.empty else 0
+
+    minutes_col = next((col for col in history_df.columns if "minute" in str(col).lower()), None)
+    minutes_trend_pct = _compute_weighted_trend_pct(history_df, minutes_col) if minutes_col else 0.0
+    latest_minutes = _safe_int(history_df.iloc[-1].get(minutes_col)) if minutes_col and not history_df.empty else 0
+
+    primary_metric = _PRIMARY_METRICS.get(pos_group) or "Minutes played"
+    primary_metric = primary_metric if primary_metric in history_df.columns else (minutes_col or primary_metric)
+    secondary_metric = _find_metric_column(history_df, _SECONDARY_METRICS.get(pos_group, tuple()))
+    if not secondary_metric and minutes_col and minutes_col != primary_metric:
+        secondary_metric = minutes_col
+    if secondary_metric == primary_metric:
+        secondary_metric = ""
+
+    primary_metric_trend_pct = _compute_weighted_trend_pct(history_df, primary_metric) if primary_metric else 0.0
+    secondary_metric_trend_pct = _compute_weighted_trend_pct(history_df, secondary_metric) if secondary_metric else 0.0
+    attacking_output_trend_pct = _compute_attacking_output_trend_pct(history_df, pos_group)
+    latest_primary_metric = _get_latest_metric_value(history_df, primary_metric) if primary_metric else 0.0
+    recent_comparison = _extract_recent_form_comparison(player)
+    recent_minutes_delta_pct = float(recent_comparison.get("minutes_trend_pct") or 0.0)
+    recent_goal_contributions_delta_pct = float(recent_comparison.get("goal_contributions_trend_pct") or 0.0)
+    recent_sample_size = int(recent_comparison.get("matches") or 0)
+
+    coach_conf = (career_signals or {}).get("coach_confidence") or _compute_coach_confidence(history_df)
+    consistency = (career_signals or {}).get("consistency_score") or _compute_consistency_score(pos_group, history_df)
+    transfer_window = (career_signals or {}).get("transfer_window") or {"quality": "MODERADA"}
+
+    base_momentum = _compute_composite_momentum_score(
+        primary_trend_pct=primary_metric_trend_pct,
+        secondary_trend_pct=secondary_metric_trend_pct,
+        attacking_output_trend_pct=attacking_output_trend_pct,
+        minutes_trend_pct=minutes_trend_pct,
+        consistency_level=str(consistency.get("level") or "MODERADA"),
+        coach_direction=str(coach_conf.get("direction") or "stable"),
+        coach_delta_pct=float(coach_conf.get("delta_pct") or 0.0),
+        recent_minutes_delta_pct=recent_minutes_delta_pct,
+        recent_goal_contributions_delta_pct=recent_goal_contributions_delta_pct,
+        position_group=pos_group,
+    )
+
+    evidence_flags: List[str] = []
+    if minutes_trend_pct >= 10:
+        evidence_flags.append("minutes_up")
+    elif minutes_trend_pct <= -10:
+        evidence_flags.append("minutes_down")
+    if primary_metric_trend_pct >= 10:
+        evidence_flags.append("primary_metric_up")
+    elif primary_metric_trend_pct <= -10:
+        evidence_flags.append("primary_metric_down")
+    if secondary_metric_trend_pct >= 10:
+        evidence_flags.append("secondary_metric_up")
+    elif secondary_metric_trend_pct <= -10:
+        evidence_flags.append("secondary_metric_down")
+    if attacking_output_trend_pct >= 10:
+        evidence_flags.append("attacking_output_up")
+    elif attacking_output_trend_pct <= -10:
+        evidence_flags.append("attacking_output_down")
+    if str(consistency.get("level") or "MODERADA") == "ALTA":
+        evidence_flags.append("consistency_high")
+    if str(coach_conf.get("direction") or "stable") == "up":
+        evidence_flags.append("coach_trust_up")
+    elif str(coach_conf.get("direction") or "stable") == "down":
+        evidence_flags.append("coach_trust_down")
+    if recent_sample_size >= 10:
+        if recent_minutes_delta_pct >= 10:
+            evidence_flags.append("recent_minutes_up")
+        elif recent_minutes_delta_pct <= -10:
+            evidence_flags.append("recent_minutes_down")
+        if recent_goal_contributions_delta_pct >= 10:
+            evidence_flags.append("recent_output_up")
+        elif recent_goal_contributions_delta_pct <= -10:
+            evidence_flags.append("recent_output_down")
+
+    return CareerProgressionFeatures(
+        age=int(age or 0),
+        position_group=pos_group or "",
+        peak_range=peak_range,
+        base_phase=base_phase,
+        base_momentum=base_momentum,
+        minutes_trend_pct=minutes_trend_pct,
+        primary_metric=primary_metric or "",
+        primary_metric_trend_pct=primary_metric_trend_pct,
+        secondary_metric=secondary_metric or "",
+        secondary_metric_trend_pct=secondary_metric_trend_pct,
+        attacking_output_trend_pct=attacking_output_trend_pct,
+        consistency_level=str(consistency.get("level") or "MODERADA"),
+        consistency_cv=float(consistency.get("cv") or 0.0),
+        coach_confidence_label=str(coach_conf.get("label") or "Rol estable"),
+        coach_confidence_direction=str(coach_conf.get("direction") or "stable"),
+        coach_confidence_delta_pct=float(coach_conf.get("delta_pct") or 0.0),
+        transfer_window_quality=str(transfer_window.get("quality") or "MODERADA"),
+        late_peak_candidate=bool(
+            base_phase == "post-peak"
+            and int(age or 0) <= (peak_range[1] + 2)
+            and base_momentum >= 4
+            and str(coach_conf.get("direction") or "stable") == "up"
+        ),
+        recent_minutes_delta_pct=recent_minutes_delta_pct,
+        recent_goal_contributions_delta_pct=recent_goal_contributions_delta_pct,
+        recent_sample_size=recent_sample_size,
+        season_count=season_count,
+        latest_minutes=latest_minutes,
+        latest_primary_metric=latest_primary_metric,
+        evidence_flags=evidence_flags,
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -170,38 +519,21 @@ def get_career_phase_data(player: Any, history_df: pd.DataFrame) -> Dict[str, An
     -------
     dict with keys: career_phase, momentum_score, peak_range, age
     """
-    pos_group = _resolve_position_group(player)
-    peak_range = _PEAK_WINDOWS.get(pos_group, _DEFAULT_PEAK)
-
-    # Age calculation
-    birth = _get_birth_date(player)
-    if birth is None:
+    features = build_career_progression_features(player, history_df)
+    if features.age <= 0:
         return {
             "career_phase": "unknown",
             "momentum_score": 3,
-            "peak_range": peak_range,
+            "peak_range": features.peak_range,
             "age": 0,
         }
 
-    age = _compute_age(birth)
-    peak_start, peak_end = peak_range
-
-    if age < peak_start - 3:
-        career_phase = "development"
-    elif age < peak_start:
-        career_phase = "building"
-    elif age <= peak_end:
-        career_phase = "peak"
-    else:
-        career_phase = "post-peak"
-
-    momentum_score = _compute_momentum_score(pos_group, history_df)
-
     return {
-        "career_phase": career_phase,
-        "momentum_score": momentum_score,
-        "peak_range": peak_range,
-        "age": age,
+        "career_phase": features.base_phase,
+        "momentum_score": features.base_momentum,
+        "peak_range": features.peak_range,
+        "age": features.age,
+        "progression_features": features,
     }
 
 
@@ -211,49 +543,8 @@ def _compute_momentum_score(pos_group: str, history_df: pd.DataFrame) -> int:
     Uses exponential decay (factor 0.6) to weight recent seasons more heavily.
     Defaults to 3 when there is insufficient history or the metric is missing.
     """
-    if history_df is None or history_df.empty or len(history_df) < 2:
-        return 3
-
-    metric = _PRIMARY_METRICS.get(pos_group)
-    if metric is None or metric not in history_df.columns:
-        return 3
-
-    values = history_df[metric].dropna().tolist()
-    if len(values) < 2:
-        return 3
-
-    # Compute weighted YoY deltas (most-recent pair gets highest weight)
-    deltas: List[float] = []
-    weights: List[float] = []
-    for i in range(1, len(values)):
-        prev = values[i - 1]
-        curr = values[i]
-        if prev == 0:
-            continue
-        delta_pct = (curr - prev) / abs(prev) * 100
-        # Decay: most recent pair has weight 1.0; each step back decays by 0.6
-        w = 0.6 ** (len(values) - 1 - i)
-        deltas.append(delta_pct)
-        weights.append(w)
-
-    if not deltas:
-        return 3
-
-    total_w = sum(weights)
-    weighted_delta = sum(d * w for d, w in zip(deltas, weights)) / total_w
-
-    if weighted_delta >= 30:
-        return 5
-    elif weighted_delta >= 15:
-        return 4
-    elif weighted_delta >= -5:
-        return 3
-    elif weighted_delta >= -15:
-        return 2
-    elif weighted_delta >= -30:
-        return 1
-    else:
-        return 0
+    features = build_career_progression_features({"position_main": pos_group}, history_df)
+    return features.base_momentum
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -458,16 +749,6 @@ def get_development_priorities(percentiles_data: Dict[str, int]) -> List[Dict[st
     return result
 
 
-def normalize_evidence_key(evidence_key: str) -> str:
-    key = str(evidence_key or "").strip().lower()
-    return key if key in EVIDENCE_DESTINATIONS else "career_arc"
-
-
-def get_evidence_destination_meta(evidence_key: str) -> Dict[str, str]:
-    key = normalize_evidence_key(evidence_key)
-    return {"key": key, **EVIDENCE_DESTINATIONS[key]}
-
-
 def _extract_percentile(metric_obj: Any) -> Optional[int]:
     if isinstance(metric_obj, dict):
         value = metric_obj.get("percentile")
@@ -493,195 +774,15 @@ def build_fallback_career_dashboard_brief(
     development_priorities: List[Dict[str, Any]],
 ) -> CareerDashboardBrief:
     """Builds a concise, evidence-linked dashboard brief with no AI dependency."""
-    player_name = str(data.get("player_name") or "This player")
-    history_df = data.get("history_df", pd.DataFrame())
-    phase = str(career_phase_data.get("career_phase") or "unknown")
-    momentum = _safe_int(career_phase_data.get("momentum_score") or 3)
-    age = _safe_int(career_phase_data.get("age") or 0)
-    minutes_total = _safe_int(data.get("minutes_played"))
-    goals_total = _safe_int(data.get("goals"))
-    assists_total = _safe_int(data.get("assists"))
+    from utils.domain_ai.career_dashboard_ai import build_fallback_career_dashboard_brief as _build_fallback
 
-    coach_conf = career_signals.get("coach_confidence") or {}
-    transfer_window = career_signals.get("transfer_window") or {}
-    consistency = career_signals.get("consistency_score") or {}
-    direction = coach_conf.get("direction", "stable")
-    delta_pct = coach_conf.get("delta_pct", 0)
-    transfer_quality = str(transfer_window.get("quality") or "MODERADA")
-    consistency_level = str(consistency.get("level") or "MODERADA")
-    latest_season = ""
-    latest_minutes = 0
-    season_count = 0
-    if isinstance(history_df, pd.DataFrame) and not history_df.empty:
-        season_count = len(history_df)
-        latest_season = str(history_df.iloc[-1].get("Season") or "")
-        minutes_col = next((c for c in history_df.columns if "minute" in c.lower()), None)
-        if minutes_col:
-            latest_minutes = _safe_int(history_df.iloc[-1].get(minutes_col))
-
-    trajectory_map = {
-        ("up", 4): ("Consolidating Upward", "Your career is turning improvement into a more stable identity."),
-        ("up", 5): ("Peak Acceleration", "Your career is building upward momentum at the strongest point of your cycle."),
-        ("stable", 3): ("Stable Consolidation", "Your career is holding value, but still needs sharper differentiation."),
-        ("down", 0): ("Pressure Phase", "Your career direction is under pressure and needs a clearer recovery signal."),
-        ("down", 1): ("Stalled Momentum", "Your trajectory is losing force and needs a new growth lever."),
-        ("down", 2): ("Stalled Momentum", "Your trajectory is losing force and needs a new growth lever."),
-    }
-    thesis_label, thesis_body = trajectory_map.get(
-        (direction, momentum),
-        ("Career Progression", "Your career trajectory is still being defined by long-term role and output trends."),
-    )
-    thesis_support = (
-        f"Phase {phase.upper()} · Momentum {momentum}/5 · "
-        f"{minutes_total} total minutes, {goals_total} goals, {assists_total} assists."
-    )
-
-    signals: List[DashboardInsightItem] = []
-    coach_support = (
-        f"Minutes trend is {delta_pct:+.0f}% versus the previous season, which points to a {coach_conf.get('label', 'stable role').lower()}."
-    )
-    coach_body = {
-        "up": "Coach trust is becoming more structural.",
-        "down": "Your role is losing stability across recent seasons.",
-        "stable": "Your role is staying stable, but not clearly strengthening yet.",
-    }.get(direction, "Your role is staying stable, but not clearly strengthening yet.")
-    signals.append(
-        DashboardInsightItem(
-            title="Role Evolution",
-            body=coach_body,
-            support=coach_support,
-            evidence_key="minutes_trend",
-            emphasis="positive" if direction == "up" else ("warning" if direction == "down" else "neutral"),
-            badge_value=f"{delta_pct:+.0f}%",
-            badge_label="vs last season",
-            secondary_value=f"{latest_minutes:,}" if latest_minutes else "—",
-            secondary_label="latest minutes",
-        )
-    )
-
-    consistency_support = (
-        f"Consistency is rated {consistency_level} from your cross-season variability profile."
-    )
-    consistency_body = {
-        "ALTA": "Your career signal is repeatable, not just seasonal.",
-        "BAJA": "Your strongest versions are not stable enough yet.",
-        "MODERADA": "Your level is visible, but still uneven across seasons.",
-    }.get(consistency_level, "Your level is visible, but still uneven across seasons.")
-    signals.append(
-        DashboardInsightItem(
-            title="Consistency",
-            body=consistency_body,
-            support=consistency_support,
-            evidence_key="career_arc",
-            emphasis="positive" if consistency_level == "ALTA" else ("warning" if consistency_level == "BAJA" else "neutral"),
-            badge_value=consistency_level,
-            badge_label="career level",
-            secondary_value=str(season_count or "—"),
-            secondary_label="seasons tracked",
-        )
-    )
-
-    transfer_support = transfer_window.get("rationale") or "Transfer conditions are being evaluated from trajectory and market fit."
-    transfer_body = {
-        "ÓPTIMA": "Your market timing is at a strong strategic point.",
-        "BUENA": "Your market context is improving, but still wants more consolidation.",
-        "MODERADA": "Your career still benefits more from building value than forcing movement.",
-        "BAJA": "This is not yet a strong market window for your profile.",
-    }.get(transfer_quality, "Your career still benefits more from building value than forcing movement.")
-    signals.append(
-        DashboardInsightItem(
-            title="Market Window",
-            body=transfer_body,
-            support=transfer_support,
-            evidence_key="projection_outlook",
-            emphasis="positive" if transfer_quality == "ÓPTIMA" else ("warning" if transfer_quality == "BAJA" else "neutral"),
-            badge_value=transfer_quality,
-            badge_label="window",
-            secondary_value=f"{momentum}/5",
-            secondary_label="momentum",
-        )
-    )
-
-    levers: List[DashboardInsightItem] = []
-    for item in development_priorities[:3]:
-        metric = str(item.get("metric") or "Key metric")
-        percentile = _safe_int(item.get("percentile"))
-        impact = str(item.get("impact") or "medio")
-        action = str(item.get("action") or "mejorar")
-        if action == "mejorar":
-            body = f"Your next growth lever is improving {metric.lower()}."
-            support = (
-                f"{metric} sits around the {percentile}th percentile, with {impact} estimated impact on role growth."
-            )
-            evidence_key = "percentile_profile"
-            emphasis = "warning" if impact == "alto" else "neutral"
-        else:
-            body = f"{metric} is already supporting your long-term profile."
-            support = (
-                f"{metric} sits around the {percentile}th percentile and is worth protecting as a stable strength."
-            )
-            evidence_key = "tactical_dna"
-            emphasis = "positive"
-            levers.append(
-                DashboardInsightItem(
-                    title=metric,
-                    body=body,
-                    support=support,
-                    evidence_key=evidence_key,
-                    emphasis=emphasis,
-                    badge_value=f"P{percentile}",
-                    badge_label="percentile",
-                    secondary_value=impact.upper(),
-                    secondary_label="impact",
-                )
-            )
-
-    if not levers:
-        levers.append(
-            DashboardInsightItem(
-                title="Career Leverage",
-                body="Your next leap will come from turning stable minutes into clearer separation.",
-                support="There is not enough ranked percentile data to surface a sharper lever yet.",
-                evidence_key="career_arc",
-                emphasis="neutral",
-                badge_value=f"{momentum}/5",
-                badge_label="momentum",
-                secondary_value=f"{minutes_total:,}" if minutes_total else "—",
-                secondary_label="career minutes",
-            )
-        )
-
-    if transfer_quality == "ÓPTIMA":
-        outlook_label = "Push"
-        outlook_body = "Your current trajectory supports a more aggressive next-step strategy."
-    elif direction == "up" and consistency_level == "ALTA":
-        outlook_label = "Consolidate"
-        outlook_body = "You are in a strong value-building phase and should reinforce repeatability."
-    elif direction == "down":
-        outlook_label = "Reposition"
-        outlook_body = "The next step is to recover role strength before treating market timing as the priority."
-    else:
-        outlook_label = "Build"
-        outlook_body = "The next 1–2 seasons should focus on strengthening identity and separation."
-
-    outlook_support = (
-        f"Phase {phase.upper()} at age {age or '—'} with momentum {momentum}/5 and transfer window {transfer_quality}."
-    )
-
-    return CareerDashboardBrief(
-        career_thesis={
-            "label": thesis_label,
-            "body": thesis_body,
-            "support": thesis_support,
-        },
-        signals=signals[:3],
-        levers=levers[:3],
-        outlook={
-            "label": outlook_label,
-            "body": outlook_body,
-            "support": outlook_support,
-            "evidence_key": "projection_outlook" if transfer_quality in {"ÓPTIMA", "BUENA"} else "career_arc",
-        },
+    return _build_fallback(
+        CareerDashboardBrief,
+        DashboardInsightItem,
+        data,
+        career_phase_data,
+        career_signals,
+        development_priorities,
     )
 
 
@@ -698,66 +799,17 @@ def build_career_dashboard_brief(
     The current implementation always falls back to deterministic synthesis unless a
     future AI payload cleanly matches the expected shape.
     """
-    fallback = build_fallback_career_dashboard_brief(
+    from utils.domain_ai.career_dashboard_ai import build_career_dashboard_brief as _build_brief
+
+    return _build_brief(
+        CareerDashboardBrief,
+        DashboardInsightItem,
         data,
         career_phase_data,
         career_signals,
         development_priorities,
+        ai_payload=ai_payload,
     )
-    if not isinstance(ai_payload, dict):
-        return fallback
-
-    try:
-        thesis = ai_payload.get("career_thesis") or {}
-        signals_payload = ai_payload.get("signals") or []
-        levers_payload = ai_payload.get("levers") or []
-        outlook = ai_payload.get("outlook") or {}
-        if not thesis or not outlook:
-            return fallback
-
-        def _build_items(items: Any, default_items: List[DashboardInsightItem]) -> List[DashboardInsightItem]:
-            built: List[DashboardInsightItem] = []
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                title = str(item.get("title") or "").strip()
-                body = str(item.get("body") or "").strip()
-                support = str(item.get("support") or "").strip()
-                evidence_key = normalize_evidence_key(item.get("evidence_key") or "")
-                if not (title and body and support):
-                    continue
-                built.append(
-                    DashboardInsightItem(
-                        title=title,
-                        body=body,
-                        support=support,
-                        evidence_key=evidence_key,
-                        emphasis=str(item.get("emphasis") or "neutral"),
-                        badge_value=str(item.get("badge_value") or ""),
-                        badge_label=str(item.get("badge_label") or ""),
-                        secondary_value=str(item.get("secondary_value") or ""),
-                        secondary_label=str(item.get("secondary_label") or ""),
-                    )
-                )
-            return built or default_items
-
-        return CareerDashboardBrief(
-            career_thesis={
-                "label": str(thesis.get("label") or fallback.career_thesis["label"]),
-                "body": str(thesis.get("body") or fallback.career_thesis["body"]),
-                "support": str(thesis.get("support") or fallback.career_thesis["support"]),
-            },
-            signals=_build_items(signals_payload, fallback.signals),
-            levers=_build_items(levers_payload, fallback.levers),
-            outlook={
-                "label": str(outlook.get("label") or fallback.outlook["label"]),
-                "body": str(outlook.get("body") or fallback.outlook["body"]),
-                "support": str(outlook.get("support") or fallback.outlook["support"]),
-                "evidence_key": normalize_evidence_key(outlook.get("evidence_key") or fallback.outlook.get("evidence_key")),
-            },
-        )
-    except Exception:
-        return fallback
 
 
 # ──────────────────────────────────────────────────────────────────────────────

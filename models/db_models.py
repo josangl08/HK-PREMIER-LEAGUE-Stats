@@ -134,6 +134,8 @@ class Player(Base):
     id: Mapped[str] = mapped_column(String(100), primary_key=True) # Slug e.g. "eduardo-praes"
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     tm_id: Mapped[Optional[int]] = mapped_column(Integer) # Transfermarkt ID
+    besoccer_id: Mapped[Optional[str]] = mapped_column(String(100)) # BeSoccer ID
+    sofascore_id: Mapped[Optional[int]] = mapped_column(Integer) # Sofascore ID
     
     nationality: Mapped[Optional[str]] = mapped_column(String(100)) # Pasaporte/Nacionalidad deportiva
     birth_country: Mapped[Optional[str]] = mapped_column(String(100)) # Lugar de nacimiento real

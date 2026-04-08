@@ -206,6 +206,7 @@ def run(dry_run: bool = False) -> None:
                     nationality=player.nationality or player.birth_country or "",
                     birth_year=birth_year,
                     position=hint_positions,
+                    team_id=player.current_team_id or "",
                 )
                 if not found:
                     logger.warning(f"    Could not resolve tm_id for {player.name!r} — skipping.")
