@@ -66,10 +66,17 @@ def get_team_assets(team_id: str) -> Dict[str, Optional[str]]:
     if not stadium_path.exists():
         stadium_path = Path(ASSETS_ROOT) / "team_media" / prefix / "stadium_thumb.jpg"
 
+    # 3. Logo
+    logo_path = Path(ASSETS_ROOT) / "team_logos" / f"{prefix}.png"
+    if not logo_path.exists():
+        # Try team_id as fallback
+        logo_path = Path(ASSETS_ROOT) / "team_logos" / f"{team_id}.png"
+
     return {
         "home_jersey": str(home_j) if home_j.exists() else None,
         "away_jersey": str(away_j) if away_j.exists() else None,
-        "stadium": str(stadium_path) if stadium_path.exists() else None
+        "stadium": str(stadium_path) if stadium_path.exists() else None,
+        "logo_png": str(logo_path) if logo_path.exists() else None
     }
 
 # --- Core Functions ---

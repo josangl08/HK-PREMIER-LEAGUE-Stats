@@ -82,7 +82,7 @@ AI_DEFAULTS = {
     "worker": {
         "primary": "gemini-3-flash-preview",
         "fallback_1": "gemini-2.5-flash",
-        "fallback_2": "gemini-2.0-flash",
+        "fallback_2": "gemini-2.5-flash-lite-preview-06-17",
         "temperature": 0.7,
     },
     "researcher": {

@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 import random
 import time
+import json
 from pathlib import Path
 from typing import Dict, Optional, Sequence
 
@@ -15,6 +16,7 @@ from playwright_stealth import Stealth
 
 from data.extractors.transfermarkt_extractor import TransfermarktExtractor
 from utils.proxy_manager import ProxyManager
+from data.managers.transfermarkt_runtime_manager import TransfermarktRuntimeManager
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +55,7 @@ class TransfermarktPlaywrightExtractor(TransfermarktExtractor):
         self._page: Optional[Page] = None
         self._pending_cookies: list[Dict] = []  # cookies to inject after launch
         self._active_proxy: Optional[str] = None  # proxy used by current browser session
+        self._runtime = TransfermarktRuntimeManager()
 
     # ------------------------------------------------------------------ #
     # Browser lifecycle                                                    #
@@ -62,6 +65,17 @@ class TransfermarktPlaywrightExtractor(TransfermarktExtractor):
         """Lazily launch browser and return the shared page."""
         if self._page is not None and proxy_url == self._active_proxy:
             return self._page
+        
+        # Check for assisted cookies in DB before launching
+        cookie_payload = self._runtime.get_cookie_payload()
+        if cookie_payload:
+            try:
+                cookies = json.loads(cookie_payload)
+                self.load_cookie_jar(cookies)
+                logger.info("TransfermarktPlaywrightExtractor: Loaded assisted session cookies from DB.")
+            except Exception as e:
+                logger.warning(f"TransfermarktPlaywrightExtractor: Failed to parse assisted cookies: {e}")
+
         # Proxy changed or first launch — (re)start browser.
         if self._page is not None:
             self._teardown_browser()
@@ -71,7 +85,7 @@ class TransfermarktPlaywrightExtractor(TransfermarktExtractor):
 
         self._pw = sync_playwright().start()
         launch_kwargs: Dict = dict(
-            headless=True,
+            headless=False,  # CAMBIO CRITICO: Modo visible para parecer 100% humano
             args=[
                 "--no-sandbox",
                 "--disable-blink-features=AutomationControlled",
@@ -190,6 +204,27 @@ class TransfermarktPlaywrightExtractor(TransfermarktExtractor):
     # Core request method — uses Playwright instead of CloudScraper        #
     # ------------------------------------------------------------------ #
 
+    def _simulate_human_interaction(self, page: Page) -> None:
+        """Simulates human-like mouse movements and scrolling."""
+        try:
+            # 1. Random mouse movements
+            for _ in range(random.randint(3, 7)):
+                x = random.randint(100, 1000)
+                y = random.randint(100, 600)
+                page.mouse.move(x, y, steps=random.randint(10, 25))
+                time.sleep(random.uniform(0.1, 0.4))
+
+            # 2. Random scrolling
+            for _ in range(random.randint(2, 4)):
+                scroll_y = random.randint(200, 800)
+                page.evaluate(f"window.scrollBy(0, {scroll_y})")
+                time.sleep(random.uniform(0.5, 1.5))
+            
+            # Scroll back up a bit
+            page.evaluate("window.scrollTo(0, 0)")
+        except Exception as e:
+            logger.debug(f"Human interaction simulation failed: {e}")
+
     def _make_request(self, url: str) -> Optional[BeautifulSoup]:
         proxy_url = self.proxy_manager.get_proxy() if self.proxy_manager.has_proxies else None
         try:
@@ -201,11 +236,17 @@ class TransfermarktPlaywrightExtractor(TransfermarktExtractor):
             self.last_result_source = "network"
             self.last_cache_fresh = False
 
+            # Realistic navigation: sometimes go to home page first if we were blocked
+            if self.request_count % 15 == 0:
+                page.goto("https://www.transfermarkt.com", wait_until="domcontentloaded", timeout=30_000)
+                time.sleep(random.uniform(2, 5))
+
             response = page.goto(url, wait_until="domcontentloaded", timeout=30_000)
             self.last_http_status = response.status if response else None
 
-            # Brief pause for JS-rendered content to settle.
-            time.sleep(random.uniform(1.0, 2.0))
+            # Simulation of human reading/scrolling
+            self._simulate_human_interaction(page)
+            time.sleep(random.uniform(2.0, 4.0))
 
             html = page.content()
 
@@ -214,11 +255,27 @@ class TransfermarktPlaywrightExtractor(TransfermarktExtractor):
                 self.last_block_type = "AWS_WAF_HUMAN_VERIFICATION"
                 self.last_block_reason = protection_reason
                 logger.warning("Transfermarkt protection page (Playwright) for %s: %s", url, protection_reason)
-                if proxy_url:
-                    self.proxy_manager.mark_failure(proxy_url)
-                    # Force browser restart with next proxy on the following request.
-                    self._teardown_browser()
-                return None
+                
+                # Si estamos en modo visible, esperar a que el usuario resuelva el captcha
+                # El usuario debe resolverlo y presionar Enter en la terminal
+                print("\n" + "!"*60)
+                print("CAPTCHA DETECTADO por Transfermarkt.")
+                print(f"URL: {url}")
+                print("Por favor, resuélvelo manualmente en la ventana del navegador.")
+                print("Una vez resuelto y que veas el contenido, presiona ENTER aquí para continuar...")
+                print("!"*60 + "\n")
+                input("Presiona ENTER para reintentar la extracción...")
+                
+                # Reintentar una vez después de la intervención humana
+                response = page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                self._simulate_human_interaction(page)
+                html = page.content()
+                if self._detect_protection_page(html):
+                    if proxy_url:
+                        self.proxy_manager.mark_failure(proxy_url)
+                        self._teardown_browser()
+                    return None
+                return BeautifulSoup(html, "html.parser")
 
             if self.last_http_status and self.last_http_status >= 400:
                 logger.error("HTTP %s for %s", self.last_http_status, url)

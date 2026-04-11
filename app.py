@@ -1,3 +1,6 @@
+# ABOUTME: Dash application bootstrap for the Hong Kong Premier League dashboard.
+# ABOUTME: Initializes shared services, registers callbacks, and defines the root layout.
+
 import os
 from dotenv import load_dotenv
 load_dotenv()
@@ -107,15 +110,33 @@ def load_user_from_id(user_id):
 # Solo debemos inicializar en el proceso hijo (cuando WERKZEUG_RUN_MAIN=true)
 # ==============================================================================
 
-def is_werkzeug_reloader_process():
-    """Verifica si estamos en el proceso padre del reloader de Werkzeug."""
-    return os.environ.get('WERKZEUG_RUN_MAIN') != 'true'
+def is_werkzeug_reloader_parent():
+    """Detecta solo el proceso padre del reloader de Werkzeug."""
+    return os.environ.get("WERKZEUG_RUN_MAIN") == "false"
 
 # Placeholders para el proceso padre
 _player_options = []
 
-# Solo inicializar si NO estamos en el proceso padre del reloader
-if not is_werkzeug_reloader_process():
+class DummyDataManager:
+    """Fallback defensivo para mantener la app funcional si el gestor real falla."""
+
+    def __getattr__(self, name):
+        def method(*args, **kwargs):
+            logger.error(
+                f"Llamada a '{name}' en DataManager dummy debido a un error de inicialización."
+            )
+            return {} if "get" in name or "status" in name else []
+
+        return method
+
+
+data_manager = DummyDataManager()
+
+
+# Inicializamos siempre salvo en el proceso padre del reloader.
+# Si la app se ejecuta sin reloader, WERKZEUG_RUN_MAIN no existe y la app
+# debe registrar callbacks y servicios igualmente.
+if not is_werkzeug_reloader_parent():
     logger.info("Inicializando el gestor de datos y autenticación...")
     
     # Sincronizar administrador desde .env
@@ -134,12 +155,6 @@ if not is_werkzeug_reloader_process():
             logger.info("✓ Datos iniciales refrescados y listos.")
     except Exception as e:
         logger.critical(f"❌ Error fatal al inicializar DataManager: {e}", exc_info=True)
-        class DummyDataManager:
-            def __getattr__(self, name):
-                def method(*args, **kwargs):
-                    logger.error(f"Llamada a '{name}' en DataManager dummy debido a un error de inicialización.")
-                    return {} if "get" in name or "status" in name else []
-                return method
         data_manager = DummyDataManager()
 
     # ==============================================================================

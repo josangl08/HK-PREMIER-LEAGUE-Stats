@@ -145,7 +145,7 @@ def label_archetypes(
                 best_label = archetype_label
 
         labels.append(best_label if best_label else f"Cluster {i}")
-        logger.info(f"Cluster {i} top features: {top5_features} -> '{labels[-1]}'")
+        logger.debug(f"Cluster {i} top features: {top5_features} -> '{labels[-1]}'")
 
     return labels
 
@@ -159,7 +159,7 @@ def fit_kmeans(X: np.ndarray, k: int, feature_lens: str = "overall", feature_nam
     lens_features = FEATURE_LENSES.get(feature_lens.lower(), [])
     if lens_features:
         indices = [i for i, f in enumerate(feature_names) if any(lf in str(f).lower() for lf in lens_features)]
-        logger.info(f"fit_kmeans: Using lens '{feature_lens}' filtering to {len(indices)} features.")
+        logger.debug(f"fit_kmeans: Using lens '{feature_lens}' filtering to {len(indices)} features.")
     else:
         # 2. Positional Z-Score Selection (Fallback)
         indices = [i for i, f in enumerate(feature_names) if "_zscore_positional" in str(f)]

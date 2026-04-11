@@ -5,26 +5,34 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import re
 from dataclasses import asdict, is_dataclass
+from difflib import SequenceMatcher
 from typing import Any, Dict, List
 
 import pandas as pd
 
 from utils.ai_services.llm_client import (
     generate_gemini_content_with_status,
-    get_dashboard_brief_model_candidates,
+    get_career_dashboard_model_candidates,
     gemini_is_available,
 )
 from utils.ai_services.orchestration import parse_structured_json, validate_payload_collection
-from utils.ai_services.prompt_builders import build_career_dashboard_synthesis_prompt
+from utils.ai_services.prompt_builders import (
+    build_career_dashboard_synthesis_prompt,
+)
 from utils.ai_services.evidence_router import normalize_evidence_key
 from utils.ai_services.validators import (
     InsightPayload,
     build_fallback_insight_payload,
     coerce_insight_payload,
 )
+from utils.domain_ai.career_facts import build_career_intelligence_facts
 
-_CAREER_DASHBOARD_AI_CACHE_VERSION = "v5"
+logger = logging.getLogger(__name__)
+
+_CAREER_DASHBOARD_AI_CACHE_VERSION = "v19"
 _CAREER_DASHBOARD_LLM_CACHE_TIMEOUT_SECONDS = 60 * 60 * 24 * 30
 _CAREER_DASHBOARD_FALLBACK_CACHE_TIMEOUT_SECONDS = 60 * 60
 _SPECIFIC_CAREER_THESIS_LABELS = {
@@ -41,6 +49,44 @@ _GENERIC_CAREER_THESIS_LABELS = {
     "Career Progression",
     "Career Thesis",
     "Progression",
+}
+_GENERIC_SIGNAL_TITLES = {
+    "proven track record",
+    "maintaining momentum",
+    "recent performance dip",
+    "career stability",
+    "career value",
+    "career role",
+    "career phase",
+    "recent warning",
+}
+_BANNED_COPY_FRAGMENTS = {
+    "actively influencing matches",
+    "vital to regain your rhythm quickly",
+    "overall career stats",
+    "competitive settings",
+    "stronger next step",
+    "profile separation",
+    "trajectory",
+    "volatility",
+    "defensive_wall",
+    "this is the clearest area to work on if you want the next step to come faster",
+    "beyond the usual peak window",
+    "holding real competitive value",
+    "the role side needs to recover first",
+    "threatens to undermine the progress",
+    "throughout the rest of the season",
+    "defying the typical post-peak decline",
+    "significant output and influence on the pitch",
+    "plenty to offer",
+    "maintain your current standing",
+    "get your footing back before thinking bigger",
+    "real weight",
+    "carries enough weight",
+    "reliable track record",
+}
+_GENERIC_UNLOCKS = {
+    "more trust, more starts, and a stronger next step",
 }
 
 
@@ -60,6 +106,149 @@ def _safe_float(value: Any) -> float:
 
 def _format_signed_pct(value: float) -> str:
     return f"{value:+.1f}%"
+
+
+def _format_ordinal(value: Any) -> str:
+    number = _safe_int(value)
+    if 10 <= number % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(number % 10, "th")
+    return f"{number}{suffix}"
+
+
+def _normalize_rewrite_text(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
+def _contains_banned_copy(value: Any) -> bool:
+    normalized = _normalize_rewrite_text(value)
+    return any(fragment in normalized for fragment in _BANNED_COPY_FRAGMENTS)
+
+
+def _contains_bad_ordinal(value: Any) -> bool:
+    normalized = _normalize_rewrite_text(value)
+    return bool(re.search(r"\b\d+th percentile\b", normalized) and not re.search(r"\b(?:4|5|6|7|8|9|0|11|12|13)th percentile\b", normalized))
+
+
+def _is_generic_signal_title(value: Any) -> bool:
+    return _normalize_rewrite_text(value) in _GENERIC_SIGNAL_TITLES
+
+
+def _payload_passes_quality_gate(payload: InsightPayload, fallback_payload: InsightPayload, *, item_kind: str) -> bool:
+    texts = [payload.label, payload.body, payload.support]
+    if any(not str(text or "").strip() for text in texts):
+        return False
+    if any(_contains_banned_copy(text) for text in texts):
+        return False
+    if any(_contains_bad_ordinal(text) for text in texts):
+        return False
+    if item_kind == "signal":
+        if _is_generic_signal_title(payload.label):
+            return False
+    if item_kind == "lever":
+        if str(payload.label or "").strip().lower().startswith("career lever"):
+            return False
+        if _normalize_rewrite_text(payload.support) in _GENERIC_UNLOCKS:
+            return False
+        metadata = payload.metadata or {}
+        secondary_value = str(metadata.get("secondary_value") or "")
+        if secondary_value and _normalize_rewrite_text(secondary_value) in _GENERIC_UNLOCKS:
+            return False
+    similarity = _rewrite_similarity(payload.body, fallback_payload.body)
+    if similarity > 0.96:
+        return False
+    return True
+
+
+def _outlook_passes_quality_gate(ai_outlook: Dict[str, Any], fallback_outlook: Dict[str, Any]) -> bool:
+    texts = [
+        ai_outlook.get("label"),
+        ai_outlook.get("body"),
+        ai_outlook.get("support"),
+    ]
+    if any(not str(text or "").strip() for text in texts):
+        return False
+    if any(_contains_banned_copy(text) for text in texts):
+        return False
+    if _rewrite_similarity(ai_outlook.get("body"), fallback_outlook.get("body")) > 0.96:
+        return False
+    if _rewrite_similarity(ai_outlook.get("support"), fallback_outlook.get("support")) > 0.96:
+        return False
+    return True
+
+
+def _career_thesis_passes_quality_gate(ai_thesis: Dict[str, Any], fallback_thesis: Dict[str, Any]) -> bool:
+    texts = [
+        ai_thesis.get("label"),
+        ai_thesis.get("body"),
+        ai_thesis.get("support"),
+        ai_thesis.get("explanation"),
+    ]
+    if any(not str(text or "").strip() for text in texts[:3]):
+        return False
+    if any(_contains_banned_copy(text) for text in texts if text is not None):
+        return False
+    if _rewrite_similarity(ai_thesis.get("body"), fallback_thesis.get("body")) > 0.96:
+        return False
+    return True
+
+
+def _rewrite_similarity(left: Any, right: Any) -> float:
+    normalized_left = _normalize_rewrite_text(left)
+    normalized_right = _normalize_rewrite_text(right)
+    if not normalized_left or not normalized_right:
+        return 0.0
+    return SequenceMatcher(None, normalized_left, normalized_right).ratio()
+
+
+def _log_rewrite_similarity(player_name: str, fallback: Any, ai_payload: Dict[str, Any]) -> None:
+    thesis = ai_payload.get("career_thesis") if isinstance(ai_payload.get("career_thesis"), dict) else {}
+    thesis_similarity = _rewrite_similarity(
+        (fallback.career_thesis or {}).get("body"),
+        thesis.get("body"),
+    )
+
+    signal_scores: List[float] = []
+    raw_signals = ai_payload.get("signals") if isinstance(ai_payload.get("signals"), list) else []
+    for idx, raw_signal in enumerate(raw_signals):
+        if idx >= len(getattr(fallback, "signals", [])) or not isinstance(raw_signal, dict):
+            continue
+        signal_scores.append(
+            _rewrite_similarity(
+                getattr(fallback.signals[idx], "body", ""),
+                raw_signal.get("body"),
+            )
+        )
+
+    lever_scores: List[float] = []
+    raw_levers = ai_payload.get("levers") if isinstance(ai_payload.get("levers"), list) else []
+    for idx, raw_lever in enumerate(raw_levers):
+        if idx >= len(getattr(fallback, "levers", [])) or not isinstance(raw_lever, dict):
+            continue
+        lever_scores.append(
+            _rewrite_similarity(
+                getattr(fallback.levers[idx], "body", ""),
+                raw_lever.get("body"),
+            )
+        )
+
+    outlook = ai_payload.get("outlook") if isinstance(ai_payload.get("outlook"), dict) else {}
+    outlook_similarity = _rewrite_similarity(
+        (fallback.outlook or {}).get("body"),
+        outlook.get("body"),
+    )
+
+    logger.info(
+        "[CAREER_DASHBOARD_AI_REWRITE] player=%s thesis_similarity=%.2f signals_avg_similarity=%.2f levers_avg_similarity=%.2f outlook_similarity=%.2f",
+        player_name or "unknown",
+        thesis_similarity,
+        (sum(signal_scores) / len(signal_scores)) if signal_scores else 0.0,
+        (sum(lever_scores) / len(lever_scores)) if lever_scores else 0.0,
+        outlook_similarity,
+    )
 
 
 def _translate_consistency_level(value: str) -> str:
@@ -169,6 +358,8 @@ def _build_career_thesis_factors(
     consistency_level = str(consistency.get("level") or features.get("consistency_level") or "MODERADA")
     recent_minutes_delta_pct = _safe_float(features.get("recent_minutes_delta_pct"))
     recent_goal_contributions_delta_pct = _safe_float(features.get("recent_goal_contributions_delta_pct"))
+    recent_metric_label = str(features.get("recent_metric_label") or "Goal contribution")
+    recent_metric_delta_pct = _safe_float(features.get("recent_metric_delta_pct") or recent_goal_contributions_delta_pct)
     recent_sample_size = _safe_int(features.get("recent_sample_size"))
 
     if primary_metric and primary_metric_trend_pct >= 12:
@@ -202,20 +393,20 @@ def _build_career_thesis_factors(
         elif recent_minutes_delta_pct <= -10:
             _risk(abs(recent_minutes_delta_pct), "Minutes trend", _format_signed_pct(recent_minutes_delta_pct), "minutes_trend", "last5")
 
-        if recent_goal_contributions_delta_pct >= 10:
+        if recent_metric_label and recent_metric_delta_pct >= 10:
             _driver(
-                abs(recent_goal_contributions_delta_pct),
-                "Goal contribution",
-                _format_signed_pct(recent_goal_contributions_delta_pct),
-                "career_arc",
+                abs(recent_metric_delta_pct),
+                recent_metric_label,
+                _format_signed_pct(recent_metric_delta_pct),
+                "recent_form",
                 "last5",
             )
-        elif recent_goal_contributions_delta_pct <= -10:
+        elif recent_metric_label and recent_metric_delta_pct <= -10:
             _risk(
-                abs(recent_goal_contributions_delta_pct),
-                "Goal contribution",
-                _format_signed_pct(recent_goal_contributions_delta_pct),
-                "career_arc",
+                abs(recent_metric_delta_pct),
+                recent_metric_label,
+                _format_signed_pct(recent_metric_delta_pct),
+                "recent_form",
                 "last5",
             )
 
@@ -238,6 +429,536 @@ def _build_career_thesis_factors(
     return {"drivers": drivers, "risks": risks}
 
 
+def _format_count(value: Any) -> str:
+    return f"{_safe_int(value):,}"
+
+
+def _format_pct_value(value: float) -> str:
+    return f"{abs(value):.0f}%"
+
+
+def _is_meaningful_total(value: int, threshold: int) -> bool:
+    return value >= threshold
+
+
+def _format_season_span(season_count: int) -> str:
+    if season_count <= 1:
+        return "your tracked career"
+    return f"{season_count} tracked seasons"
+
+
+def _format_regular_seasons(regular_seasons: int, season_count: int) -> str:
+    if not season_count:
+        return "your tracked seasons"
+    return f"{regular_seasons} of {season_count} tracked seasons"
+
+
+def _season_span_weight_label(season_count: int) -> str:
+    if season_count >= 8:
+        return "More than one good year"
+    if season_count >= 5:
+        return "Built over time"
+    if season_count >= 3:
+        return "A base worth building on"
+    return "Early body of work"
+
+
+def _build_career_signal_candidates(
+    data: Dict[str, Any],
+    career_phase_data: Dict[str, Any],
+    career_signals: Dict[str, Any],
+    development_priorities: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Builds a ranked pool of career-facing signal candidates."""
+    history_df = data.get("history_df", pd.DataFrame())
+    features = _extract_progression_features(career_phase_data)
+    phase = str(career_phase_data.get("career_phase") or "unknown")
+    momentum = _safe_int(career_phase_data.get("momentum_score") or 3)
+    age = _safe_int(career_phase_data.get("age") or features.get("age") or data.get("age"))
+    goals_total = _safe_int(data.get("goals"))
+    assists_total = _safe_int(data.get("assists"))
+    minutes_total = _safe_int(data.get("minutes_played"))
+    season_count = _safe_int(features.get("season_count") or (len(history_df) if isinstance(history_df, pd.DataFrame) else 0))
+
+    coach_conf = career_signals.get("coach_confidence") or {}
+    transfer_window = career_signals.get("transfer_window") or {}
+    consistency = career_signals.get("consistency_score") or {}
+
+    direction = str(coach_conf.get("direction") or "stable")
+    delta_pct = _safe_float(coach_conf.get("delta_pct") or 0)
+    regular_share = _safe_float(coach_conf.get("season_regular_share") or 0.0)
+    regular_seasons = _safe_int(coach_conf.get("regular_seasons") or 0)
+    baseline_minutes = _safe_int(coach_conf.get("baseline_minutes") or 0)
+    transfer_quality = str(transfer_window.get("quality") or "MODERADA")
+    consistency_level = str(consistency.get("level") or "MODERADA")
+    recent_sample_size = _safe_int(features.get("recent_sample_size"))
+    recent_minutes_delta_pct = _safe_float(features.get("recent_minutes_delta_pct"))
+    recent_output_delta_pct = _safe_float(features.get("recent_goal_contributions_delta_pct"))
+    recent_metric_label = str(features.get("recent_metric_label") or "")
+    recent_metric_delta_pct = _safe_float(features.get("recent_metric_delta_pct"))
+    if not recent_metric_label and abs(recent_output_delta_pct) > 0:
+        recent_metric_label = "Goal contribution"
+        recent_metric_delta_pct = recent_output_delta_pct
+    latest_minutes = _safe_int(features.get("latest_minutes"))
+    peak_range = career_phase_data.get("peak_range") or features.get("peak_range") or []
+    position_group = str(data.get("pos_group") or features.get("position_group") or "").strip()
+    latest_season = ""
+    if isinstance(history_df, pd.DataFrame) and not history_df.empty and "Season" in history_df.columns:
+        latest_season = str(history_df.iloc[-1].get("Season") or "")
+    season_span_text = _format_season_span(season_count)
+    regular_seasons_text = _format_regular_seasons(regular_seasons, season_count)
+    player_context = f"as a {position_group.lower()}" if position_group else ""
+
+    candidates: List[Dict[str, Any]] = []
+
+    def _candidate(
+        *,
+        score: float,
+        family: str,
+        horizon: str,
+        label: str,
+        body: str,
+        support: str,
+        evidence_key: str,
+        emphasis: str,
+        badge_value: str = "",
+        badge_label: str = "",
+        secondary_value: str = "",
+        secondary_label: str = "",
+        confidence: str = "medium",
+        framing_hint: str = "",
+        focus_metric: str = "",
+    ) -> None:
+        candidates.append(
+            {
+                "score": score,
+                "family": family,
+                "horizon": horizon,
+                "payload": build_fallback_insight_payload(
+                    label=label,
+                    body=body,
+                    support=support,
+                    confidence=confidence,
+                    evidence_key=evidence_key,
+                    emphasis=emphasis,
+                    metadata={
+                        "badge_value": badge_value,
+                        "badge_label": badge_label,
+                        "secondary_value": secondary_value,
+                        "secondary_label": secondary_label,
+                        "framing_hint": framing_hint,
+                        "focus_metric": focus_metric,
+                    },
+                ),
+            }
+        )
+
+    if direction == "up" and delta_pct >= 10:
+        _candidate(
+            score=0.88,
+            family="role",
+            horizon="season",
+            label="Role growing again",
+            body=(
+                f"Your role is strengthening again {player_context}, and that gives the next part of your career more backing."
+            ),
+            support=(
+                f"You have held regular playing time in {regular_seasons_text}, and your latest season"
+                f"{' (' + latest_season + ')' if latest_season else ''} sits {_format_pct_value(delta_pct)} above your usual career minutes."
+            ),
+            evidence_key="minutes_trend",
+            emphasis="positive",
+            badge_value=f"+{_format_pct_value(delta_pct)}",
+            badge_label="vs career baseline",
+            secondary_value=_format_count(latest_minutes) if latest_minutes else "—",
+            secondary_label="latest minutes",
+            confidence="high",
+            framing_hint="opportunity",
+        )
+    elif direction == "down" and delta_pct <= -10:
+        _candidate(
+            score=0.90,
+            family="role",
+            horizon="season",
+            label="Role has slipped",
+            body=(
+                f"Your minutes have dropped away from the level you had built across {season_span_text}, and that puts more pressure on your next step."
+            ),
+            support=(
+                f"You have been a regular in {regular_seasons_text}, but your latest season"
+                f"{' (' + latest_season + ')' if latest_season else ''} now sits {_format_pct_value(delta_pct)} below your usual career minutes."
+            ),
+            evidence_key="minutes_trend",
+            emphasis="warning",
+            badge_value=f"-{_format_pct_value(delta_pct)}",
+            badge_label="vs career baseline",
+            secondary_value=_format_count(latest_minutes) if latest_minutes else "—",
+            secondary_label="latest minutes",
+            confidence="high",
+            framing_hint="warning",
+        )
+    else:
+        _candidate(
+            score=0.55,
+            family="role",
+            horizon="season",
+            label="Role holding steady",
+            body=(
+                "Your role is holding close to its usual level, but it is not yet pushing your career forward again."
+            ),
+            support=(
+                f"You have held regular minutes in {max(regular_seasons, 1)} of {season_count or 'multiple'} tracked seasons, "
+                f"with {baseline_minutes:,} as your usual career baseline."
+            ) if baseline_minutes else "Your playing time is holding close to its usual career level.",
+            evidence_key="minutes_trend",
+            emphasis="neutral",
+            badge_value=coach_conf.get("label") or "Stable",
+            badge_label="role signal",
+            secondary_value=_format_count(latest_minutes) if latest_minutes else "—",
+            secondary_label="latest minutes",
+            framing_hint="checkpoint",
+        )
+
+    if consistency_level == "ALTA":
+        _candidate(
+            score=0.86,
+            family="consistency",
+            horizon="career",
+            label="Level you can rely on",
+            body=(
+                f"Across {season_span_text}, your level has stayed steady instead of coming from one short spell."
+            ),
+            support=f"Your performance profile has held steady across {season_span_text}.",
+            evidence_key="career_trend",
+            emphasis="positive",
+            badge_value="HIGH",
+            badge_label="stability",
+            secondary_value=str(season_count or "—"),
+            secondary_label="seasons tracked",
+            confidence="high",
+            framing_hint="recognition",
+        )
+    elif consistency_level == "BAJA":
+        _candidate(
+            score=0.74,
+            family="consistency",
+            horizon="career",
+            label="Too many swings",
+            body=(
+                f"Across {season_span_text}, you have shown good highs, but the overall level has moved around too much."
+            ),
+            support=f"Your performance profile has moved up and down across {season_span_text}.",
+            evidence_key="career_trend",
+            emphasis="warning",
+            badge_value="LOW",
+            badge_label="stability",
+            secondary_value=str(season_count or "—"),
+            secondary_label="seasons tracked",
+            confidence="medium",
+            framing_hint="checkpoint",
+        )
+
+    if recent_sample_size >= 10 and recent_metric_label and recent_metric_delta_pct >= 15:
+        _candidate(
+            score=0.82,
+            family="recent_form",
+            horizon="last5",
+            label="Recent push",
+            body=(
+                f"Your last 5 matches are giving your career trend fresh energy through stronger {recent_metric_label.lower()}."
+            ),
+            support=f"{recent_metric_label} is up {_format_pct_value(recent_metric_delta_pct)} per 90 across your last 5 matches compared with the previous 5.",
+            evidence_key="recent_form",
+            emphasis="positive",
+            badge_value=f"+{_format_pct_value(recent_metric_delta_pct)}",
+            badge_label="last 5 impact",
+            secondary_value=str(recent_sample_size),
+            secondary_label="matches compared",
+            confidence="medium",
+            framing_hint="opportunity",
+        )
+    elif recent_sample_size >= 10 and recent_metric_label and recent_metric_delta_pct <= -15:
+        _candidate(
+            score=0.80,
+            family="recent_form",
+            horizon="last5",
+            label="Recent dip to watch",
+            body=(
+                f"The last 5 matches have dipped in {recent_metric_label.lower()}, and that matters because your recent level is now below your usual standard."
+            ),
+            support=f"{recent_metric_label} is down {_format_pct_value(recent_metric_delta_pct)} per 90 across your last 5 matches compared with the previous 5.",
+            evidence_key="recent_form",
+            emphasis="warning",
+            badge_value=f"-{_format_pct_value(recent_metric_delta_pct)}",
+            badge_label="last 5 impact",
+            secondary_value=str(recent_sample_size),
+            secondary_label="matches compared",
+            confidence="medium",
+            framing_hint="warning",
+        )
+
+    if recent_sample_size >= 10 and recent_minutes_delta_pct >= 15:
+        _candidate(
+            score=0.78,
+            family="recent_role",
+            horizon="last5",
+            label="Recent Role Lift",
+            body=(
+                "Your last 5 matches show stronger involvement, which can help push your career back into a better rhythm."
+            ),
+            support=f"Minutes are up {_format_pct_value(recent_minutes_delta_pct)} across your last 5 matches compared with the previous 5.",
+            evidence_key="recent_form",
+            emphasis="positive",
+            badge_value=f"+{_format_pct_value(recent_minutes_delta_pct)}",
+            badge_label="last 5 minutes",
+            secondary_value=str(recent_sample_size),
+            secondary_label="matches compared",
+            confidence="medium",
+            framing_hint="opportunity",
+        )
+    elif recent_sample_size >= 10 and recent_minutes_delta_pct <= -15:
+        _candidate(
+            score=0.76,
+            family="recent_role",
+            horizon="last5",
+            label="Recent Role Dip",
+            body=(
+                "Your last 5 matches show less involvement, and that can weaken the direction of your career if it starts to stick."
+            ),
+            support=f"Minutes are down {_format_pct_value(recent_minutes_delta_pct)} across your last 5 matches compared with the previous 5.",
+            evidence_key="recent_form",
+            emphasis="warning",
+            badge_value=f"-{_format_pct_value(recent_minutes_delta_pct)}",
+            badge_label="last 5 minutes",
+            secondary_value=str(recent_sample_size),
+            secondary_label="matches compared",
+            confidence="medium",
+            framing_hint="warning",
+        )
+
+    career_support_parts: List[str] = []
+    if _is_meaningful_total(goals_total, 20):
+        career_support_parts.append(f"{_format_count(goals_total)} goals")
+    if _is_meaningful_total(assists_total, 10):
+        career_support_parts.append(f"{_format_count(assists_total)} assists")
+    if _is_meaningful_total(minutes_total, 3000):
+        career_support_parts.append(f"{_format_count(minutes_total)} minutes")
+    if career_support_parts:
+        _candidate(
+            score=0.78 + min(len(career_support_parts) * 0.03, 0.08),
+            family="career_value",
+            horizon="career",
+            label="Not just one good spell" if season_count >= 5 else _season_span_weight_label(season_count),
+            body=(
+                f"This is not just one good spell. Across {season_span_text}, you have kept producing over time."
+            ),
+            support="Your career already includes " + ", ".join(career_support_parts[:3]) + ".",
+            evidence_key="career_value_summary",
+            emphasis="positive",
+            badge_value=str(season_count or "—"),
+            badge_label="seasons tracked",
+            secondary_value=_format_count(minutes_total) if minutes_total else "—",
+            secondary_label="career minutes",
+            confidence="medium",
+            framing_hint="recognition",
+        )
+
+    if phase == "post-peak" and momentum >= 4:
+        _candidate(
+            score=0.91,
+            family="phase_tension",
+            horizon="career",
+            label=f"Still going strong at {age or '—'}",
+            body=f"At {age or '—'}, the challenge is no longer proving your level. It is keeping this level and these minutes going.",
+            support=f"You are {age or '—'} and still carrying momentum at {momentum}/5.",
+            evidence_key="career_phase_resolution",
+            emphasis="positive",
+            badge_value=f"{momentum}/5",
+            badge_label="momentum",
+            secondary_value=f"{age}" if age else "—",
+            secondary_label="age",
+            confidence="high",
+            framing_hint="recognition",
+        )
+    elif phase == "peak" and momentum <= 2:
+        _candidate(
+            score=0.87,
+            family="phase_tension",
+            horizon="career",
+            label=f"Peak years under pressure",
+            body=f"At {age or '—'}, you are still in the part of your career where more should be happening, but the current trend is not matching that window.",
+            support=f"You are {age or '—'} with momentum at {momentum}/5.",
+            evidence_key="career_phase_resolution",
+            emphasis="warning",
+            badge_value=f"{momentum}/5",
+            badge_label="momentum",
+            secondary_value=f"{age}" if age else "—",
+            secondary_label="age",
+            confidence="high",
+            framing_hint="tension",
+        )
+    elif phase == "building" and momentum >= 4:
+        _candidate(
+            score=0.81,
+            family="phase_tension",
+            horizon="career",
+            label=f"Building with real force",
+            body=f"At {age or '—'}, you are still building your career, but the trend is starting to move with more force.",
+            support=f"You are {age or '—'} with momentum at {momentum}/5.",
+            evidence_key="career_phase_resolution",
+            emphasis="positive",
+            badge_value=f"{momentum}/5",
+            badge_label="momentum",
+            secondary_value=f"{age}" if age else "—",
+            secondary_label="age",
+            confidence="medium",
+            framing_hint="opportunity",
+        )
+    elif phase == "building" and momentum <= 2:
+        _candidate(
+            score=0.77,
+            family="phase_tension",
+            horizon="career",
+            label=f"Building phase, slow push",
+            body=f"At {age or '—'}, you are still building your career, but the current trend is not yet giving it enough force.",
+            support=f"You are {age or '—'} with momentum at {momentum}/5.",
+            evidence_key="career_phase_resolution",
+            emphasis="warning",
+            badge_value=f"{momentum}/5",
+            badge_label="momentum",
+            secondary_value=f"{age}" if age else "—",
+            secondary_label="age",
+            confidence="medium",
+            framing_hint="tension",
+        )
+
+    if transfer_quality in {"ÓPTIMA", "BAJA"}:
+        transfer_map = {
+            "ÓPTIMA": (
+                0.67,
+                "positive",
+                "Market Timing",
+                "Your career is entering a stronger moment to explore a move if the right opportunity appears.",
+            ),
+            "BAJA": (
+                0.63,
+                "warning",
+                "Market Timing",
+                "Your career may benefit more from building value first than from forcing a move now.",
+            ),
+        }
+        score, emphasis, label, body = transfer_map[transfer_quality]
+        _candidate(
+            score=score,
+            family="market",
+            horizon="career",
+            label=label,
+            body=body,
+            support=transfer_window.get("rationale") or "Your market timing is being read from phase, momentum and transfer fit.",
+            evidence_key="projection_outlook",
+            emphasis=emphasis,
+            badge_value=transfer_quality,
+            badge_label="window",
+            secondary_value=f"{momentum}/5",
+            secondary_label="momentum",
+            confidence="medium",
+        )
+
+    improve_items = [item for item in development_priorities if str(item.get("action") or "") == "mejorar"]
+    if improve_items:
+        top_priority = improve_items[0]
+        metric = str(top_priority.get("metric") or "key area")
+        percentile = _safe_int(top_priority.get("percentile"))
+        impact = str(top_priority.get("impact") or "medio")
+        _candidate(
+            score=0.58 if impact == "alto" else 0.48,
+            family="development",
+            horizon="career",
+            label=f"Work on {metric.lower()}",
+            body=f"The clearest way to strengthen your career from here is to improve {metric.lower()}.",
+            support=f"{metric} is around the {percentile}th percentile in your profile.",
+            evidence_key="percentile_profile",
+            emphasis="warning" if impact == "alto" else "neutral",
+            badge_value=f"P{percentile}",
+            badge_label="current level",
+            secondary_value=impact.upper(),
+            secondary_label="impact",
+            confidence="medium",
+            focus_metric=metric,
+        )
+
+    return sorted(candidates, key=lambda item: item["score"], reverse=True)
+
+
+def _select_career_signal_payloads(candidates: List[Dict[str, Any]], max_items: int = 3) -> List[InsightPayload]:
+    """Keeps the signal mix relevant, varied, and career-focused."""
+    selected: List[InsightPayload] = []
+    used_families = set()
+    used_horizons = set()
+    selected_candidates: List[Dict[str, Any]] = []
+
+    structural_families = {"career_value", "consistency"}
+    role_families = {"role", "recent_role"}
+    phase_families = {"phase_tension"}
+
+    structural_candidates = [candidate for candidate in candidates if candidate["family"] in structural_families]
+    if structural_candidates:
+        first_structural = max(structural_candidates, key=lambda item: item["score"])
+        selected.append(first_structural["payload"])
+        used_families.add(first_structural["family"])
+        used_horizons.add(first_structural["horizon"])
+        selected_candidates.append(first_structural)
+
+    for candidate in candidates:
+        family = candidate["family"]
+        horizon = candidate["horizon"]
+        if candidate in selected_candidates:
+            continue
+        if family in used_families:
+            continue
+        if family in role_families and used_families.intersection(role_families):
+            continue
+        if family in phase_families and used_families.intersection(phase_families):
+            continue
+        if family in role_families and used_families.intersection(phase_families):
+            alternative = any(
+                other["family"] not in role_families.union(phase_families)
+                and other["family"] not in used_families
+                for other in candidates
+            )
+            if alternative and candidate["score"] < 0.94:
+                continue
+        if family in phase_families and used_families.intersection(role_families):
+            alternative = any(
+                other["family"] not in role_families.union(phase_families)
+                and other["family"] not in used_families
+                for other in candidates
+            )
+            if alternative and candidate["score"] < 0.94:
+                continue
+        if len(selected) < 2 and horizon in used_horizons and candidate["score"] < 0.88:
+            continue
+        selected.append(candidate["payload"])
+        used_families.add(family)
+        used_horizons.add(horizon)
+        selected_candidates.append(candidate)
+        if len(selected) >= max_items:
+            return selected
+
+    for candidate in candidates:
+        payload = candidate["payload"]
+        if payload in selected:
+            continue
+        family = candidate["family"]
+        if family in role_families and used_families.intersection(role_families):
+            continue
+        selected.append(payload)
+        used_families.add(family)
+        if len(selected) >= max_items:
+            break
+    return selected[:max_items]
+
+
 def _to_dashboard_item(item_cls: Any, payload: InsightPayload) -> Any:
     metadata = payload.metadata or {}
     return item_cls(
@@ -245,6 +966,7 @@ def _to_dashboard_item(item_cls: Any, payload: InsightPayload) -> Any:
         body=payload.body,
         support=payload.support,
         evidence_key=payload.evidence_key,
+        focus_metric=str(metadata.get("focus_metric") or ""),
         llm_generated=bool(metadata.get("llm_generated", False)),
         source_model=str(metadata.get("source_model") or ""),
         emphasis=payload.emphasis,
@@ -265,6 +987,7 @@ def _serialize_brief_for_cache(brief: Any) -> Dict[str, Any]:
                 "body": item.body,
                 "support": item.support,
                 "evidence_key": item.evidence_key,
+                "focus_metric": getattr(item, "focus_metric", ""),
                 "llm_generated": bool(getattr(item, "llm_generated", False)),
                 "source_model": str(getattr(item, "source_model", "") or ""),
                 "emphasis": item.emphasis,
@@ -281,6 +1004,7 @@ def _serialize_brief_for_cache(brief: Any) -> Dict[str, Any]:
                 "body": item.body,
                 "support": item.support,
                 "evidence_key": item.evidence_key,
+                "focus_metric": getattr(item, "focus_metric", ""),
                 "llm_generated": bool(getattr(item, "llm_generated", False)),
                 "source_model": str(getattr(item, "source_model", "") or ""),
                 "emphasis": item.emphasis,
@@ -303,6 +1027,7 @@ def _deserialize_brief_from_cache(brief_cls: Any, item_cls: Any, payload: Dict[s
             body=str(raw_item.get("body") or ""),
             support=str(raw_item.get("support") or ""),
             evidence_key=normalize_evidence_key(raw_item.get("evidence_key") or ""),
+            focus_metric=str(raw_item.get("focus_metric") or ""),
             llm_generated=bool(raw_item.get("llm_generated", False)),
             source_model=str(raw_item.get("source_model") or ""),
             emphasis=str(raw_item.get("emphasis") or "neutral"),
@@ -335,7 +1060,7 @@ def _build_career_dashboard_cache_key(
 
     payload = {
         "ai_cache_version": _CAREER_DASHBOARD_AI_CACHE_VERSION,
-        "gemini_models": get_dashboard_brief_model_candidates(),
+        "gemini_models": get_career_dashboard_model_candidates(),
         "player_id": data.get("player_id"),
         "player_name": data.get("player_name"),
         "current_season": data.get("current_season"),
@@ -370,6 +1095,29 @@ def _get_cached_career_dashboard_brief(
     return None
 
 
+def _build_career_dashboard_ai_payload_cache_key(cache_key: str) -> str:
+    return f"{cache_key}:ai-payload"
+
+
+def _get_cached_career_dashboard_ai_payload(cache_key: str) -> Dict[str, Any]:
+    try:
+        from utils.cache import cache
+
+        cached_payload = cache.get(_build_career_dashboard_ai_payload_cache_key(cache_key))
+        return cached_payload if isinstance(cached_payload, dict) else {}
+    except Exception:
+        return {}
+def _set_cached_career_dashboard_ai_payload(cache_key: str, payload: Dict[str, Any]) -> None:
+    try:
+        from utils.cache import cache
+
+        cache.set(
+            _build_career_dashboard_ai_payload_cache_key(cache_key),
+            payload,
+            timeout=_CAREER_DASHBOARD_LLM_CACHE_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        return
 def _set_cached_career_dashboard_brief(
     cache_key: str,
     brief: Any,
@@ -403,6 +1151,7 @@ def _dashboard_item_to_payload(item: Any, confidence: str = "medium") -> Dict[st
         "evidence_key": normalize_evidence_key(getattr(item, "evidence_key", "") or ""),
         "emphasis": str(getattr(item, "emphasis", "neutral") or "neutral"),
         "metadata": {
+            "focus_metric": str(getattr(item, "focus_metric", "") or ""),
             "badge_value": str(getattr(item, "badge_value", "") or ""),
             "badge_label": str(getattr(item, "badge_label", "") or ""),
             "secondary_value": str(getattr(item, "secondary_value", "") or ""),
@@ -420,6 +1169,13 @@ def _resolve_career_thesis_payload(fallback_thesis: Dict[str, Any], ai_thesis: D
     ai_body = str(ai_thesis.get("body") or "").strip()
     ai_support = str(ai_thesis.get("support") or "").strip()
 
+    if not _career_thesis_passes_quality_gate(ai_thesis, fallback_thesis):
+        return {
+            **fallback_thesis,
+            "llm_generated": False,
+            "llm_model": "",
+        }
+
     ai_is_generic = ai_label in _GENERIC_CAREER_THESIS_LABELS or ai_body == "Your career trajectory is still being defined by long-term role and output trends."
     should_keep_fallback_label = fallback_label in _SPECIFIC_CAREER_THESIS_LABELS and (ai_is_generic or ai_label in _GENERIC_CAREER_THESIS_LABELS)
     fallback_drivers = list(fallback_thesis.get("drivers") or [])
@@ -435,14 +1191,20 @@ def _resolve_career_thesis_payload(fallback_thesis: Dict[str, Any], ai_thesis: D
         "llm_generated": True,
         "llm_model": resolved_model,
     }
-
-
-def _merge_payload_items(items: Any, default_items: List[Any], *, source_model: str = "") -> List[Any]:
+def _merge_payload_items(
+    items: Any,
+    default_items: List[Any],
+    *,
+    source_model: str = "",
+    item_kind: str = "signal",
+) -> List[Any]:
     """Returns validated synthesized items, preserving deterministic metadata by index."""
-    fallback_payloads = [
-        coerce_insight_payload(_dashboard_item_to_payload(item))
-        for item in default_items
-    ]
+    fallback_payloads: List[InsightPayload] = []
+    for item in default_items:
+        payload = coerce_insight_payload(_dashboard_item_to_payload(item))
+        if payload is None:
+            continue
+        fallback_payloads.append(payload)
     fallback_payloads = [payload for payload in fallback_payloads if payload is not None]
     if not isinstance(items, list) or not validate_payload_collection(items):
         return fallback_payloads
@@ -451,6 +1213,8 @@ def _merge_payload_items(items: Any, default_items: List[Any], *, source_model: 
     for idx, item in enumerate(items):
         payload = coerce_insight_payload(item)
         if payload is None:
+            if idx < len(fallback_payloads):
+                built.append(fallback_payloads[idx])
             continue
         metadata = dict(getattr(default_items[idx], "__dict__", {})) if idx < len(default_items) else {}
         metadata = {
@@ -470,6 +1234,10 @@ def _merge_payload_items(items: Any, default_items: List[Any], *, source_model: 
             emphasis=payload.emphasis,
             metadata=metadata,
         )
+        fallback_payload = fallback_payloads[idx] if idx < len(fallback_payloads) else payload
+        if not _payload_passes_quality_gate(payload, fallback_payload, item_kind=item_kind):
+            built.append(fallback_payload)
+            continue
         built.append(payload)
     return built or fallback_payloads
 
@@ -479,10 +1247,18 @@ def _synthesize_career_dashboard_payload(
     data: Dict[str, Any],
     career_phase_data: Dict[str, Any],
     career_signals: Dict[str, Any],
+    development_priorities: List[Dict[str, Any]],
 ) -> tuple[Any, str]:
     """Optionally rewrites the deterministic brief through the shared LLM layer."""
     if not gemini_is_available():
         return None, ""
+
+    career_facts = build_career_intelligence_facts(
+        data,
+        career_phase_data,
+        career_signals,
+        development_priorities=development_priorities,
+    )
 
     prompt = build_career_dashboard_synthesis_prompt(
         player_name=str(data.get("player_name") or "This player"),
@@ -496,9 +1272,17 @@ def _synthesize_career_dashboard_payload(
             "coach_confidence": (career_signals.get("coach_confidence") or {}).get("label"),
             "transfer_window": (career_signals.get("transfer_window") or {}).get("quality"),
             "consistency": (career_signals.get("consistency_score") or {}).get("level"),
+            "career_facts": {
+                "career_summary": career_facts.get("career_summary") or {},
+                "role_facts": career_facts.get("role_facts") or [],
+                "pattern_facts": career_facts.get("pattern_facts") or [],
+                "tension_facts": career_facts.get("tension_facts") or [],
+                "lever_facts": career_facts.get("lever_facts") or [],
+                "outlook_facts": career_facts.get("outlook_facts") or [],
+            },
         },
     )
-    for model_name in get_dashboard_brief_model_candidates():
+    for model_name in get_career_dashboard_model_candidates():
         result = generate_gemini_content_with_status(
             prompt,
             model_name=model_name,
@@ -507,6 +1291,27 @@ def _synthesize_career_dashboard_payload(
             response_mime_type="application/json",
         )
         parsed = parse_structured_json(result.text) if result.ok else None
+        if result.ok:
+            parsed_keys = sorted(parsed.keys()) if isinstance(parsed, dict) else []
+            logger.info(
+                "[CAREER_DASHBOARD_AI_SYNTHESIS] player=%s model=%s ok=%s parsed_dict=%s keys=%s signals_type=%s levers_type=%s outlook_type=%s",
+                data.get("player_name") or data.get("player_id") or "unknown",
+                result.model,
+                result.ok,
+                isinstance(parsed, dict),
+                parsed_keys,
+                type(parsed.get("signals")).__name__ if isinstance(parsed, dict) and "signals" in parsed else "missing",
+                type(parsed.get("levers")).__name__ if isinstance(parsed, dict) and "levers" in parsed else "missing",
+                type(parsed.get("outlook")).__name__ if isinstance(parsed, dict) and "outlook" in parsed else "missing",
+            )
+        else:
+            logger.info(
+                "[CAREER_DASHBOARD_AI_SYNTHESIS] player=%s model=%s ok=%s status=%s",
+                data.get("player_name") or data.get("player_id") or "unknown",
+                result.model,
+                result.ok,
+                result.status,
+            )
         if isinstance(parsed, dict):
             return parsed, result.model
     return None, ""
@@ -537,6 +1342,12 @@ def build_fallback_career_dashboard_brief(
     delta_pct = coach_conf.get("delta_pct", 0)
     transfer_quality = str(transfer_window.get("quality") or "MODERADA")
     consistency_level = str(consistency.get("level") or "MODERADA")
+    career_facts = build_career_intelligence_facts(
+        data,
+        career_phase_data,
+        career_signals,
+        development_priorities,
+    )
     latest_season = ""
     latest_minutes = 0
     season_count = 0
@@ -550,7 +1361,7 @@ def build_fallback_career_dashboard_brief(
     if phase == "post-peak" and momentum >= 4:
         thesis_label, thesis_body = (
             "Late-Career Surge",
-            "You are still producing above a normal post-peak curve and carrying real competitive value.",
+            f"At {age or '—'}, your career still matters, but the challenge now is to keep this level of performance and minutes going.",
         )
     elif phase == "peak" and momentum <= 2:
         thesis_label, thesis_body = (
@@ -633,117 +1444,50 @@ def build_fallback_career_dashboard_brief(
     else:
         thesis_explanation = "This read is based on the strongest role, output, and trajectory signals available."
 
-    signal_payloads: List[InsightPayload] = []
-    signal_payloads.append(
-        build_fallback_insight_payload(
-            label="Role Evolution",
-            body={
-                "up": "Coach trust is becoming more structural.",
-                "down": "Your role is losing stability across recent seasons.",
-                "stable": "Your role is staying stable, but not clearly strengthening yet.",
-            }.get(direction, "Your role is staying stable, but not clearly strengthening yet."),
-            support=(
-                f"Minutes trend is {delta_pct:+.0f}% versus the previous season, which points to "
-                f"a {coach_conf.get('label', 'stable role').lower()}."
-            ),
-            confidence="high" if direction in {"up", "down"} else "medium",
-            evidence_key="minutes_trend",
-            emphasis="positive" if direction == "up" else ("warning" if direction == "down" else "neutral"),
-            metadata={
-                "badge_value": f"{delta_pct:+.0f}%",
-                "badge_label": "vs last season",
-                "secondary_value": f"{latest_minutes:,}" if latest_minutes else "—",
-                "secondary_label": "latest minutes",
-            },
-        )
-    )
-    signal_payloads.append(
-        build_fallback_insight_payload(
-            label="Consistency",
-            body={
-                "ALTA": "Your career signal is repeatable, not just seasonal.",
-                "BAJA": "Your strongest versions are not stable enough yet.",
-                "MODERADA": "Your level is visible, but still uneven across seasons.",
-            }.get(consistency_level, "Your level is visible, but still uneven across seasons."),
-            support=f"Consistency is rated {consistency_level} from your cross-season variability profile.",
-            confidence="high" if consistency_level == "ALTA" else ("low" if consistency_level == "BAJA" else "medium"),
-            evidence_key="career_arc",
-            emphasis="positive" if consistency_level == "ALTA" else ("warning" if consistency_level == "BAJA" else "neutral"),
-            metadata={
-                "badge_value": consistency_level,
-                "badge_label": "career level",
-                "secondary_value": str(season_count or "—"),
-                "secondary_label": "seasons tracked",
-            },
-        )
-    )
-    signal_payloads.append(
-        build_fallback_insight_payload(
-            label="Market Window",
-            body={
-                "ÓPTIMA": "Your market timing is at a strong strategic point.",
-                "BUENA": "Your market context is improving, but still wants more consolidation.",
-                "MODERADA": "Your career still benefits more from building value than forcing movement.",
-                "BAJA": "This is not yet a strong market window for your profile.",
-            }.get(transfer_quality, "Your career still benefits more from building value than forcing movement."),
-            support=transfer_window.get("rationale")
-            or "Transfer conditions are being evaluated from trajectory and market fit.",
-            confidence="high" if transfer_quality in {"ÓPTIMA", "BUENA"} else "medium",
-            evidence_key="projection_outlook",
-            emphasis="positive" if transfer_quality == "ÓPTIMA" else ("warning" if transfer_quality == "BAJA" else "neutral"),
-            metadata={
-                "badge_value": transfer_quality,
-                "badge_label": "window",
-                "secondary_value": f"{momentum}/5",
-                "secondary_label": "momentum",
-            },
-        )
+    signal_payloads = _select_career_signal_payloads(
+        _build_career_signal_candidates(
+            data,
+            career_phase_data,
+            career_signals,
+            development_priorities,
+        ),
+        max_items=3,
     )
 
     lever_payloads: List[InsightPayload] = []
-    for item in development_priorities[:3]:
-        metric = str(item.get("metric") or "Key metric")
-        percentile = _safe_int(item.get("percentile"))
-        impact = str(item.get("impact") or "medio")
-        action = str(item.get("action") or "mejorar")
-        if action == "mejorar":
-            lever_payloads.append(
-                build_fallback_insight_payload(
-                    label=metric,
-                    body=f"Your next growth lever is improving {metric.lower()}.",
-                    support=(
-                        f"{metric} sits around the {percentile}th percentile, with {impact} estimated impact on role growth."
-                    ),
-                    confidence="high" if impact == "alto" else "medium",
-                    evidence_key="percentile_profile",
-                    emphasis="warning" if impact == "alto" else "neutral",
-                    metadata={
-                        "badge_value": f"P{percentile}",
-                        "badge_label": "percentile",
-                        "secondary_value": impact.upper(),
-                        "secondary_label": "impact",
-                    },
-                )
+    for idx, fact in enumerate((career_facts.get("lever_facts") or [])[:3]):
+        support_values = (career_facts.get("profile_limits") or []) + (career_facts.get("profile_strengths") or [])
+        linked_metric = ""
+        linked_percentile = 0
+        for item in support_values:
+            metric = str(item.get("metric") or "")
+            focus_area = str(fact.get("focus_area") or "").lower()
+            if metric and metric.lower() in focus_area:
+                linked_metric = metric
+                linked_percentile = _safe_int(item.get("percentile"))
+                break
+        title = str(fact.get("focus_area") or f"Career lever {idx + 1}").strip().capitalize()
+        support = str(fact.get("support_text") or fact.get("why_it_matters") or "")
+        if linked_metric and linked_percentile and not str(fact.get("support_text") or "").strip():
+            percentile_text = _format_ordinal(linked_percentile)
+            support = f"{support} It sits around the {percentile_text} percentile in your profile.".strip()
+        lever_payloads.append(
+            build_fallback_insight_payload(
+                label=title,
+                body=str(fact.get("why_it_matters") or fact.get("why_now") or "This is the clearest area to work on next."),
+                support=support or "This is one of the clearest areas shaping your next step.",
+                confidence="high" if _safe_float(fact.get("priority_score")) >= 0.8 else "medium",
+                evidence_key=str(fact.get("evidence_key") or "percentile_profile"),
+                emphasis="warning" if str(fact.get("lever_kind") or "") == "growth" else "positive",
+                metadata={
+                    "focus_metric": linked_metric,
+                    "badge_value": f"P{linked_percentile}" if linked_percentile else "",
+                    "badge_label": "percentile" if linked_percentile else "",
+                    "secondary_value": str(fact.get("what_it_unlocks") or ""),
+                    "secondary_label": "unlocks",
+                },
             )
-        else:
-            lever_payloads.append(
-                build_fallback_insight_payload(
-                    label=metric,
-                    body=f"{metric} is already supporting your long-term profile.",
-                    support=(
-                        f"{metric} sits around the {percentile}th percentile and is worth protecting as a stable strength."
-                    ),
-                    confidence="high",
-                    evidence_key="tactical_dna",
-                    emphasis="positive",
-                    metadata={
-                        "badge_value": f"P{percentile}",
-                        "badge_label": "percentile",
-                        "secondary_value": impact.upper(),
-                        "secondary_label": "impact",
-                    },
-                )
-            )
+        )
 
     if not lever_payloads:
         lever_payloads.append(
@@ -752,7 +1496,7 @@ def build_fallback_career_dashboard_brief(
                 body="Your next leap will come from turning stable minutes into clearer separation.",
                 support="There is not enough ranked percentile data to surface a sharper lever yet.",
                 confidence="medium",
-                evidence_key="career_arc",
+                evidence_key="career_value_summary",
                 emphasis="neutral",
                 metadata={
                     "badge_value": f"{momentum}/5",
@@ -763,24 +1507,44 @@ def build_fallback_career_dashboard_brief(
             )
         )
 
-    if transfer_quality == "ÓPTIMA":
+    outlook_facts = career_facts.get("outlook_facts") or []
+    if outlook_facts:
+        primary_outlook = outlook_facts[0]
+        outlook_label = str(primary_outlook.get("mode") or "Build")
+        outlook_body = str(primary_outlook.get("plain_fact") or "The next 1–2 seasons should focus on strengthening identity and separation.")
+        outlook_support = str(primary_outlook.get("why_now") or "")
+        outlook_evidence_key = str(primary_outlook.get("evidence_key") or "career_arc")
+    elif transfer_quality == "ÓPTIMA":
         outlook_label = "Push"
         outlook_body = "Your current trajectory supports a more aggressive next-step strategy."
+        outlook_support = f"Phase {phase.upper()} at age {age or '—'} with momentum {momentum}/5 and transfer window {transfer_quality}."
+        outlook_evidence_key = "projection_outlook"
     elif direction == "up" and consistency_level == "ALTA":
         outlook_label = "Consolidate"
         outlook_body = "You are in a strong value-building phase and should reinforce repeatability."
+        outlook_support = f"Phase {phase.upper()} at age {age or '—'} with momentum {momentum}/5 and transfer window {transfer_quality}."
+        outlook_evidence_key = "career_phase_resolution"
     elif direction == "down":
         outlook_label = "Reposition"
-        outlook_body = "The next step is to recover role strength before treating market timing as the priority."
+        if phase == "post-peak":
+            outlook_body = "Focus on getting your level and minutes steady again before thinking about something bigger."
+        else:
+            outlook_body = "Focus on getting your role steady again before pushing for more."
+        outlook_support = (
+            f"Your role trend has softened, so the priority is to steady your level first. If the next run is strong again, you can think bigger after that."
+        )
+        outlook_evidence_key = "career_phase_resolution"
     else:
         outlook_label = "Build"
         outlook_body = "The next 1–2 seasons should focus on strengthening identity and separation."
+        outlook_support = f"Phase {phase.upper()} at age {age or '—'} with momentum {momentum}/5 and transfer window {transfer_quality}."
+        outlook_evidence_key = "career_phase_resolution"
 
     fallback_outlook = {
         "label": outlook_label,
         "body": outlook_body,
-        "support": f"Phase {phase.upper()} at age {age or '—'} with momentum {momentum}/5 and transfer window {transfer_quality}.",
-        "evidence_key": "projection_outlook" if transfer_quality in {"ÓPTIMA", "BUENA"} else "career_arc",
+        "support": outlook_support,
+        "evidence_key": outlook_evidence_key,
     }
 
     return brief_cls(
@@ -799,6 +1563,63 @@ def build_fallback_career_dashboard_brief(
     )
 
 
+def synthesize_career_dashboard_ai_payload(
+    brief_cls: Any,
+    item_cls: Any,
+    data: Dict[str, Any],
+    career_phase_data: Dict[str, Any],
+    career_signals: Dict[str, Any],
+    development_priorities: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Builds only the structured AI override payload without blocking deterministic render paths."""
+    cache_key = _build_career_dashboard_cache_key(
+        data,
+        career_phase_data,
+        career_signals,
+        development_priorities,
+    )
+    cached_payload = _get_cached_career_dashboard_ai_payload(cache_key)
+    if cached_payload:
+        logger.info(
+            "[CAREER_DASHBOARD_AI_PAYLOAD] player=%s source=cache keys=%s",
+            data.get("player_name") or data.get("player_id") or "unknown",
+            sorted(cached_payload.keys()),
+        )
+        return cached_payload
+
+    fallback = build_fallback_career_dashboard_brief(
+        brief_cls,
+        item_cls,
+        data,
+        career_phase_data,
+        career_signals,
+        development_priorities,
+    )
+    ai_payload, resolved_model = _synthesize_career_dashboard_payload(
+        fallback,
+        data,
+        career_phase_data,
+        career_signals,
+        development_priorities,
+    )
+    if not isinstance(ai_payload, dict):
+        logger.info(
+            "[CAREER_DASHBOARD_AI_PAYLOAD] player=%s source=model payload=invalid",
+            data.get("player_name") or data.get("player_id") or "unknown",
+        )
+        return {}
+    payload = {
+        "payload": ai_payload,
+        "model": resolved_model,
+    }
+    logger.info(
+        "[CAREER_DASHBOARD_AI_PAYLOAD] player=%s source=model keys=%s model=%s",
+        data.get("player_name") or data.get("player_id") or "unknown",
+        sorted(ai_payload.keys()),
+        resolved_model,
+    )
+    _set_cached_career_dashboard_ai_payload(cache_key, payload)
+    return payload
 def build_career_dashboard_brief(
     brief_cls: Any,
     item_cls: Any,
@@ -815,9 +1636,14 @@ def build_career_dashboard_brief(
         career_signals,
         development_priorities,
     )
-    cached_brief = _get_cached_career_dashboard_brief(brief_cls, item_cls, cache_key)
-    if cached_brief is not None:
-        return cached_brief
+    has_structured_ai_payload = (
+        isinstance(ai_payload, dict)
+        and any(key in ai_payload for key in ("career_thesis", "signals", "levers", "outlook"))
+    )
+    if not has_structured_ai_payload:
+        cached_brief = _get_cached_career_dashboard_brief(brief_cls, item_cls, cache_key)
+        if cached_brief is not None:
+            return cached_brief
 
     fallback = build_fallback_career_dashboard_brief(
         brief_cls,
@@ -827,12 +1653,13 @@ def build_career_dashboard_brief(
         career_signals,
         development_priorities,
     )
-    if not isinstance(ai_payload, dict):
+    if not has_structured_ai_payload:
         ai_payload, resolved_model = _synthesize_career_dashboard_payload(
             fallback,
             data,
             career_phase_data,
             career_signals,
+            development_priorities,
         )
     else:
         resolved_model = "structured_ai_payload"
@@ -850,32 +1677,60 @@ def build_career_dashboard_brief(
         if not isinstance(thesis, dict) or not isinstance(outlook, dict):
             return fallback
 
+        raw_signals = ai_payload.get("signals") or []
+        raw_levers = ai_payload.get("levers") or []
+        signals_rewritten = isinstance(raw_signals, list) and validate_payload_collection(raw_signals)
+        levers_rewritten = isinstance(raw_levers, list) and validate_payload_collection(raw_levers)
+        thesis_rewritten = bool(str(thesis.get("body") or "").strip())
+        outlook_rewritten = bool(str(outlook.get("body") or "").strip())
+
+        logger.info(
+            "[CAREER_DASHBOARD_AI] player=%s model=%s thesis=%s signals=%s levers=%s outlook=%s",
+            data.get("player_name") or data.get("player_id") or "unknown",
+            resolved_model,
+            "ai" if thesis_rewritten else "fallback",
+            "ai" if signals_rewritten else "fallback",
+            "ai" if levers_rewritten else "fallback",
+            "ai" if outlook_rewritten else "fallback",
+        )
+        _log_rewrite_similarity(
+            str(data.get("player_name") or data.get("player_id") or "unknown"),
+            fallback,
+            ai_payload,
+        )
+
         brief = brief_cls(
             career_thesis=_resolve_career_thesis_payload(fallback.career_thesis, thesis, resolved_model),
             signals=[
                 _to_dashboard_item(item_cls, payload)
                 for payload in _merge_payload_items(
-                    ai_payload.get("signals") or [],
+                    raw_signals,
                     fallback.signals,
                     source_model=resolved_model,
+                    item_kind="signal",
                 )
             ],
             levers=[
                 _to_dashboard_item(item_cls, payload)
                 for payload in _merge_payload_items(
-                    ai_payload.get("levers") or [],
+                    raw_levers,
                     fallback.levers,
                     source_model=resolved_model,
+                    item_kind="lever",
                 )
             ],
-            outlook={
-                "label": str(outlook.get("label") or fallback.outlook["label"]),
-                "body": str(outlook.get("body") or fallback.outlook["body"]),
-                "support": str(outlook.get("support") or fallback.outlook["support"]),
-                "evidence_key": normalize_evidence_key(outlook.get("evidence_key") or fallback.outlook["evidence_key"]),
-                "llm_generated": True,
-                "llm_model": resolved_model,
-            },
+            outlook=(
+                {
+                    "label": str(outlook.get("label") or fallback.outlook["label"]),
+                    "body": str(outlook.get("body") or fallback.outlook["body"]),
+                    "support": str(outlook.get("support") or fallback.outlook["support"]),
+                    "evidence_key": normalize_evidence_key(outlook.get("evidence_key") or fallback.outlook["evidence_key"]),
+                    "llm_generated": True,
+                    "llm_model": resolved_model,
+                }
+                if _outlook_passes_quality_gate(outlook, fallback.outlook)
+                else {**fallback.outlook, "llm_generated": False, "llm_model": ""}
+            ),
         )
         _set_cached_career_dashboard_brief(
             cache_key,

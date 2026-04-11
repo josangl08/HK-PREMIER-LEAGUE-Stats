@@ -37,6 +37,21 @@ def get_dashboard_brief_model_candidates() -> list[str]:
     ]
 
 
+def get_career_dashboard_model_candidates() -> list[str]:
+    """Returns the ordered model list for the main career dashboard command-center synthesis."""
+    candidates = [
+        "gemini-3.1-pro-preview",
+        AI_DEFAULTS["gemini"]["model"],
+        "gemini-2.5-flash",
+        "gemini-3.1-flash-lite-preview",
+    ]
+    deduped: list[str] = []
+    for candidate in candidates:
+        if candidate and candidate not in deduped:
+            deduped.append(candidate)
+    return deduped
+
+
 def gemini_is_available() -> bool:
     """Returns whether the shared Gemini client can be constructed."""
     return bool(GOOGLE_API_KEY)

@@ -181,11 +181,11 @@ class BeSoccerExtractor:
         Intenta varias rutas de búsqueda si la principal falla, incluyendo Google fallback.
         """
         query = urllib.parse.quote(name)
+        # BeSoccer search often redirects or uses specific endpoints
         search_paths = [
-            f"{self.base_url}/search?q={query}",
+            f"https://www.besoccer.com/search-matches?q={query}",
             f"https://es.besoccer.com/buscar?q={query}",
-            f"{self.base_url}/search-player?q={query}",
-            f"https://www.besoccer.com/buscar?q={query}"
+            f"{self.base_url}/buscar?q={query}",
         ]
 
         for url in search_paths:

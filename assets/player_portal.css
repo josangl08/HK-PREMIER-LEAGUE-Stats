@@ -2441,7 +2441,7 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
 .career-identity-meta {
     grid-area: meta;
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 10px 14px;
     margin-top: 2px;
     padding-top: 8px;
@@ -2594,10 +2594,10 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
 }
 
 .career-command-card__headline-layout {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 18px;
-    align-items: start;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    align-items: stretch;
     margin-bottom: 14px;
 }
 
@@ -2611,6 +2611,10 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
     box-shadow:
         inset 0 1px 0 rgba(255,255,255,0.10),
         0 10px 24px rgba(12, 18, 30, 0.16);
+}
+
+.career-command-card__tooltip-target {
+    cursor: help;
 }
 
 .career-command-factor__value {
@@ -2643,16 +2647,133 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
 
 .career-command-kpis--side {
     margin-top: 0;
-    flex-direction: column;
-    align-items: flex-start;
-    min-width: 150px;
-    padding-top: 6px;
+    flex-direction: row;
+    align-items: stretch;
+    min-width: 0;
+    padding-top: 0;
+    width: 100%;
 }
 
 .career-command-card__chips {
     display: grid;
     gap: 14px;
     width: 100%;
+}
+
+.career-command-trend {
+    margin-top: 34px;
+    margin-bottom: 12px;
+    padding: 0;
+    border-radius: 0;
+    background: transparent;
+    border: none;
+    box-shadow: none;
+}
+
+.career-command-trend__header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 14px;
+    padding: 0 2px;
+}
+
+.career-command-trend__title {
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: rgba(232, 240, 250, 0.72);
+}
+
+.career-command-trend__meta {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 8px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+}
+
+.career-command-trend__stat-value {
+    font-size: 1rem;
+    font-weight: 800;
+    color: #fff2cb;
+    line-height: 1;
+}
+
+.career-command-trend__stat-label,
+.career-command-trend__best {
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: rgba(226, 236, 248, 0.68);
+}
+
+.career-command-trend__graph {
+    position: relative;
+    width: 100%;
+    height: 400px;
+    margin: 0;
+    transform: perspective(750px) translate3d(0, 0, -250px) rotateX(27deg) scale(0.9, 0.9);
+    border-radius: 20px;
+    box-shadow: none;
+    transition: transform 0.4s ease-in-out, box-shadow 0.4s ease-in-out;
+    will-change: transform;
+}
+
+.career-command-trend__graph .main-svg,
+.career-command-trend__graph .svg-container,
+.career-command-trend__graph .plot-container,
+.career-command-trend__graph .js-plotly-plot,
+.career-command-trend__graph .bg {
+    background: transparent !important;
+    fill: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+}
+
+.career-command-trend__graph::after {
+    content: "";
+    position: absolute;
+    left: 7%;
+    right: 7%;
+    bottom: -50px;
+    height: 54px;
+    border-radius: 999px;
+    background: radial-gradient(
+        ellipse at center,
+        rgba(0, 0, 0, 0.42) 0%,
+        rgba(0, 0, 0, 0.24) 48%,
+        rgba(0, 0, 0, 0) 80%
+    );
+    filter: blur(18px);
+    pointer-events: none;
+    z-index: -1;
+    transition: bottom 0.4s ease-in-out, opacity 0.4s ease-in-out;
+}
+
+.career-command-trend:hover .career-command-trend__graph {
+    transform: translate3d(0, 0, -250px);
+    box-shadow: none;
+}
+
+.career-command-trend:hover .career-command-trend__graph::after {
+    bottom: -42px;
+}
+
+.career-command-tooltip .tooltip-inner {
+    max-width: 340px;
+    text-align: left;
+}
+
+@media (max-width: 900px) {
+    .career-identity-meta {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .career-command-kpis--side {
+        flex-wrap: wrap;
+    }
 }
 
 .career-command-chip-group {
@@ -2905,15 +3026,19 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
     color: rgba(245, 250, 255, 0.96);
 }
 
+/* KPI trend hover experiment: exact reference values for quick rollback. */
 .career-kpi-trend-panel {
     background: transparent !important;
     transform-origin: left center;
     position: relative;
-    margin-top: -28px;
-    width: calc(100% + 710px);
-    max-width: none;
-    margin-left: 30px;
-    transition: transform 0.28s ease;
+    margin-top: 20px;
+    width: 100%;
+    max-width: 100%;
+    margin-left: 0;
+    transform: perspective(1000px) rotateY(25deg) scale(1) rotateX(10deg);
+    filter: blur(1px);
+    opacity: 0.5;
+    transition: 0.6s ease all;
 }
 
 .career-kpi-trend-panel,
@@ -2926,7 +3051,8 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
 
 .career-kpi-trend-panel .js-plotly-plot,
 .career-kpi-trend-panel .plot-container {
-    width: 1900px !important;
+    width: 100% !important;
+    max-width: 100% !important;
 }
 
 .career-kpi-trend-panel::after {
@@ -2942,9 +3068,11 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
     pointer-events: none;
 }
 
-@media (min-width: 992px) {
-    .career-kpi-trend-panel {
-        transform: perspective(1700px) rotateY(33deg) rotateX(10deg) rotateZ(-1deg) scale(1);
+@media (min-width: 992px) and (hover: hover) and (pointer: fine) {
+    .career-kpi-trend-panel:hover {
+        transform: perspective(2500px) rotateY(-15deg) translateY(-50px) rotateX(5deg) scale(0.90);
+        filter: blur(0);
+        opacity: 1;
     }
 }
 
@@ -3240,6 +3368,55 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
 
 .career-evidence-modal-body {
     padding-top: 10px;
+    color: rgba(245, 250, 255, 0.94);
+}
+
+.career-evidence-modal .btn-close {
+    filter: invert(1) brightness(1.15);
+    opacity: 0.82;
+}
+
+.career-evidence-modal .btn-close:hover,
+.career-evidence-modal .btn-close:focus {
+    opacity: 1;
+}
+
+.career-evidence-modal-body p,
+.career-evidence-modal-body span,
+.career-evidence-modal-body div,
+.career-evidence-modal-body li,
+.career-evidence-modal-body small {
+    color: inherit;
+}
+
+.career-evidence-modal-body .text-muted,
+.career-evidence-modal-body .small.text-muted {
+    color: rgba(216, 228, 243, 0.72) !important;
+}
+
+.career-evidence-modal-body .table {
+    --bs-table-color: rgba(242, 247, 255, 0.94);
+    --bs-table-bg: transparent;
+    --bs-table-striped-bg: rgba(255, 255, 255, 0.025);
+    --bs-table-hover-color: rgba(255, 255, 255, 0.98);
+    --bs-table-hover-bg: rgba(255, 255, 255, 0.035);
+    --bs-table-border-color: rgba(255, 255, 255, 0.1);
+    color: rgba(242, 247, 255, 0.94);
+    background: transparent;
+}
+
+.career-evidence-modal-body .table td,
+.career-evidence-modal-body .table th {
+    color: rgba(242, 247, 255, 0.94) !important;
+    background: transparent !important;
+    border-color: rgba(255, 255, 255, 0.1) !important;
+}
+
+.career-evidence-modal-body .table td:first-child,
+.career-evidence-modal-body .table th:first-child {
+    color: rgba(188, 205, 225, 0.82) !important;
+    font-weight: 700;
+    letter-spacing: 0.04em;
 }
 
 .ai-overlay-t2__cta.btn {

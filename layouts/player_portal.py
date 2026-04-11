@@ -131,10 +131,11 @@ def create_player_portal_layout(user_role: str = "player") -> html.Div:
             dcc.Store(id="career-arc-observer-dummy"),
             dcc.Store(id="portal-overlay-store", storage_type="memory", data={"type": "none"}),
             dcc.Store(id="card-editor-state", storage_type="memory"),
-            # Stores the player photo album (original paths, bgrm paths, selections)
-            dcc.Store(id="player-photos-store", storage_type="local"),
+            # Stores the player photo album — session only (never share between players)
+            dcc.Store(id="player-photos-store", storage_type="session"),
             # Triggers post-generation gallery refresh or download
             dcc.Store(id="card-generation-trigger"),
+            dcc.Store(id="career-dashboard-brief-store", storage_type="memory"),
             # Career Intelligence overlay stores
             dcc.Store(id="insight-session-state", storage_type="local"),
             dcc.Store(id="t2-overlay-queue", storage_type="session"),

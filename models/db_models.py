@@ -10,6 +10,11 @@ from flask_login import UserMixin
 class Base(DeclarativeBase):
     pass
 
+
+def _utc_now() -> datetime:
+    """Return the current UTC timestamp without relying on deprecated utcnow()."""
+    return datetime.now()
+
 # Tabla intermedia para Agentes y los Jugadores que representan
 agent_player_links = Table(
     "agent_player_links",
@@ -44,7 +49,7 @@ class User(Base, UserMixin):
     # Datos flexibles (Perfil de agente, preferencias, etc.)
     profile_data: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON)
     
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utc_now)
     last_login: Mapped[Optional[datetime]] = mapped_column(DateTime)
     
     role_obj: Mapped["Role"] = relationship(back_populates="users")
@@ -267,6 +272,7 @@ class Injury(Base):
     start_date: Mapped[Optional[datetime]] = mapped_column(DateTime)
     return_date: Mapped[Optional[datetime]] = mapped_column(DateTime)
     days_out: Mapped[Optional[int]] = mapped_column(Integer)
+    missed_matches: Mapped[Optional[int]] = mapped_column(Integer, default=0)
     status: Mapped[Optional[str]] = mapped_column(String(50)) # Active, Recovered
     
     player: Mapped["Player"] = relationship(back_populates="injuries")
@@ -299,7 +305,7 @@ class PlayerPhoto(Base):
     photo_data: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True) # Binary blob, served as data URI
 
     is_primary: Mapped[bool] = mapped_column(Boolean, default=False)
-    upload_date: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    upload_date: Mapped[datetime] = mapped_column(DateTime, default=_utc_now)
     
     player: Mapped["Player"] = relationship(back_populates="photos")
 
@@ -320,8 +326,8 @@ class CardDesign(Base):
     # Configuración completa del diseño (AI proposal + User overrides)
     config: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False)
     
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utc_now, onupdate=_utc_now)
     
     template: Mapped["CardTemplate"] = relationship(back_populates="designs")
     player: Mapped["Player"] = relationship(back_populates="designs")
@@ -350,7 +356,7 @@ class SystemSyncLog(Base):
     __tablename__ = "system_sync_logs"
     
     task_name: Mapped[str] = mapped_column(String(100), primary_key=True) # e.g. "transfermarkt_weekly", "hkpl_2024-25"
-    last_run: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    last_run: Mapped[datetime] = mapped_column(DateTime, default=_utc_now)
     status: Mapped[Optional[str]] = mapped_column(String(50)) # SUCCESS, FAILED
     details: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON)
 
@@ -378,8 +384,8 @@ class ExternalSourceCredential(Base):
     source: Mapped[str] = mapped_column(String(50), primary_key=True)  # transfermarkt
     credential_type: Mapped[str] = mapped_column(String(30), default="cookies_json")
     secret_payload: Mapped[Optional[str]] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utc_now, onupdate=_utc_now)
     expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     created_by: Mapped[Optional[str]] = mapped_column(String(100))
     metadata_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON)
@@ -421,4 +427,4 @@ class MatchUpdateQueue(Base):
     next_attempt: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     retry_after: Mapped[Optional[datetime]] = mapped_column(DateTime)
     
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utc_now)

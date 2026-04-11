@@ -73,6 +73,14 @@ def init_db():
             except Exception:
                 pass
 
+            # Migración: añadir missed_matches a injuries
+            try:
+                conn.execute(text("ALTER TABLE injuries ADD COLUMN missed_matches INTEGER DEFAULT 0"))
+                conn.commit()
+                logger.info("Migración: columna missed_matches añadida a injuries.")
+            except Exception:
+                pass
+
             # Migración: hacer original_path nullable (SQLite no soporta ALTER COLUMN)
             cols = conn.execute(text("PRAGMA table_info(player_photos)")).fetchall()
             original_path_col = next((c for c in cols if c[1] == "original_path"), None)

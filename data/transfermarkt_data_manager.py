@@ -17,6 +17,7 @@ from utils.common import get_current_season
 
 # Importar componentes ETL
 from data.extractors.transfermarkt_extractor import TransfermarktExtractor
+from data.extractors.transfermarkt_playwright_extractor import TransfermarktPlaywrightExtractor
 from data.processors.transfermarkt_processor import TransfermarktProcessor
 from data.aggregators.transfermarkt_aggregator import TransfermarktStatsAggregator
 
@@ -29,8 +30,12 @@ class TransfermarktDataManager:
     Sustituye la dependencia de archivos JSON por consultas a la base de datos.
     """
     
-    def __init__(self, cache_dir: str = "data/cache", auto_load: bool = True):
-        self.extractor = TransfermarktExtractor(cache_dir)
+    def __init__(self, cache_dir: str = "data/cache", auto_load: bool = True, use_playwright: bool = True):
+        if use_playwright:
+            self.extractor = TransfermarktPlaywrightExtractor(cache_dir)
+        else:
+            self.extractor = TransfermarktExtractor(cache_dir)
+            
         self.processor = TransfermarktProcessor()
         
         # Estado interno (mantener por compatibilidad si es necesario, pero priorizar SQL)
@@ -40,7 +45,7 @@ class TransfermarktDataManager:
         if auto_load:
             self.refresh_data()
 
-    def refresh_data(self, force_scraping: bool = False) -> bool:
+    def refresh_data(self, force_scraping: bool = False, sync_history: bool = False, historical: bool = False) -> bool:
         """
         Refresca los datos de lesiones e historial. 
         Si force_scraping es True, realiza el proceso ETL y guarda en SQL.
@@ -48,8 +53,8 @@ class TransfermarktDataManager:
         """
         try:
             if force_scraping:
-                logger.info("Iniciando proceso ETL forzado para Transfermarkt...")
-                self._perform_full_etl()
+                logger.info(f"Iniciando proceso ETL forzado para Transfermarkt (histórico={historical})...")
+                self._perform_full_etl(sync_history=sync_history, historical=historical)
             
             # Cargar datos desde SQL al agregador para asegurar que siempre estén frescos
             self.processed_injuries = self.get_injuries_data()
@@ -176,132 +181,120 @@ class TransfermarktDataManager:
         finally:
             session.close()
 
-    def _perform_full_etl(self):
+    def _perform_full_etl(self, sync_history: bool = False, historical: bool = False):
         """Ejecuta el ciclo de extracción, procesamiento y carga en DB."""
-        # Obtener todos los jugadores representados o vinculados para sincronizar su historial
         session = SessionFactory()
         try:
-            # Sincronizar historial para todos los jugadores con tm_id
-            players = session.execute(select(Player).where(Player.tm_id.is_not(None))).scalars().all()
+            if sync_history:
+                # Sincronizar historial para todos los jugadores con tm_id
+                players = session.execute(select(Player).where(Player.tm_id.is_not(None))).scalars().all()
+                seasons = self._get_valid_season_ids()
+                
+                for player in players:
+                    logger.info(f"Sincronizando historial TM para: {player.name}...")
+                    for season_id in seasons:
+                        try:
+                            raw_matches = self.extractor.get_match_history(str(player.tm_id), season_id)
+                            if raw_matches:
+                                self._upsert_history_to_sql(player.id, raw_matches)
+                        except Exception as e:
+                            logger.error(f"Error sincronizando historial para {player.name} en {season_id}: {e}")
             
-            # Obtener temporadas disponibles
-            from models.db_models import Season
-            seasons = self._get_valid_season_ids()
-            
-            for player in players:
-                logger.info(f"Sincronizando historial TM para: {player.name}...")
-                for season_id in seasons:
-                    try:
-                        raw_matches = self.extractor.get_match_history(str(player.tm_id), season_id)
-                        if raw_matches:
-                            self._upsert_history_to_sql(player.id, raw_matches)
-                    except Exception as e:
-                        logger.error(f"Error sincronizando historial para {player.name} en {season_id}: {e}")
-        finally:
-            session.close()
-
-        # Sincronizar lesiones (proceso existente - silenciado si no hay método en extractor)
-        if hasattr(self.extractor, 'extract_all_injuries'):
-            try:
-                raw_injuries = self.extractor.extract_all_injuries(force_refresh=True)
-                if raw_injuries:
-                    df_processed = self.processor.process_injuries_data(raw_injuries)
-                    if not df_processed.empty:
-                        self._upsert_injuries_to_sql(df_processed)
-            except Exception as e:
-                logger.warning(f"No se pudieron sincronizar lesiones: {e}")
-        
-        # 4. Registrar éxito
-        self._update_sync_log("transfermarkt_full_sync")
-
-    def _upsert_history_to_sql(self, player_id: str, matches: List[Dict]):
-        """Inserta o desarrolla el historial de partidos en SQL."""
-        session = SessionFactory()
-        try:
-            for m in matches:
-                # Intentar parsear fecha
-                match_date = self._parse_date(m.get('date'))
-                if not match_date: continue
-
-                # Buscar duplicado por jugador, fecha y oponente
-                existing = session.execute(
-                    select(MatchHistory).where(
-                        MatchHistory.player_id == player_id,
-                        MatchHistory.date == match_date,
-                        MatchHistory.opponent == m.get('opponent')
-                    )
-                ).scalar_one_or_none()
-
-                if not existing:
-                    history = MatchHistory(
-                        player_id=player_id,
-                        date=match_date,
-                        competition_name=m.get('competition'),
-                        competition_logo=m.get('competition_logo'),
-                        opponent=m.get('opponent'),
-                        result=m.get('result'),
-                        minutes_played=m.get('minutes_played', 0),
-                        goals=m.get('goals', 0),
-                        assists=m.get('assists', 0),
-                        yellow_cards=m.get('yellow_cards', 0),
-                        red_cards=m.get('red_cards', 0),
-                        position=m.get('position'),
-                        status=m.get('status', 'Jugado'),
-                        raw_data=m
-                    )
-                    session.add(history)
+            # Sincronizar lesiones (Proceso principal)
+            if hasattr(self.extractor, 'get_team_injuries'):
+                if not historical:
+                    logger.info("Iniciando extracción de lesiones ACTUALES equipo por equipo...")
+                    from data.extractors.transfermarkt_extractor import _TEAM_TM_CLUB_IDS
+                    for team_key, tm_club_id in _TEAM_TM_CLUB_IDS.items():
+                        try:
+                            logger.info(f"Procesando equipo: {team_key}...")
+                            team_raw = self.extractor.get_team_injuries(tm_club_id)
+                            if team_raw:
+                                for entry in team_raw: entry["team_key"] = team_key
+                                df_team = self.processor.process_injuries_data(team_raw)
+                                if not df_team.empty:
+                                    self._upsert_injuries_to_sql(df_team)
+                        except Exception as e:
+                            logger.error(f"Error procesando equipo {team_key}: {e}")
                 else:
-                    # Actualizar datos existentes
-                    existing.minutes_played = m.get('minutes_played', 0)
-                    existing.goals = m.get('goals', 0)
-                    existing.assists = m.get('assists', 0)
-                    existing.yellow_cards = m.get('yellow_cards', 0)
-                    existing.red_cards = m.get('red_cards', 0)
-                    existing.position = m.get('position')
-                    existing.status = m.get('status', 'Jugado')
+                    logger.info("Iniciando extracción de lesiones HISTÓRICAS jugador por jugador...")
+                    # Obtener todos los jugadores con tm_id de la DB
+                    players = session.execute(select(Player).where(Player.tm_id.is_not(None))).scalars().all()
+                    logger.info(f"Se procesarán {len(players)} jugadores para su historial médico.")
                     
-                    # PRESERVAR INTELIGENCIA: Combinar raw_data existente con el nuevo
-                    if existing.raw_data and isinstance(existing.raw_data, dict):
-                        merged_raw = existing.raw_data.copy()
-                        merged_raw.update(m)
-                        existing.raw_data = merged_raw
-                    else:
-                        existing.raw_data = m
+                    for player in players:
+                        try:
+                            logger.info(f"Extrayendo historial médico de: {player.name} (TM: {player.tm_id})...")
+                            player_injuries = self.extractor.get_player_injuries(str(player.tm_id))
+                            
+                            if player_injuries:
+                                # Adaptar formato para el procesador
+                                formatted_injuries = []
+                                for inj in player_injuries:
+                                    formatted_injuries.append({
+                                        'player_name': player.name,
+                                        'tm_id': str(player.tm_id),
+                                        'injury_type': inj.get('injury_type'),
+                                        'date_from': inj.get('date_from'),
+                                        'date_until': inj.get('date_until'),
+                                        'missed_matches': inj.get('matches_missed'),
+                                        'days_out': inj.get('days'),
+                                        'season': inj.get('season')
+                                    })
+                                
+                                df_player = self.processor.process_injuries_data(formatted_injuries)
+                                if not df_player.empty:
+                                    self._upsert_injuries_to_sql(df_player)
+                            
+                            # Delay para no ser bloqueados (scraping individual es más lento pero seguro)
+                            import time, random
+                            time.sleep(random.uniform(2, 5))
+                            
+                        except Exception as e:
+                            logger.error(f"Error procesando historial de {player.name}: {e}")
             
-            session.commit()
-        except Exception as e:
-            session.rollback()
-            logger.error(f"Error upserting match history for {player_id}: {e}")
+            self._update_sync_log("transfermarkt_full_sync")
         finally:
             session.close()
 
     def _upsert_injuries_to_sql(self, df: pd.DataFrame):
-        """Inserta o actualiza lesiones en la base de datos."""
+        """Inserta o actualiza lesiones en la base de datos con asociación precisa."""
         session = SessionFactory()
         try:
             count = 0
             for _, row in df.iterrows():
-                # Buscar jugador por nombre o TM ID si estuviera disponible
-                player_name = row.get('player_name')
-                player = session.execute(select(Player).where(Player.name == player_name)).scalar_one_or_none()
+                # 1. Intentar buscar por TM ID (lo más preciso)
+                tm_id = row.get('tm_id')
+                player = None
+                if tm_id:
+                    player = session.execute(select(Player).where(Player.tm_id == int(tm_id))).scalars().first()
+                
+                # 2. Fallback por nombre si no se encontró por ID
+                if not player:
+                    player_name = row.get('player_name')
+                    # Usar .first() para evitar error si hay duplicados de nombre
+                    player = session.execute(select(Player).where(Player.name == player_name)).scalars().first()
                 
                 if not player:
-                    logger.debug(f"Jugador no encontrado para lesión: {player_name}")
+                    logger.debug(f"Jugador no encontrado para lesión: {row.get('player_name')} (TM ID: {tm_id})")
                     continue
 
                 # Intentar parsear fechas
                 start_date = self._parse_date(row.get('injury_date'))
                 return_date = self._parse_date(row.get('return_date'))
 
-                # UPSERT logic (borrar antiguas del mismo jugador/tipo si son recientes o duplicadas es complejo, 
-                # así que por ahora añadimos si no existe una idéntica activa)
+                if not start_date:
+                    logger.warning(f"Omitiendo lesión para {player.name}: fecha de inicio inválida ({row.get('injury_date')})")
+                    continue
+
+                # UPSERT logic: Evitar duplicados exactos
                 existing = session.execute(
                     select(Injury).where(
                         Injury.player_id == player.id,
                         Injury.injury_type == row.get('injury_type'),
                         Injury.start_date == start_date
                     )
-                ).scalar_one_or_none()
+                ).scalars().first()
 
                 if not existing:
                     injury = Injury(
@@ -312,13 +305,23 @@ class TransfermarktDataManager:
                         start_date=start_date,
                         return_date=return_date,
                         days_out=int(row.get('recovery_days', 0)) if pd.notna(row.get('recovery_days')) else 0,
+                        missed_matches=int(row.get('missed_matches', 0)) if pd.notna(row.get('missed_matches')) else 0,
                         status=row.get('status', 'En tratamiento')
                     )
                     session.add(injury)
                     count += 1
+                else:
+                    # Actualizar status y fecha de retorno si ha cambiado
+                    existing.status = row.get('status', existing.status)
+                    existing.return_date = return_date
+                    existing.days_out = int(row.get('recovery_days', 0)) if pd.notna(row.get('recovery_days')) else existing.days_out
+                    existing.missed_matches = int(row.get('missed_matches', existing.missed_matches)) if pd.notna(row.get('missed_matches')) else existing.missed_matches
             
             session.commit()
-            logger.info(f"✓ {count} lesiones nuevas insertadas en SQL.")
+            logger.info(f"✓ {count} lesiones procesadas/actualizadas en SQL.")
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error al guardar lesiones en SQL: {e}")
         finally:
             session.close()
 
@@ -346,10 +349,10 @@ class TransfermarktDataManager:
                     'severity': injury_obj.severity,
                     'status': injury_obj.status,
                     'recovery_days': injury_obj.days_out or 0,
+                    'missed_matches': injury_obj.missed_matches or 0,
                     'injury_date': injury_obj.start_date.strftime('%Y-%m-%d') if injury_obj.start_date else None,
                     'return_date': injury_obj.return_date.strftime('%Y-%m-%d') if injury_obj.return_date else None,
                     'market_value': 0, # Campo pendiente si se añade a la DB
-                    'matches_missed': 0 # Calculado dinámicamente si fuera necesario
                 })
             return injuries_list
         finally:
@@ -440,5 +443,45 @@ class TransfermarktDataManager:
                 log.last_run = datetime.now()
                 log.status = "SUCCESS"
             session.commit()
+        finally:
+            session.close()
+
+    def _upsert_history_to_sql(self, player_id: str, raw_matches: List[Dict]):
+        """Helper to upsert match history data."""
+        session = SessionFactory()
+        try:
+            for m in raw_matches:
+                dt = self._parse_date(m.get('date'))
+                if not dt: continue
+                
+                existing = session.execute(
+                    select(MatchHistory).where(
+                        MatchHistory.player_id == player_id,
+                        MatchHistory.date == dt,
+                        MatchHistory.opponent == m.get('opponent')
+                    )
+                ).scalar_one_or_none()
+                
+                if not existing:
+                    history = MatchHistory(
+                        player_id=player_id,
+                        date=dt,
+                        competition_name=m.get('competition'),
+                        competition_logo=m.get('competition_logo'),
+                        opponent=m.get('opponent'),
+                        result=m.get('result'),
+                        minutes_played=m.get('minutes_played', 0),
+                        goals=m.get('goals', 0),
+                        assists=m.get('assists', 0),
+                        yellow_cards=m.get('yellow_cards', 0),
+                        red_cards=m.get('red_cards', 0),
+                        position=m.get('position'),
+                        status=m.get('status', 'Jugado')
+                    )
+                    session.add(history)
+            session.commit()
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error in _upsert_history_to_sql: {e}")
         finally:
             session.close()

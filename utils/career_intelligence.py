@@ -38,6 +38,7 @@ class DashboardInsightItem:
     body: str
     support: str
     evidence_key: str
+    focus_metric: str = ""
     llm_generated: bool = False
     source_model: str = ""
     emphasis: str = "neutral"
@@ -82,6 +83,8 @@ class CareerProgressionFeatures:
     latest_minutes: int
     latest_primary_metric: float
     evidence_flags: List[str]
+    recent_metric_label: str = ""
+    recent_metric_delta_pct: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -129,6 +132,39 @@ _SECONDARY_METRICS: Dict[str, Tuple[str, ...]] = {
     "Midfielder": ("Assists", "Pass accuracy", "Progressive runs"),
     "Defender": ("Interceptions", "Tackles", "Pass accuracy"),
     "Goalkeeper": ("Save percentage", "Pass accuracy", "Interceptions"),
+}
+
+_CONSISTENCY_METRICS: Dict[str, Tuple[Tuple[str, float], ...]] = {
+    "Forward": (
+        ("Goals", 0.35),
+        ("Assists", 0.15),
+        ("xG", 0.25),
+        ("Minutes played", 0.25),
+    ),
+    "Winger": (
+        ("Goals", 0.20),
+        ("Assists", 0.20),
+        ("Progressive runs per 90", 0.25),
+        ("Minutes played", 0.35),
+    ),
+    "Midfielder": (
+        ("Accurate passes, %", 0.25),
+        ("Progressive passes per 90", 0.25),
+        ("Successful attacking actions per 90", 0.20),
+        ("Minutes played", 0.30),
+    ),
+    "Defender": (
+        ("Duels won, %", 0.30),
+        ("Interceptions per 90", 0.25),
+        ("Accurate passes, %", 0.15),
+        ("Minutes played", 0.30),
+    ),
+    "Goalkeeper": (
+        ("Save rate, %", 0.35),
+        ("Prevented goals per 90", 0.25),
+        ("Accurate passes, %", 0.15),
+        ("Minutes played", 0.25),
+    ),
 }
 
 # Correlation table: metric → estimated Pearson correlation with minutes_played
@@ -319,6 +355,76 @@ def _extract_recent_form_comparison(player: Any) -> Dict[str, Any]:
     return comparison if isinstance(comparison, dict) else {}
 
 
+def _extract_recent_form_windows(player: Any) -> Dict[str, Any]:
+    """Returns recent form windows when available."""
+    if isinstance(player, dict):
+        recent_windows = player.get("recent_form_windows") or {}
+    else:
+        recent_windows = getattr(player, "recent_form_windows", None) or {}
+    return recent_windows if isinstance(recent_windows, dict) else {}
+
+
+def _compute_window_per90(total: Any, minutes: Any) -> float:
+    try:
+        total_val = float(total)
+        minutes_val = float(minutes)
+    except (TypeError, ValueError):
+        return 0.0
+    if minutes_val <= 0:
+        return 0.0
+    return (total_val * 90.0) / minutes_val
+
+
+def _compute_recent_metric_signal(player: Any, position_group: str) -> Tuple[str, float]:
+    """Returns the recent position-aware metric label and delta percentage."""
+    recent_windows = _extract_recent_form_windows(player)
+    comparison = (recent_windows.get("comparisons") or {}).get("last5_vs_previous5") or {}
+    last5 = recent_windows.get("last5") or {}
+    previous5 = recent_windows.get("previous5") or {}
+
+    def _delta(current_value: float, previous_value: float) -> float:
+        if previous_value <= 0:
+            return 0.0
+        return round(((current_value - previous_value) / abs(previous_value)) * 100.0, 2)
+
+    def _fallback_from_comparison() -> Tuple[str, float]:
+        if int(comparison.get("matches") or 0) < 10:
+            return "", 0.0
+        if position_group in {"Forward", "Winger"}:
+            return "Goal contribution", float(comparison.get("goal_contributions_trend_pct") or 0.0)
+        if position_group == "Midfielder":
+            return "Attacking contribution", float(comparison.get("goal_contributions_trend_pct") or 0.0)
+        return "", 0.0
+
+    if not isinstance(last5, dict) or not isinstance(previous5, dict):
+        return _fallback_from_comparison()
+    if int(last5.get("matches") or 0) != 5 or int(previous5.get("matches") or 0) != 5:
+        return _fallback_from_comparison()
+
+    if position_group in {"Forward", "Winger"}:
+        label = "Goal contribution"
+        current = _compute_window_per90(last5.get("goal_contributions_total"), last5.get("minutes_total"))
+        previous = _compute_window_per90(previous5.get("goal_contributions_total"), previous5.get("minutes_total"))
+        return label, _delta(current, previous)
+
+    if position_group == "Midfielder":
+        label = "Attacking contribution"
+        current = _compute_window_per90(last5.get("goal_contributions_total"), last5.get("minutes_total"))
+        previous = _compute_window_per90(previous5.get("goal_contributions_total"), previous5.get("minutes_total"))
+        return label, _delta(current, previous)
+
+    if position_group == "Defender":
+        total_actions = int(last5.get("goal_contributions_total") or 0) + int(previous5.get("goal_contributions_total") or 0)
+        if total_actions < 2:
+            return "", 0.0
+        label = "Attacking contribution"
+        current = _compute_window_per90(last5.get("goal_contributions_total"), last5.get("minutes_total"))
+        previous = _compute_window_per90(previous5.get("goal_contributions_total"), previous5.get("minutes_total"))
+        return label, _delta(current, previous)
+
+    return "", 0.0
+
+
 def _compute_composite_momentum_score(
     primary_trend_pct: float,
     secondary_trend_pct: float,
@@ -345,6 +451,8 @@ def _compute_composite_momentum_score(
     score += {"up": 0.35, "stable": 0.0, "down": -0.4}.get(str(coach_direction or "stable"), 0.0)
     if coach_delta_pct <= -45:
         score -= 1.0
+    elif coach_delta_pct <= -35:
+        score -= 0.75
     elif coach_delta_pct <= -25:
         score -= 0.55
     elif coach_delta_pct >= 20:
@@ -357,6 +465,8 @@ def _compute_composite_momentum_score(
         score += 0.2
     elif attacking_weight and attacking_output_trend_pct <= -25:
         score -= 0.2
+    if coach_delta_pct <= -35 and str(coach_direction or "stable") == "down":
+        score = min(score, 4.0)
     if coach_delta_pct <= -45 and str(consistency_level or "MODERADA") == "BAJA":
         score = min(score, 4.0)
     return max(0, min(5, int(round(score))))
@@ -383,6 +493,17 @@ def _compute_attacking_output_trend_pct(history_df: pd.DataFrame, position_group
         combined["assists_value"] = pd.to_numeric(history_df[assists_col], errors="coerce").fillna(0.0)
     combined["attacking_output"] = combined.sum(axis=1)
     return _compute_weighted_trend_pct(combined, "attacking_output")
+
+
+def _compute_consistency_cv(series: pd.Series) -> Optional[float]:
+    values = pd.to_numeric(series, errors="coerce").dropna()
+    if len(values) < 2:
+        return None
+    mean_val = float(values.mean())
+    if mean_val == 0:
+        return None
+    cv = float(values.std() / abs(mean_val))
+    return cv if not math.isnan(cv) else None
 
 
 def build_career_progression_features(
@@ -415,6 +536,7 @@ def build_career_progression_features(
     recent_comparison = _extract_recent_form_comparison(player)
     recent_minutes_delta_pct = float(recent_comparison.get("minutes_trend_pct") or 0.0)
     recent_goal_contributions_delta_pct = float(recent_comparison.get("goal_contributions_trend_pct") or 0.0)
+    recent_metric_label, recent_metric_delta_pct = _compute_recent_metric_signal(player, pos_group)
     recent_sample_size = int(recent_comparison.get("matches") or 0)
 
     coach_conf = (career_signals or {}).get("coach_confidence") or _compute_coach_confidence(history_df)
@@ -430,7 +552,7 @@ def build_career_progression_features(
         coach_direction=str(coach_conf.get("direction") or "stable"),
         coach_delta_pct=float(coach_conf.get("delta_pct") or 0.0),
         recent_minutes_delta_pct=recent_minutes_delta_pct,
-        recent_goal_contributions_delta_pct=recent_goal_contributions_delta_pct,
+        recent_goal_contributions_delta_pct=recent_metric_delta_pct,
         position_group=pos_group,
     )
 
@@ -462,9 +584,9 @@ def build_career_progression_features(
             evidence_flags.append("recent_minutes_up")
         elif recent_minutes_delta_pct <= -10:
             evidence_flags.append("recent_minutes_down")
-        if recent_goal_contributions_delta_pct >= 10:
+        if recent_metric_delta_pct >= 10:
             evidence_flags.append("recent_output_up")
-        elif recent_goal_contributions_delta_pct <= -10:
+        elif recent_metric_delta_pct <= -10:
             evidence_flags.append("recent_output_down")
 
     return CareerProgressionFeatures(
@@ -493,6 +615,8 @@ def build_career_progression_features(
         ),
         recent_minutes_delta_pct=recent_minutes_delta_pct,
         recent_goal_contributions_delta_pct=recent_goal_contributions_delta_pct,
+        recent_metric_label=recent_metric_label,
+        recent_metric_delta_pct=recent_metric_delta_pct,
         recent_sample_size=recent_sample_size,
         season_count=season_count,
         latest_minutes=latest_minutes,
@@ -528,12 +652,74 @@ def get_career_phase_data(player: Any, history_df: pd.DataFrame) -> Dict[str, An
             "age": 0,
         }
 
+    if isinstance(player, dict):
+        player_identifier = str(
+            player.get("player_id")
+            or player.get("id")
+            or player.get("player_name")
+            or player.get("name")
+            or "unknown"
+        )
+        player_name = str(player.get("player_name") or player.get("name") or "Unknown player")
+    else:
+        player_identifier = str(
+            getattr(player, "player_id", None)
+            or getattr(player, "id", None)
+            or getattr(player, "player_name", None)
+            or getattr(player, "name", None)
+            or "unknown"
+        )
+        player_name = str(getattr(player, "player_name", None) or getattr(player, "name", None) or "Unknown player")
+
+    resolution_payload = {
+        "base_phase": features.base_phase,
+        "resolved_phase": features.base_phase,
+        "base_momentum": features.base_momentum,
+        "resolved_momentum": features.base_momentum,
+        "ai_used": False,
+        "ai_model": "",
+        "adjustment_applied": False,
+        "adjustment_reason": "Deterministic baseline only.",
+        "confidence": "medium",
+        "supporting_factors": [],
+        "contradictions": [],
+    }
+    resolved_phase = features.base_phase
+    resolved_momentum = features.base_momentum
+
+    try:
+        from utils.domain_ai.career_progression_assessor_ai import resolve_career_progression_cached
+
+        resolution = resolve_career_progression_cached(
+            player_identifier=player_identifier,
+            player_name=player_name,
+            features=features,
+        )
+        resolved_phase = resolution.resolved_phase
+        resolved_momentum = resolution.resolved_momentum
+        resolution_payload = {
+            "base_phase": resolution.base_phase,
+            "resolved_phase": resolution.resolved_phase,
+            "base_momentum": resolution.base_momentum,
+            "resolved_momentum": resolution.resolved_momentum,
+            "ai_used": resolution.ai_used,
+            "ai_model": resolution.ai_model,
+            "adjustment_applied": resolution.adjustment_applied,
+            "adjustment_reason": resolution.adjustment_reason,
+            "confidence": resolution.confidence,
+            "supporting_factors": list(resolution.supporting_factors),
+            "contradictions": list(resolution.contradictions),
+        }
+    except Exception:
+        pass
+
     return {
-        "career_phase": features.base_phase,
-        "momentum_score": features.base_momentum,
+        "career_phase": resolved_phase,
+        "momentum_score": resolved_momentum,
         "peak_range": features.peak_range,
         "age": features.age,
         "progression_features": features,
+        "progression_resolution": resolution_payload,
     }
 
 
@@ -582,8 +768,17 @@ def get_career_signals(
 
 
 def _compute_coach_confidence(history_df: pd.DataFrame) -> Dict[str, Any]:
-    """Minutes played YoY trend → coach confidence label."""
-    _default = {"label": "Rol estable", "delta_pct": 0.0, "direction": "stable"}
+    """Career-long role regularity with a short-term directional adjustment."""
+    _default = {
+        "label": "Rol estable",
+        "delta_pct": 0.0,
+        "direction": "stable",
+        "season_regular_share": 0.0,
+        "regular_seasons": 0,
+        "relevant_minutes_threshold": 900,
+        "latest_minutes": 0.0,
+        "baseline_minutes": 0.0,
+    }
 
     if history_df is None or history_df.empty:
         return _default
@@ -593,34 +788,48 @@ def _compute_coach_confidence(history_df: pd.DataFrame) -> Dict[str, Any]:
         return _default
 
     valid = history_df[col].dropna()
-    if len(valid) < 2:
+    if len(valid) < 1:
         return _default
 
-    prev = float(valid.iloc[-2])
     curr = float(valid.iloc[-1])
+    baseline = float(valid.mean()) if len(valid) else 0.0
+    threshold = int(max(600, min(1200, round((float(valid.median()) if len(valid) else 900) * 0.65))))
+    regular_seasons = int((valid >= threshold).sum())
+    season_regular_share = round(regular_seasons / len(valid), 2) if len(valid) else 0.0
+    latest_vs_average_pct = ((curr - baseline) / abs(baseline) * 100.0) if baseline else 0.0
 
-    if prev == 0:
-        return _default
+    prev = float(valid.iloc[-2]) if len(valid) >= 2 else 0.0
+    yoy_delta_pct = ((curr - prev) / abs(prev) * 100.0) if prev else 0.0
+    delta_pct = (latest_vs_average_pct * 0.7) + (yoy_delta_pct * 0.3)
 
-    delta_pct = (curr - prev) / abs(prev) * 100
-
-    if delta_pct >= 15:
+    if season_regular_share >= 0.75 and curr >= threshold:
         label = "Titular consolidado"
-        direction = "up"
-    elif delta_pct > 5:
-        label = "Rol creciente"
-        direction = "up"
-    elif delta_pct >= -5:
-        label = "Rol estable"
-        direction = "stable"
-    elif delta_pct >= -20:
+    elif season_regular_share >= 0.55 and curr >= threshold * 0.8:
+        label = "Rol creciente" if delta_pct >= 8 else "Rol estable"
+    elif season_regular_share >= 0.35 or curr >= threshold * 0.6:
         label = "Rol disminuyendo"
-        direction = "down"
     else:
         label = "Señal de alerta"
-        direction = "down"
 
-    return {"label": label, "delta_pct": round(delta_pct, 2), "direction": direction}
+    if delta_pct >= 12:
+        direction = "up"
+    elif delta_pct <= -12:
+        direction = "down"
+    else:
+        direction = "stable"
+
+    return {
+        "label": label,
+        "delta_pct": round(delta_pct, 2),
+        "direction": direction,
+        "season_regular_share": season_regular_share,
+        "regular_seasons": regular_seasons,
+        "relevant_minutes_threshold": threshold,
+        "latest_minutes": round(curr, 2),
+        "baseline_minutes": round(baseline, 2),
+        "latest_vs_average_pct": round(latest_vs_average_pct, 2),
+        "yoy_delta_pct": round(yoy_delta_pct, 2),
+    }
 
 
 def _compute_transfer_window(career_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -658,34 +867,41 @@ def _compute_transfer_window(career_data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _compute_consistency_score(pos_group: str, history_df: pd.DataFrame) -> Dict[str, Any]:
-    """CV of primary metric across seasons → consistency level."""
-    _default = {"level": "MODERADA", "cv": 0.0}
+    """Composite cross-season stability score using position-relevant metrics."""
+    _default = {"level": "MODERADA", "cv": 0.0, "metrics_used": []}
 
     if history_df is None or history_df.empty:
         return _default
 
-    metric = _PRIMARY_METRICS.get(pos_group)
-    if metric is None or metric not in history_df.columns:
+    metric_specs = _CONSISTENCY_METRICS.get(pos_group)
+    if not metric_specs:
         return _default
 
-    values = history_df[metric].dropna()
-    if len(values) < 2:
+    weighted_cvs: List[Tuple[float, float]] = []
+    metrics_used: List[str] = []
+    for metric_name, weight in metric_specs:
+        if metric_name not in history_df.columns:
+            continue
+        cv = _compute_consistency_cv(history_df[metric_name])
+        if cv is None:
+            continue
+        weighted_cvs.append((cv, weight))
+        metrics_used.append(metric_name)
+
+    if not weighted_cvs:
         return _default
 
-    mean_val = values.mean()
-    if mean_val == 0:
-        return _default
+    total_weight = sum(weight for _, weight in weighted_cvs)
+    composite_cv = sum(cv * weight for cv, weight in weighted_cvs) / total_weight if total_weight else 0.0
 
-    cv = float(values.std() / mean_val)
-
-    if cv < 0.15:
+    if composite_cv < 0.22:
         level = "ALTA"
-    elif cv <= 0.35:
+    elif composite_cv <= 0.42:
         level = "MODERADA"
     else:
         level = "BAJA"
 
-    return {"level": level, "cv": round(cv, 4)}
+    return {"level": level, "cv": round(composite_cv, 4), "metrics_used": metrics_used}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -711,7 +927,8 @@ def get_development_priorities(percentiles_data: Dict[str, int]) -> List[Dict[st
     mantener: List[Dict[str, Any]] = []
 
     for metric, percentile in percentiles_data.items():
-        pct = int(percentile) if percentile is not None else 50
+        extracted_percentile = _extract_percentile(percentile)
+        pct = extracted_percentile if extracted_percentile is not None else 50
         corr = METRIC_CORRELATION_TABLE.get(metric, 0.2)
 
         if pct < 50:

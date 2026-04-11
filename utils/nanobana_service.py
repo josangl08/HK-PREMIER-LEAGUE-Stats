@@ -105,15 +105,24 @@ _IMAGE_GEN_TIERS = [
 # Generation helpers
 # ---------------------------------------------------------------------------
 
-def _generate_with_gemini_image(client, model_name: str, prompt: str) -> Optional[bytes]:
+def _generate_with_gemini_image(
+    client, model_name: str, prompt: str, extra_images: list[dict] | None = None
+) -> Optional[bytes]:
     """Calls a Gemini image-generation model via generate_content with IMAGE modality.
+
+    extra_images: list of {"data": bytes, "mime": str} dicts prepended before the prompt
+    (design references, team badges, player photo for style/color context).
     Note: response_mime_type must NOT be set for native image models — images are
     returned as inline_data, not as a MIME-typed response body.
     """
     from google.genai import types
+    contents: list = []
+    for img in (extra_images or []):
+        contents.append(types.Part.from_bytes(data=img["data"], mime_type=img["mime"]))
+    contents.append(prompt)
     response = client.models.generate_content(
         model=model_name,
-        contents=prompt,
+        contents=contents,
         config=types.GenerateContentConfig(
             response_modalities=["IMAGE"],
         ),
@@ -145,10 +154,66 @@ def _generate_with_imagen(client, model_name: str, prompt: str) -> Optional[byte
 # Public API
 # ---------------------------------------------------------------------------
 
-def generate_nanobana_background(prompt: str) -> Optional[bytes]:
+def generate_nanobana_image(parts: list) -> Optional[bytes]:
     """
-    Generates a background image using the Gemini image-gen tier hierarchy.
+    V4 Entry Point: Generates a 100% integrated card from a list of parts (bytes + strings).
+    Tries the same tier hierarchy as background generation.
+    """
+    api_key = GOOGLE_API_KEY
+    if not api_key:
+        logger.error("Nanobana: GOOGLE_API_KEY not set.")
+        return None
+
+    from google import genai
+    from google.genai import types as _types
+    client = genai.Client(
+        api_key=api_key,
+        http_options=_types.HttpOptions(api_version="v1beta", timeout=120_000), # Extended timeout for high-fidelity
+    )
+
+    available = [
+        (label, model, kind) for label, model, kind in _IMAGE_GEN_TIERS
+        if not _is_exhausted(model) and kind == "gemini" # One-shot requires multimodal Gemini
+    ]
+
+    if not available:
+        logger.warning("Nanobana: No multimodal models available for One-shot.")
+        return None
+
+    for label, model_name, _ in available:
+        logger.info(f"Nanobana V4: trying {label} ({model_name})")
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=parts,
+                config=_types.GenerateContentConfig(
+                    response_modalities=["IMAGE"],
+                ),
+            )
+            for part in (response.candidates[0].content.parts if response.candidates else []):
+                if part.inline_data and part.inline_data.mime_type.startswith("image/"):
+                    logger.info(f"Nanobana V4: Image generated via {label}.")
+                    return part.inline_data.data
+        except Exception as exc:
+            err_str = str(exc)
+            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                _mark_exhausted(model_name, exc)
+                continue
+            logger.error(f"Nanobana V4: {label} error: {exc}")
+            continue
+    return None
+
+def generate_nanobana_background(
+    prompt: str,
+    extra_images: list[dict] | None = None,
+) -> Optional[bytes]:
+    """
+    Generates a background/card image using the Gemini image-gen tier hierarchy.
     Tries Nano Banana Pro → Nano Banana 2 → Nano Banana → Imagen 4.
+
+    extra_images: list of {"data": bytes, "mime": str} — design references,
+    team badges, player photo — passed to Gemini models as multimodal context.
+    Ignored for Imagen (text-only API).
 
     Exhausted models are persisted to disk with a 1-hour TTL so subsequent
     calls (including after app restart) skip them immediately.
@@ -159,7 +224,11 @@ def generate_nanobana_background(prompt: str) -> Optional[bytes]:
         return None
 
     from google import genai
-    client = genai.Client(api_key=api_key, http_options={"api_version": "v1beta"})
+    from google.genai import types as _types
+    client = genai.Client(
+        api_key=api_key,
+        http_options=_types.HttpOptions(api_version="v1beta", timeout=90_000),  # 90s timeout
+    )
 
     available = [
         (label, model, kind) for label, model, kind in _IMAGE_GEN_TIERS
@@ -177,12 +246,16 @@ def generate_nanobana_background(prompt: str) -> Optional[bytes]:
         )
         return None
 
+    n_refs = len(extra_images) if extra_images else 0
+    logger.info(f"Nanobana: starting generation (extra_images={n_refs})")
+
     for label, model_name, kind in available:
         logger.info(f"Nanobana: trying {label} ({model_name})")
         try:
             if kind == "gemini":
-                image_bytes = _generate_with_gemini_image(client, model_name, prompt)
+                image_bytes = _generate_with_gemini_image(client, model_name, prompt, extra_images)
             else:
+                # Imagen only accepts text — skip extra_images
                 image_bytes = _generate_with_imagen(client, model_name, prompt)
 
             if image_bytes:
@@ -196,6 +269,12 @@ def generate_nanobana_background(prompt: str) -> Optional[bytes]:
                 ttl = _parse_retry_after(exc)
                 _mark_exhausted(model_name, exc)
                 logger.warning(f"Nanobana: {label} quota exhausted — retry in ~{int(ttl//60)}m.")
+                continue
+            if "504" in err_str or "DEADLINE_EXCEEDED" in err_str or "timed out" in err_str.lower():
+                logger.warning(f"Nanobana: {label} timed out — trying next tier.")
+                continue
+            if "503" in err_str or "UNAVAILABLE" in err_str:
+                logger.warning(f"Nanobana: {label} unavailable — trying next tier.")
                 continue
             logger.error(f"Nanobana: {label} unexpected error: {exc}")
             continue

@@ -1,9 +1,13 @@
 # ABOUTME: Helper functions for rendering Stage scenarios, AI widgets, and image gallery (Feature G).
 # ABOUTME: Renders player dashboard (default), post-match (Doble Capa: High-Fidelity/Fallback), pre-match, career-insights, and Action Node gallery views.
 
+import hashlib
+import json
 import logging
 import os
 import threading
+import time
+import copy
 import html as _html_lib
 import re
 from datetime import timezone, timedelta
@@ -21,19 +25,86 @@ from sqlalchemy import select
 from utils.app_context import get_hong_kong_data_manager
 from utils.chart_helpers import apply_hkfa_theme, glass_figure_layout, HKFATheme
 import dash_cytoscape as cyto
-from utils.ai_services.evidence_router import get_evidence_destination_meta, normalize_evidence_key
+from utils.ai_services.evidence_router import (
+    get_evidence_destination_meta,
+    normalize_evidence_key,
+    resolve_career_surface_evidence_key,
+)
 from utils.ai_services.llm_client import generate_gemini_content
 from utils.ai_services.orchestration import parse_structured_json
 from utils.ai_services.prompt_builders import build_career_narrative_prompt
 from utils.ai_helpers import umap_scatter_chart, constellation_chart, _build_knn_edges
 from data.processors.hong_kong_processor import POSITION_FULL_NAMES
 from utils.competition_helpers import get_competition_logo, normalize_competition
+from utils.cache import cache
 
 # Numba/UMAP is not thread-safe with the default workqueue layer.
 # This lock serializes concurrent calls to fit_umap across Flask threads.
 _umap_lock = threading.Lock()
+_dashboard_data_fetch_lock = threading.Lock()
 
 logger = logging.getLogger(__name__)
+
+_DASHBOARD_DATA_CACHE_VERSION = "v1"
+_DASHBOARD_DATA_CACHE_TTL_SECONDS = 30
+
+
+def _build_dashboard_data_cache_key(player_name: str, player_id: str) -> str:
+    return f"player-dashboard-data:{_DASHBOARD_DATA_CACHE_VERSION}:{player_id or 'unknown'}:{player_name or 'unknown'}"
+
+
+def _get_cached_dashboard_data(player_name: str, player_id: str) -> Optional[Dict[str, Any]]:
+    try:
+        cached_payload = cache.get(_build_dashboard_data_cache_key(player_name, player_id))
+        if isinstance(cached_payload, dict):
+            return copy.deepcopy(cached_payload)
+    except Exception:
+        pass
+    return None
+
+
+def _set_cached_dashboard_data(player_name: str, player_id: str, payload: Dict[str, Any]) -> None:
+    try:
+        cache.set(
+            _build_dashboard_data_cache_key(player_name, player_id),
+            copy.deepcopy(payload),
+            timeout=_DASHBOARD_DATA_CACHE_TTL_SECONDS,
+        )
+    except Exception:
+        pass
+
+# In-process cache for Gemini career-insight calls.
+# Key: (player_name, primary_metric) — reused across timeline navigation within the same session.
+_career_insight_cache: dict[tuple, Optional[str]] = {}
+
+# Disk cache for career insights — survives server restarts, TTL 2 weeks.
+_INSIGHT_CACHE_DIR = Path("cache/career_insights")
+_INSIGHT_CACHE_TTL = 60 * 60 * 24 * 14  # 14 days in seconds
+
+
+def _insight_cache_path(player_name: str, primary_metric: str) -> Path:
+    slug = hashlib.md5(f"{player_name}:{primary_metric}".encode()).hexdigest()[:12]
+    return _INSIGHT_CACHE_DIR / f"{slug}.json"
+
+
+def _read_insight_disk_cache(path: Path) -> Optional[str]:
+    try:
+        if not path.exists():
+            return None
+        data = json.loads(path.read_text("utf-8"))
+        if time.time() - data.get("ts", 0) > _INSIGHT_CACHE_TTL:
+            return None  # expired
+        return data.get("insight")
+    except Exception:
+        return None
+
+
+def _write_insight_disk_cache(path: Path, insight: str) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"ts": time.time(), "insight": insight}), "utf-8")
+    except Exception:
+        pass  # write failure is non-fatal
 
 
 _COUNTRY_TO_ISO2 = {
@@ -1026,6 +1097,9 @@ def _generate_career_insight(
     Falls back to the original template-based approach when the API is
     unavailable or the API key is not configured.
 
+    Results are cached in-process by (player_name, primary_metric) so repeated
+    timeline navigation does not trigger redundant API calls.
+
     Args:
         history_df:       Multi-season history DataFrame.
         primary_metric:   Key metric to highlight (position-specific).
@@ -1034,6 +1108,19 @@ def _generate_career_insight(
         form_trend:       Output of ``get_form_trend`` (optional).
         transferability:  Output of ``get_transferability_score`` (optional).
     """
+    cache_key = (player_name, primary_metric)
+
+    # 1. In-memory cache (fastest, per-session)
+    if cache_key in _career_insight_cache:
+        return _career_insight_cache[cache_key]
+
+    # 2. Disk cache (survives restarts, 2-week TTL)
+    disk_path = _insight_cache_path(player_name, primary_metric)
+    cached_on_disk = _read_insight_disk_cache(disk_path)
+    if cached_on_disk is not None:
+        _career_insight_cache[cache_key] = cached_on_disk
+        return cached_on_disk
+
     def _template_fallback() -> Optional[str]:
         try:
             if history_df.empty or primary_metric not in history_df.columns:
@@ -1085,14 +1172,22 @@ def _generate_career_insight(
         if raw_text:
             structured = parse_structured_json(raw_text)
             if isinstance(structured, dict):
-                return structured.get("body", raw_text)
-            logger.debug("_generate_career_insight: JSON parse failed, using raw text")
-            return raw_text
+                result = structured.get("body", raw_text)
+            else:
+                logger.debug("_generate_career_insight: JSON parse failed, using raw text")
+                result = raw_text
+            _career_insight_cache[cache_key] = result
+            _write_insight_disk_cache(disk_path, result)
+            return result
 
     except Exception as e:
         logger.debug(f"_generate_career_insight Gemini error: {e}")
 
-    return _template_fallback()
+    fallback = _template_fallback()
+    _career_insight_cache[cache_key] = fallback  # cache fallback too to avoid retry on every open
+    if fallback:
+        _write_insight_disk_cache(disk_path, fallback)
+    return fallback
 
 
 def _build_delta_kpis(
@@ -1206,7 +1301,7 @@ def _render_rating_sparkline(ratings: List[float]) -> html.Div:
     
     return html.Div([
         html.Div([
-            html.Small("Trend", className="postmatch-sparkline-label"),
+            html.Small("Recent Trend", className="postmatch-sparkline-label", title="Rating trend from the last 5 matches"),
             html.Img(src=f"data:image/svg+xml;base64,{_build_sparkline_svg(ratings)}", className="postmatch-sparkline-img")
         ])
     ], className="postmatch-trend-sparkline d-inline-block ms-3")
@@ -1295,59 +1390,126 @@ def render_post_match(payload: Dict[str, Any]) -> html.Div:
     except Exception:
         pass
 
+    # ── RICH HEADER (Common for both Scenarios) ──────────────────────
+    home_jersey = _resolve_team_jersey(home, "home")
+    away_jersey = _resolve_team_jersey(away, "home")
+
+    def _team_block_post(name: str, logo: str, align: str, jersey: str = "") -> html.Div:
+        justify = "flex-start" if align == "left" else "flex-end"
+        crest_block = html.Div([
+            html.Img(src=logo, style={"width": "100px", "height": "100px", "objectFit": "contain"}) if logo else html.Div(
+                name[:2].upper(),
+                style={
+                    "width": "100px", "height": "100px", "borderRadius": "50%",
+                    "display": "flex", "alignItems": "center", "justifyContent": "center",
+                    "background": "rgba(255,255,255,0.08)", "color": "#f3f7fb", "fontWeight": "800",
+                },
+            ),
+            html.Div(name or "TBC", style={"color": "#f4f8fc", "fontWeight": "700", "fontSize": "1.02rem", "textAlign": "center", "marginTop": "10px", "width": "100px"}),
+        ], style={"display": "flex", "flexDirection": "column", "alignItems": "center", "justifyContent": "center"})
+        return html.Div([
+            html.Div([
+                html.Img(src=jersey, style={"width": "96px", "height": "96px", "objectFit": "contain", "opacity": "0.98"}) if jersey and align == "right" else None,
+                crest_block,
+                html.Img(src=jersey, style={"width": "96px", "height": "96px", "objectFit": "contain", "opacity": "0.98"}) if jersey and align == "left" else None,
+            ], style={"display": "flex", "justifyContent": justify, "alignItems": "center", "gap": "8px"}),
+        ], style={"flex": "1", "textAlign": "center", "display": "flex", "flexDirection": "column", "alignItems": "center"})
+
+    # Extract broadcast metadata from payload (Copied from Pre-Match logic)
+    streaming_url = _clean_url(payload.get("streaming_url") or "")
+    stream_href = streaming_url if streaming_url and "facebook.com" not in streaming_url.lower() else ""
+    has_var = bool(payload.get("has_var"))
+    is_tv = bool(payload.get("is_tv"))
+    broadcast_type = str(payload.get("broadcast_type") or "").strip()
+    
+    broadcast_chips: List[Any] = []
+    def _chip(icon: str, label: str, accent: str, href: str = "") -> Any:
+        content = html.Span([
+            html.I(className=f"bi {icon} me-1", style={"color": accent, "fontSize": "0.82rem"}),
+            html.Span(label, style={"color": "#eef4fa", "fontWeight": "400"}),
+        ], style={"display": "inline-flex", "alignItems": "center"})
+        common_style = {
+            "display": "inline-flex",
+            "alignItems": "center",
+            "padding": "6px 10px",
+            "borderRadius": "999px",
+            "background": f"rgba({_hex_to_rgb(accent)}, 0.12)",
+            "border": f"1px solid rgba({_hex_to_rgb(accent)}, 0.28)",
+            "textDecoration": "none",
+            "whiteSpace": "nowrap",
+            "fontSize": "0.78rem",
+        }
+        if href:
+            return html.A(content, href=href, target="_blank", style=common_style)
+        return html.Span(content, style=common_style)
+
+    if has_var:
+        broadcast_chips.append(_chip("bi-camera-video-fill", "VAR", HKFATheme.ACCENT_GOLD))
+    if is_tv:
+        broadcast_chips.append(_chip("bi-broadcast-pin", "RTHK", HKFATheme.ACCENT_BLUE))
+    if broadcast_type.lower() == "free":
+        broadcast_chips.append(_chip("bi-play-circle", "on.cc Free", "#54d29a", href=stream_href))
+    elif broadcast_type.lower() in {"ppv", "pay-per-view"}:
+        broadcast_chips.append(_chip("bi-cash-coin", "on.cc PPV", "#ff8a4c", href=stream_href))
+    elif broadcast_type.lower() == "delayed":
+        broadcast_chips.append(_chip("bi-clock-history", "Delayed", "#b4b9c1"))
+    elif stream_href:
+        broadcast_chips.append(_chip("bi-play-circle", "Watch stream", "#54d29a", href=stream_href))
+
+    # Match date splitting logic (Mirrors Pre-Match format)
+    time_display = date_str
+    date_display = ""
+    raw_kickoff = str(date_str or "").strip()
+    if "·" in raw_kickoff:
+        left, right = [part.strip() for part in raw_kickoff.split("·", 1)]
+        date_display = left.replace(",", "").strip()
+        time_display = right
+    elif "," in raw_kickoff:
+        left, right = [part.strip() for part in raw_kickoff.rsplit(",", 1)]
+        date_display = left.replace(",", "").strip()
+        time_display = right
+    
+    header = html.Div([
+        # Competition row
+        html.Div([
+            html.Img(src=competition_logo, style={"width": "60px", "height": "60px", "objectFit": "contain", "marginRight": "15px"}) if competition_logo else None,
+            html.Div(competition, style={"color": "#f6f8fb", "fontWeight": "700", "fontSize": "1.2rem"}),
+        ], style={"display": "flex", "alignItems": "center", "justifyContent": "center", "marginBottom": "24px"}),
+        
+        # Scorers/Teams row
+        html.Div([
+            _team_block_post(home, home_logo, "right", home_jersey),
+            html.Div([
+                html.Div(result, style={"color": "#f4f8fc", "fontSize": "3rem", "fontWeight": "900", "letterSpacing": "0.05em", "lineHeight": "1"}),
+                html.Div("FINAL", style={"color": HKFATheme.POSITIVE, "fontWeight": "700", "fontSize": "0.75rem", "letterSpacing": "0.15em", "marginTop": "8px"}),
+                html.Div([
+                    html.Div(time_display, style={"color": "#f4f8fc", "fontSize": "0.95rem", "fontWeight": "700", "marginTop": "10px"}),
+                    html.Div(date_display, style={
+                        "color": HKFATheme.ACCENT_GOLD,
+                        "fontWeight": "500",
+                        "fontSize": "0.8rem",
+                        "marginTop": "4px",
+                        "letterSpacing": "0.03em",
+                        "display": "block",
+                        "lineHeight": "1.1",
+                    }) if date_display else None,
+                ], style={"textAlign": "center"}),
+            ], style={"flex": "0 0 160px", "display": "flex", "flexDirection": "column", "alignItems": "center", "justifyContent": "center"}),
+            _team_block_post(away, away_logo, "left", away_jersey),
+        ], style={"display": "flex", "alignItems": "center", "justifyContent": "center", "gap": "5px"}),
+        
+        # Meta footer (Exact copy of Pre-Match footer layout)
+        html.Hr(style={"borderColor": "rgba(255,255,255,0.14)", "margin": "20px 0 18px"}),
+        html.Div([
+            _chip("bi-geo-alt", stadium or "Stadium TBC", HKFATheme.ACCENT_BLUE),
+            html.Div(broadcast_chips, style={"display": "flex", "gap": "10px", "flexWrap": "wrap", "justifyContent": "flex-end"}),
+        ], style={"display": "flex", "justifyContent": "space-between", "alignItems": "center", "gap": "12px", "flexWrap": "wrap"}),
+    ], className="postmatch-header-rich glass-card glass-success p-3 mb-3")
+
     # ── ESCENARIO A: HIGH-FIDELITY (Sofascore/BeSoccer) ──────────────────────
     if is_high_fidelity:
-        from utils.chart_helpers import create_match_heatmap
+        from utils.chart_helpers import create_match_heatmap, create_radar_chart
         
-        # ── RICH HEADER (Copied from Pre-Match logic) ──────────────────────
-        home_jersey = _resolve_team_jersey(home, "home")
-        away_jersey = _resolve_team_jersey(away, "home")
-        
-        def _team_block_post(name: str, logo: str, align: str, jersey: str = "") -> html.Div:
-            justify = "flex-start" if align == "left" else "flex-end"
-            crest_block = html.Div([
-                html.Img(src=logo, style={"width": "72px", "height": "72px", "objectFit": "contain"}) if logo else html.Div(
-                    name[:2].upper(),
-                    style={
-                        "width": "72px", "height": "72px", "borderRadius": "50%",
-                        "display": "flex", "alignItems": "center", "justifyContent": "center",
-                        "background": "rgba(255,255,255,0.08)", "color": "#f3f7fb", "fontWeight": "800",
-                    },
-                ),
-                html.Div(name or "TBC", style={"color": "#f4f8fc", "fontWeight": "700", "fontSize": "0.95rem", "textAlign": "center", "marginTop": "8px", "width": "80px"}),
-            ], style={"display": "flex", "flexDirection": "column", "alignItems": "center", "justifyContent": "center"})
-            return html.Div([
-                html.Div([
-                    html.Img(src=jersey, style={"width": "64px", "height": "64px", "objectFit": "contain", "opacity": "0.9"}) if jersey and align == "right" else None,
-                    crest_block,
-                    html.Img(src=jersey, style={"width": "64px", "height": "64px", "objectFit": "contain", "opacity": "0.9"}) if jersey and align == "left" else None,
-                ], style={"display": "flex", "justifyContent": justify, "alignItems": "center", "gap": "12px"}),
-            ], style={"flex": "1", "textAlign": "center", "display": "flex", "flexDirection": "column", "alignItems": "center"})
-
-        rich_header = html.Div([
-            # Competition row
-            html.Div([
-                html.Img(src=competition_logo, style={"width": "32px", "height": "32px", "objectFit": "contain", "marginRight": "10px"}) if competition_logo else None,
-                html.Div(competition, style={"color": "#f6f8fb", "fontWeight": "600", "fontSize": "0.9rem"}),
-            ], style={"display": "flex", "alignItems": "center", "justifyContent": "center", "marginBottom": "15px"}),
-            
-            # Scorers/Teams row
-            html.Div([
-                _team_block_post(home, home_logo, "right", home_jersey),
-                html.Div([
-                    html.Div(result, style={"color": "#f4f8fc", "fontSize": "2.4rem", "fontWeight": "900", "letterSpacing": "0.05em", "lineHeight": "1"}),
-                    html.Div("FINAL", style={"color": HKFATheme.POSITIVE, "fontWeight": "700", "fontSize": "0.65rem", "letterSpacing": "0.15em", "marginTop": "5px"}),
-                ], style={"flex": "0 0 120px", "display": "flex", "flexDirection": "column", "alignItems": "center", "justifyContent": "center"}),
-                _team_block_post(away, away_logo, "left", away_jersey),
-            ], style={"display": "flex", "alignItems": "center", "justifyContent": "center", "gap": "15px"}),
-            
-            # Meta footer
-            html.Div([
-                html.Small([html.I(className="bi bi-calendar3 me-1"), date_str], className="me-3"),
-                html.Small([html.I(className="bi bi-geo-alt me-1"), stadium or "Stadium"], className=""),
-            ], style={"color": "rgba(255,255,255,0.5)", "textAlign": "center", "marginTop": "15px", "fontSize": "0.75rem"})
-        ], className="postmatch-header-rich glass-card glass-success p-3 mb-3")
-
         heatmap_data = payload.get("heatmap", [])
         heatmap_fig = create_match_heatmap(heatmap_data, height=350)
         
@@ -1383,8 +1545,31 @@ def render_post_match(payload: Dict[str, Any]) -> html.Div:
             for k, v in display_stats.items()
         ]
 
+        # ── Match Radar (90') ──
+        def _get_pct(num, den):
+            if not den: return 0
+            return (num/den)*100
+            
+        match_radar_values = [
+            _get_pct(match_stats.get('accuratePasses', 0), match_stats.get('totalPass', 0)),
+            _get_pct(match_stats.get('duelWon', 0), match_stats.get('duelTotal', 0)),
+            _get_pct(match_stats.get('successfulDribbles', 0), match_stats.get('totalDribbles', 0)),
+            min(100, (match_stats.get('tackles', 0) / 4) * 100),
+            min(100, (match_stats.get('interceptions', 0) / 4) * 100),
+        ]
+        match_radar_labels = ["Passes %", "Duels %", "Dribbles %", "Tackles", "Interceptions"]
+        
+        match_radar_fig = glass_figure_layout(create_radar_chart(
+            values=match_radar_values,
+            metrics=match_radar_labels,
+            title="Match Performance Radar (90')",
+            name="This Match",
+            height=300
+        ))
+        match_radar_fig.update_layout(margin=dict(l=20, r=20, t=40, b=20), showlegend=False)
+
         return html.Div([
-            rich_header,
+            header,
             dbc.Row([
                 dbc.Col([
                     html.Div([
@@ -1399,7 +1584,18 @@ def render_post_match(payload: Dict[str, Any]) -> html.Div:
                     ], className="postmatch-section-header mb-2 px-3"),
                     dcc.Graph(figure=heatmap_fig, config={"displayModeBar": False}, className="w-100")
                 ], width=12, md=8, className="glass-card postmatch-heatmap-col")
-            ], className="g-3"),
+            ], className="g-3 mb-3"),
+            
+            dbc.Row([
+                dbc.Col([
+                    html.Div([
+                        html.I(className="bi bi-broadcast me-2 postmatch-accent-icon"),
+                        html.Span("Performance Radar (90')", className="postmatch-section-title"),
+                    ], className="postmatch-section-header mb-2"),
+                    dcc.Graph(figure=match_radar_fig, config={"displayModeBar": False}, className="w-100")
+                ], width=12, className="glass-card postmatch-radar-col")
+            ]),
+
             html.Div([
                 html.Small([
                     html.I(className="bi bi-stars me-1 postmatch-accent-icon"),
@@ -1407,6 +1603,7 @@ def render_post_match(payload: Dict[str, Any]) -> html.Div:
                 ], className="portal-text-muted")
             ], className="mt-3 text-center")
         ], className=f"stage-view stage-view--postmatch {glass_modifier}".strip())
+
 
     # ── ESCENARIO B: FALLBACK (Transfermarkt Regular) ───────────────────────
     # Radar adaptativo por posición (Task 4.3)
@@ -1440,8 +1637,21 @@ def render_post_match(payload: Dict[str, Any]) -> html.Div:
     from utils.chart_helpers import create_percentile_bars
     percentile_display = {m: percentiles.get(m, 0) for m in radar_metrics}
 
-    # ── KPI icons with animate-glass-pulse (task 6.4) ─────────────────────
-    kpi_icon = html.I(className="bi bi-person-fill me-1 animate-glass-pulse")
+    # ── KPIs from TM (Task 4.4) ──
+    mins = payload.get("minutes_played") or 0
+    goals = payload.get("goals") or 0
+    assists = payload.get("assists") or 0
+    yc = payload.get("yellow_cards") or 0
+    rc = payload.get("red_cards") or 0
+    
+    kpi_badges = html.Div([
+        dbc.Badge(f"{mins}' Min", color="secondary", className="me-2 p-2"),
+        dbc.Badge(f"{goals} G", color="success", className="me-2 p-2") if goals else None,
+        dbc.Badge(f"{assists} A", color="info", className="me-2 p-2") if assists else None,
+        dbc.Badge("🟨", color="warning", className="me-2 p-2") if yc else None,
+        dbc.Badge("🟥", color="danger", className="me-2 p-2") if rc else None,
+        dbc.Badge(position, color="dark", className="me-2 p-2", style={"opacity": 0.8}) if position else None,
+    ], className="d-flex flex-wrap gap-1 align-items-center")
 
     # ── Performance badge: how does this match rank vs player's season? ────
     performance_badge = None
@@ -1531,48 +1741,13 @@ def render_post_match(payload: Dict[str, Any]) -> html.Div:
     except Exception as e:
         logger.debug(f"render_post_match enrichment error: {e}")
 
-    # ── Sparkline: recent rating trend from raw_data ───────────────────────
-    sparkline_el = None
-    try:
-        from models.db_models import MatchHistory as _MH
-        from utils.db_engine import SessionFactory as _SF
-        player_id_logged = _get_logged_in_player_id()
-        if player_id_logged:
-            with _SF() as _sess:
-                recent_matches = (
-                    _sess.query(_MH)
-                    .filter(_MH.player_id == player_id_logged, _MH.raw_data.isnot(None))
-                    .order_by(_MH.date.desc())
-                    .limit(10)
-                    .all()
-                )
-            recent_ratings: List[float] = []
-            for _m in recent_matches:
-                _raw = _m.raw_data or {}
-                _r = _raw.get("besoccer_rating") or _raw.get("rating") or _raw.get("sofascore_rating")
-                if _r is not None:
-                    try:
-                        recent_ratings.append(float(_r))
-                    except (ValueError, TypeError):
-                        pass
-                if len(recent_ratings) >= 5:
-                    break
-            if recent_ratings:
-                sparkline_el = _render_rating_sparkline(list(reversed(recent_ratings)))
-    except Exception:
-        pass
-
     # ── Layout ─────────────────────────────────────────────────────────────
     return html.Div([
             header,
             html.Div([
-                html.Div([
-                    kpi_icon,
-                    html.Span(f"{player_name}", className="fw-semibold me-2"),
-                    html.Small(position, className="portal-text-muted badge postmatch-position-badge"),
-                ], className="d-inline-flex align-items-center"),
+                kpi_badges,
                 sparkline_el,
-            ], className="postmatch-player-row mb-2"),
+            ], className="postmatch-player-row mb-3 d-flex justify-content-between align-items-center"),
             performance_badge,
             vs_avg_row,
             dbc.Row([
@@ -1893,6 +2068,19 @@ def _coerce_cutoff_datetime(payload: Dict[str, Any]) -> Optional[pd.Timestamp]:
         except Exception:
             continue
     return None
+
+
+def _align_cluster_feature_frame(df: pd.DataFrame, feature_names: List[str]) -> pd.DataFrame:
+    """Align cluster features to the model schema and coerce all values to numeric."""
+    if not feature_names:
+        return pd.DataFrame(index=df.index)
+
+    aligned = df.copy()
+    for feature_name in feature_names:
+        if feature_name not in aligned.columns:
+            aligned[feature_name] = 0.0
+
+    return aligned[feature_names].apply(pd.to_numeric, errors="coerce").fillna(0.0)
 
 
 _TEAM_NAME_ALIASES: Dict[str, List[str]] = {
@@ -2500,489 +2688,496 @@ def _fetch_dashboard_data(player_name: str, player_id: str) -> Dict:
     Opens SQLAlchemy session(s), loads all data required by the 6 dashboard builders,
     and returns a single dict. This is the sole DB entry point for the dashboard.
     """
-    from sqlalchemy import select
-    from models.db_models import Player, PlayerPhoto, PlayerSeasonStat, MatchHistory
-    from utils.db_engine import SessionFactory
+    cached_result = _get_cached_dashboard_data(player_name, player_id)
+    if cached_result is not None:
+        return cached_result
 
-    current_season = _get_current_season()
-    result: Dict = {
-        "player_name": player_name,
-        "player_id": player_id,
-        "current_season": current_season,
-        "position_main": None,
-        "pos_group": None,
-        "team_name": None,
-        "archetype": None,
-        "age": None,
-        "birth_date": None,
-        "nationality": None,
-        "birth_country": None,
-        "foot": None,
-        "height": None,
-        "cutout_path": None,
-        "matches_played": 0,
-        "goals": 0,
-        "assists": 0,
-        "minutes_played": 0,
-        "last5_results": [],
-        "recent_form_windows": {},
-        "percentiles_data": {},
-        "history_df": pd.DataFrame(),
-    }
+    with _dashboard_data_fetch_lock:
+        cached_result = _get_cached_dashboard_data(player_name, player_id)
+        if cached_result is not None:
+            return cached_result
 
-    session = SessionFactory()
-    try:
-        # ── Player + photo + team ──────────────────────────────────────────
-        # Query by primary key first (reliable), fall back to name match
-        player_obj = session.get(Player, player_id) if player_id else None
-        if player_obj is None and player_name:
-            player_obj = session.execute(
-                select(Player).where(Player.name == player_name)
-            ).scalars().first()
-        if player_obj:
-            result["position_main"] = player_obj.position_main
-            result["age"]           = player_obj.age
-            result["birth_date"]    = player_obj.birth_date
-            result["nationality"]   = player_obj.nationality
-            result["birth_country"] = player_obj.birth_country
-            result["foot"]          = player_obj.foot
-            result["height"]        = player_obj.height
-            if player_obj.current_team:
-                result["team_name"] = _canonical_team_display_name(player_obj.current_team.name)
+        from sqlalchemy import select
+        from models.db_models import Player, PlayerPhoto, PlayerSeasonStat, MatchHistory
+        from utils.db_engine import SessionFactory
 
-            # Primary photo: blob > cutout_path > original_path
-            primary_photo = next(
-                (p for p in player_obj.photos if getattr(p, "is_primary", False)),
-                player_obj.photos[0] if player_obj.photos else None,
-            )
-            if primary_photo:
-                if primary_photo.photo_data:
-                    import base64
-                    b64 = base64.b64encode(primary_photo.photo_data).decode("utf-8")
-                    result["cutout_path"] = f"data:image/jpeg;base64,{b64}"
-                else:
-                    raw_path = primary_photo.cutout_path or primary_photo.original_path
-                    if raw_path:
-                        web_path = "/" + raw_path if not raw_path.startswith("/") else raw_path
-                        result["cutout_path"] = web_path
+        current_season = _get_current_season()
+        result: Dict = {
+            "player_name": player_name,
+            "player_id": player_id,
+            "current_season": current_season,
+            "position_main": None,
+            "pos_group": None,
+            "team_name": None,
+            "archetype": None,
+            "age": None,
+            "birth_date": None,
+            "nationality": None,
+            "birth_country": None,
+            "foot": None,
+            "height": None,
+            "cutout_path": None,
+            "matches_played": 0,
+            "goals": 0,
+            "assists": 0,
+            "minutes_played": 0,
+            "last5_results": [],
+            "recent_form_windows": {},
+            "percentiles_data": {},
+            "history_df": pd.DataFrame(),
+        }
 
-        # ── Career-wide totals and latest active season ───────────────────
-        stmt_career = (
-            select(PlayerSeasonStat)
-            .where(PlayerSeasonStat.player_id == player_id)
-            .order_by(PlayerSeasonStat.season_id.desc())
-        )
-        all_seasons_stats = session.execute(stmt_career).scalars().all()
-        
-        latest_active_season = current_season
-        if all_seasons_stats:
-            latest_active_season = all_seasons_stats[0].season_id
-            result["matches_played"] = sum(s.matches_played or 0 for s in all_seasons_stats)
-            result["goals"]          = sum(s.goals or 0 for s in all_seasons_stats)
-            result["assists"]        = sum(s.assists or 0 for s in all_seasons_stats)
-            result["minutes_played"] = sum(s.minutes_played or 0 for s in all_seasons_stats)
-
-        # ── Last 5 match results ───────────────────────────────────────────
-        stmt_mh = (
-            select(MatchHistory)
-            .where(MatchHistory.player_id == player_id)
-            .order_by(MatchHistory.date.desc())
-            .limit(10)
-        )
-        matches = session.execute(stmt_mh).scalars().all()
-        
-        # ── Process match outcomes (W/D/L) ─────────────────────────────────
-        last5_data = []
-        player_team = result.get("team_name")
-        import re
-        
-        latest_five_matches = matches[:5]
-        for m in reversed(latest_five_matches):
-            res_str = m.result or ""
-            if not res_str: continue
-            
-            outcome = "EMPTY"
-            score_display = res_str
-            
-            # 1. Check if it's already a code (W/D/L)
-            if res_str.upper() in ["W", "D", "L"]:
-                outcome = res_str.upper()
-                score_display = outcome
-            
-            # 2. Try to derive from score "2:1" and opponent "Home vs Away"
-            elif ":" in res_str and player_team:
-                try:
-                    score_part = res_str.split()[0]
-                    h_score, a_score = map(int, score_part.split(":"))
-                    opp = m.opponent or ""
-                    parts = opp.split(" vs ")
-                    if len(parts) == 2:
-                        h_team_raw, a_team_raw = parts
-                        h_team = re.sub(r'\(\d+\.\)', '', h_team_raw).strip()
-                        a_team = re.sub(r'\(\d+\.\)', '', a_team_raw).strip()
-                        
-                        is_home = player_team.lower() in h_team.lower()
-                        is_away = player_team.lower() in a_team.lower()
-                        
-                        if is_home:
-                            if h_score > a_score: outcome = "W"
-                            elif h_score < a_score: outcome = "L"
-                            else: outcome = "D"
-                        elif is_away:
-                            if a_score > h_score: outcome = "W"
-                            elif a_score < h_score: outcome = "L"
-                            else: outcome = "D"
-                except:
-                    pass
-            
-            last5_data.append({"outcome": outcome, "score": score_display})
-                
-        result["last5_results"] = last5_data
-        result["recent_form_windows"] = _build_recent_form_windows(matches)
-
-    except Exception as e:
-        logger.warning(f"_fetch_dashboard_data DB error for '{player_name}': {e}")
-    finally:
-        session.close()
-
-    # ── Position group + archetype (uses DM, no extra session) ────────────
-    try:
-        dm = get_hong_kong_data_manager()
-        result["pos_group"] = _get_position_group(player_name, dm)
-        result["archetype"] = _get_archetype_label(player_name, result["pos_group"], dm)
-
-        # ── Percentiles via PercentileRankingSystem ────────────────────────
+        session = SessionFactory()
         try:
-            # Determine cohort season: current OR player's last active season
-            cohort_season = current_season
-            if dm.processed_data is not None:
-                if player_name not in dm.processed_data["Player"].values:
-                    # Player not in current season, use their latest recorded season as comparison group
-                    cohort_season = latest_active_season
-            
-            # If cohort is different from loaded, use a temporary system
-            if cohort_season != dm.current_season:
-                from utils.efficiency_metrics import PercentileRankingSystem
-                historical_df = dm._load_season_dataframe(cohort_season)
-                historical_df = dm.processor.process_season_data(historical_df, cohort_season)
-                ranker = PercentileRankingSystem(historical_df)
-            else:
-                ranker = dm.aggregator.percentile_system
+            # ── Player + photo + team ──────────────────────────────────────────
+            # Query by primary key first (reliable), fall back to name match
+            player_obj = session.get(Player, player_id) if player_id else None
+            if player_obj is None and player_name:
+                player_obj = session.execute(
+                    select(Player).where(Player.name == player_name)
+                ).scalars().first()
+            if player_obj:
+                result["position_main"] = player_obj.position_main
+                result["age"] = player_obj.age
+                result["birth_date"] = player_obj.birth_date
+                result["nationality"] = player_obj.nationality
+                result["birth_country"] = player_obj.birth_country
+                result["foot"] = player_obj.foot
+                result["height"] = player_obj.height
+                if player_obj.current_team:
+                    result["team_name"] = _canonical_team_display_name(player_obj.current_team.name)
 
-            if ranker:
-                raw = ranker.get_player_percentiles(player_name, by_position=True)
-                # Pass full metric objects (including benchmarks) to support UI markers
-                result["percentiles_data"] = raw.get("metrics", {})
-        except Exception as e:
-            logger.debug(f"_fetch_dashboard_data percentile error: {e}")
-
-    except Exception as e:
-        logger.warning(f"_fetch_dashboard_data DM error: {e}")
-
-    # ── Cluster data from K-Means registry ────────────────────────────────
-    result["cluster_id"]       = None
-    result["cluster_label"]    = None
-    result["cluster_size_pct"] = None
-    result["cluster_centroid"] = None
-    result["player_scaled_vec"] = None
-    try:
-        from ai_models.model_registry import ModelRegistry
-        from ai_models.clustering import label_archetypes, apply_quality_filters
-        from sklearn.preprocessing import StandardScaler
-        from data.processors.ml_preprocessor import MLPreprocessor
-
-        dm_c = get_hong_kong_data_manager()
-        df_c = dm_c.processed_data
-        if df_c is not None and not df_c.empty:
-            # ── CAREER-WIDE PROFILE AGGREGATION ───────────────────────────
-            # Instead of just the latest season, we build a career aggregate
-            # to avoid noise in short leagues.
-            from models.db_models import Player, PlayerSeasonStat
-            from utils.db_engine import SessionFactory
-            from sqlalchemy import select
-            
-            db_session = SessionFactory()
-            career_metrics = {}
-            total_minutes = 0
-            
-            try:
-                stmt = (
-                    select(PlayerSeasonStat)
-                    .join(Player, PlayerSeasonStat.player_id == Player.id)
-                    .where(Player.name.contains(player_name))
+                # Primary photo: blob > cutout_path > original_path
+                primary_photo = next(
+                    (p for p in player_obj.photos if getattr(p, "is_primary", False)),
+                    player_obj.photos[0] if player_obj.photos else None,
                 )
-                all_seasons = db_session.execute(stmt).scalars().all()
-                
-                if all_seasons:
-                    # Minutes-weighted average of all advanced stats
-                    # This provides a stable playstyle profile regardless of one good/bad season
-                    for stat in all_seasons:
-                        mins = stat.minutes_played or 0
-                        if mins <= 0 or not stat.advanced_stats: continue
-                        
-                        total_minutes += mins
-                        for k, v in stat.advanced_stats.items():
-                            if isinstance(v, (int, float)):
-                                career_metrics[k] = career_metrics.get(k, 0) + (v * mins)
-                    
-                    if total_minutes > 0:
-                        for k in career_metrics:
-                            career_metrics[k] /= total_minutes
-                        
-                        # Inject this stable career profile row
-                        career_row = career_metrics.copy()
-                        career_row["Player"] = player_name
-                        career_row["Season"] = "Career"
-                        career_row["Minutes played"] = total_minutes
-                        # Ensure meta columns exist for preprocessor
-                        career_row["Team"] = result.get("team_name") or "Historical"
-                        career_row["Position"] = result.get("position_main") or "Unknown"
-                        
-                        df_c = pd.concat([df_c, pd.DataFrame([career_row])], ignore_index=True)
-                        real_player_name = player_name
+                if primary_photo:
+                    if primary_photo.photo_data:
+                        import base64
+                        b64 = base64.b64encode(primary_photo.photo_data).decode("utf-8")
+                        result["cutout_path"] = f"data:image/jpeg;base64,{b64}"
                     else:
-                        # Fallback to latest season if aggregation fails
-                        p_match = df_c[df_c["Player"].str.contains(player_name, case=False, na=False)]
-                        if not p_match.empty:
-                            real_player_name = p_match.iloc[0]["Player"]
-                        else:
-                            real_player_name = None
-                else:
-                    real_player_name = None
-            except Exception as e:
-                logger.warning(f"Career aggregation failed for {player_name}: {e}")
-                real_player_name = None
-            finally:
-                db_session.close()
+                        raw_path = primary_photo.cutout_path or primary_photo.original_path
+                        if raw_path:
+                            web_path = "/" + raw_path if not raw_path.startswith("/") else raw_path
+                            result["cutout_path"] = web_path
 
-            if real_player_name:
-                # Apply same feature engineering as training
-                meta_cols_c = {"Player", "Season", "Team", "Position"}
-                pp = MLPreprocessor()
-                numeric_cols_raw = [c for c in df_c.columns if c not in meta_cols_c and pd.api.types.is_numeric_dtype(df_c[c])]
-                df_c = pp.compute_temporal_features(df_c, numeric_cols_raw)
-                df_c = pp.compute_positional_zscores(df_c, numeric_cols_raw)
-                df_c = pp.compute_benchmark_deltas(df_c, numeric_cols_raw)
-                df_c = pp.inject_composite_metrics(df_c)
+            # ── Career-wide totals and latest active season ───────────────────
+            stmt_career = (
+                select(PlayerSeasonStat)
+                .where(PlayerSeasonStat.player_id == player_id)
+                .order_by(PlayerSeasonStat.season_id.desc())
+            )
+            all_seasons_stats = session.execute(stmt_career).scalars().all()
 
-                km = ModelRegistry().load("kmeans_overall_k5")
-                if km is not None:
-                    # LOAD metadata to sync features
-                    registry = ModelRegistry()
-                    reg_data = registry._load_registry()
-                    expected_features = reg_data.get("kmeans_overall_k5", {}).get("latest", {}).get("features")
-                    
-                    if expected_features:
-                        available_cols = [c for c in expected_features if c in df_c.columns]
-                        X_input_df = df_c[available_cols].fillna(0).copy()
-                        for mc in expected_features:
-                            if mc not in X_input_df.columns: X_input_df[mc] = 0.0
-                        X_input = X_input_df[expected_features].values
-                        feature_cols_c = expected_features
-                    else:
-                        feature_cols_c = [c for c in df_c.columns if c not in meta_cols_c and pd.api.types.is_numeric_dtype(df_c[c])]
-                        X_input = df_c[feature_cols_c].fillna(0).values
-                    
-                    # Transform based on current league context
-                    df_train_set = apply_quality_filters(df_c, min_minutes=180, smooth_rates=True)
-                    if df_train_set.empty: df_train_set = df_c
-                    
-                    scaler = StandardScaler()
-                    scaler.fit(df_train_set[feature_cols_c].fillna(0))
-                    X_all_scaled = scaler.transform(X_input)
-                    
-                    all_preds = km.predict(X_all_scaled)
-                    
-                    # Locate the "Career" row index
-                    loc_idx = df_c[df_c["Player"] == real_player_name].index[-1]
-                    loc = df_c.index.get_loc(loc_idx)
-                    player_vector_scaled = X_all_scaled[loc : loc + 1]
-                    cluster_id = int(all_preds[loc])
-                    
-                    archetype_labels_c = label_archetypes(km, feature_cols_c, cluster_df=df_c)
-                    centroids = km.cluster_centers_
-                    cluster_label = archetype_labels_c[cluster_id] if cluster_id < len(archetype_labels_c) else f"Cluster {cluster_id}"
-                    
-                    # ── DNA STRENGTH SELECTION ────────────────────────────────
-                    # Only show traits where player is above average (Z > -0.2)
-                    DERIVED_EXCLUDE = ("_roll_", "_delta_", "_benchmark", "_composite", "lag_", "roll_")
-                    DISCIPLINE = {"red card", "yellow card", "foul", "conceded", "loss", "lost"}
-                    PHYSICAL_ATTRS = {"height", "weight", "age", "market value", "contract"}
-                    
-                    ARCHETYPE_PRIORITY = {
-                        "Physical": ["distance", "sprint", "hsr", "hi distance", "speed", "duel"],
-                        "Defensive": ["interception", "tackle", "clearance", "block", "duel"],
-                        "Distributor": ["pass", "accurate pass", "long pass", "forward pass"],
-                        "Maestro": ["key pass", "smart pass", "through pass", "assist", "xa"],
-                        "Finisher": ["goal", "xg", "shot", "conversion"],
-                        "Winger": ["dribble", "cross", "progressive run", "acceleration"],
-                    }
-                    
-                    priority_keywords = []
-                    for kw, features in ARCHETYPE_PRIORITY.items():
-                        if kw.lower() in cluster_label.lower():
-                            priority_keywords.extend(features)
+            latest_active_season = current_season
+            if all_seasons_stats:
+                latest_active_season = all_seasons_stats[0].season_id
+                result["matches_played"] = sum(s.matches_played or 0 for s in all_seasons_stats)
+                result["goals"] = sum(s.goals or 0 for s in all_seasons_stats)
+                result["assists"] = sum(s.assists or 0 for s in all_seasons_stats)
+                result["minutes_played"] = sum(s.minutes_played or 0 for s in all_seasons_stats)
 
-                    valid_idx = []
-                    p_z_vec = player_vector_scaled[0]
-                    
-                    for i, name in enumerate(feature_cols_c):
-                        name_l = name.lower()
-                        if any(s in name for s in DERIVED_EXCLUDE): continue
-                        if any(d in name_l for d in DISCIPLINE | PHYSICAL_ATTRS): continue
-                        
-                        # Use raw value from injected career row to check volume
-                        raw_col = name.replace("_zscore_positional", "")
-                        p_val_raw = 0.0
-                        if raw_col in df_c.columns:
-                            p_val_raw = float(df_c[df_c["Player"] == real_player_name].iloc[-1][raw_col] or 0)
-                        
-                        # Only show REAL strengths (avoid bottom percentiles)
-                        if p_z_vec[i] < -0.2: continue
-                        if "per 90" in name_l and p_val_raw < 0.15: continue
-                        
-                        valid_idx.append(i)
+            # ── Last 5 match results ───────────────────────────────────────────
+            stmt_mh = (
+                select(MatchHistory)
+                .where(MatchHistory.player_id == player_id)
+                .order_by(MatchHistory.date.desc())
+                .limit(10)
+            )
+            matches = session.execute(stmt_mh).scalars().all()
 
-                    if not valid_idx:
-                        valid_idx = [i for i, name in enumerate(feature_cols_c) if "_zscore_positional" in name and p_z_vec[i] >= 0]
+            # ── Process match outcomes (W/D/L) ─────────────────────────────────
+            last5_data = []
+            player_team = result.get("team_name")
+            import re
 
-                    # Final Identity traits selection with priority bonus
-                    scores = []
-                    for idx in valid_idx:
-                        name_l = feature_cols_c[idx].lower()
-                        score = p_z_vec[idx]
-                        if any(pk in name_l for pk in priority_keywords):
-                            score += 2.5 # Weight archetype-defining traits higher
-                        scores.append(score)
-                    
-                    top5_local = np.argsort(scores)[::-1][:5]
-                    final_top_idx = [valid_idx[i] for i in top5_local]
-                    
-                    result["cluster_id"]       = cluster_id
-                    result["cluster_label"]    = cluster_label
-                    result["cluster_size_pct"] = float((all_preds == cluster_id).mean() * 100)
-                    result["cluster_centroid"] = {feature_cols_c[i]: float(centroids[cluster_id][i]) for i in final_top_idx}
-                    result["player_scaled_vec"] = {feature_cols_c[i]: float(p_z_vec[i]) for i in final_top_idx}
+            latest_five_matches = matches[:5]
+            for m in reversed(latest_five_matches):
+                res_str = m.result or ""
+                if not res_str:
+                    continue
 
-    except Exception as e:
-        logger.warning(f"_fetch_dashboard_data cluster error: {e}")
-                
-    # ── Multi-season history (separate session inside helper) ──────────────
-    result["history_df"] = _fetch_player_season_history(player_name)
-    if isinstance(result["history_df"], pd.DataFrame) and not result["history_df"].empty:
-        for column in ("Birthday", "birth_date", "date_of_birth", "birthday"):
-            if column in result["history_df"].columns:
-                series = result["history_df"][column].dropna()
-                if not series.empty:
+                outcome = "EMPTY"
+                score_display = res_str
+
+                if res_str.upper() in ["W", "D", "L"]:
+                    outcome = res_str.upper()
+                    score_display = outcome
+                elif ":" in res_str and player_team:
                     try:
-                        birth_dt = pd.to_datetime(series.iloc[0], errors="coerce")
-                        if pd.notna(birth_dt):
-                            today = pd.Timestamp.today()
-                            result["age"] = int(
-                                today.year - birth_dt.year - ((today.month, today.day) < (birth_dt.month, birth_dt.day))
-                            )
+                        score_part = res_str.split()[0]
+                        h_score, a_score = map(int, score_part.split(":"))
+                        opp = m.opponent or ""
+                        parts = opp.split(" vs ")
+                        if len(parts) == 2:
+                            h_team_raw, a_team_raw = parts
+                            h_team = re.sub(r"\(\d+\.\)", "", h_team_raw).strip()
+                            a_team = re.sub(r"\(\d+\.\)", "", a_team_raw).strip()
+
+                            is_home = player_team.lower() in h_team.lower()
+                            is_away = player_team.lower() in a_team.lower()
+
+                            if is_home:
+                                if h_score > a_score:
+                                    outcome = "W"
+                                elif h_score < a_score:
+                                    outcome = "L"
+                                else:
+                                    outcome = "D"
+                            elif is_away:
+                                if a_score > h_score:
+                                    outcome = "W"
+                                elif a_score < h_score:
+                                    outcome = "L"
+                                else:
+                                    outcome = "D"
                     except Exception:
                         pass
-                break
 
-    # ── Similar players metadata (pre-fetched for Parallel Categories chart) ─
-    # Gemini task 3.1 reads data["similar_players_meta"] to build the chart
-    # without making additional DB / DM calls.
-    result["similar_players_meta"] = {"similar_players": [], "query_player_embedding_idx": -1}
-    try:
-        from ai_models.similarity import build_embeddings, find_similar
-        from ai_models.model_registry import ModelRegistry as _MReg
+                last5_data.append({"outcome": outcome, "score": score_display})
 
-        _dm_s = get_hong_kong_data_manager()
-        if _dm_s.processed_data is not None and not _dm_s.processed_data.empty:
-            _corpus_emb = build_embeddings(_dm_s.processed_data)
-            _meta_df    = _MReg().load("player_embeddings_meta")
+            result["last5_results"] = last5_data
+            result["recent_form_windows"] = _build_recent_form_windows(matches)
 
-            if _meta_df is not None:
-                _name_col = "Player" if "Player" in _meta_df.columns else "player_name"
-                _matches  = _meta_df.index[_meta_df[_name_col] == player_name].tolist()
+        except Exception as e:
+            logger.warning(f"_fetch_dashboard_data DB error for '{player_name}': {e}")
+        finally:
+            session.close()
 
-                if _matches:
-                    _qidx       = _matches[0]
-                    _query_emb  = _corpus_emb[_qidx]
-                    _sim_df     = find_similar(
-                        _query_emb, _corpus_emb, _meta_df,
-                        k=20, query_index=_qidx, position=None,
+        # ── Position group + archetype (uses DM, no extra session) ────────────
+        try:
+            dm = get_hong_kong_data_manager()
+            result["pos_group"] = _get_position_group(player_name, dm)
+            result["archetype"] = _get_archetype_label(player_name, result["pos_group"], dm)
+
+            try:
+                cohort_season = current_season
+                if dm.processed_data is not None:
+                    if player_name not in dm.processed_data["Player"].values:
+                        cohort_season = latest_active_season
+
+                if cohort_season != dm.current_season:
+                    from utils.efficiency_metrics import PercentileRankingSystem
+
+                    historical_df = dm._load_season_dataframe(cohort_season)
+                    historical_df = dm.processor.process_season_data(historical_df, cohort_season)
+                    ranker = PercentileRankingSystem(historical_df)
+                else:
+                    ranker = dm.aggregator.percentile_system
+
+                if ranker:
+                    raw = ranker.get_player_percentiles(player_name, by_position=True)
+                    result["percentiles_data"] = raw.get("metrics", {})
+            except Exception as e:
+                logger.debug(f"_fetch_dashboard_data percentile error: {e}")
+
+        except Exception as e:
+            logger.warning(f"_fetch_dashboard_data DM error: {e}")
+
+        # ── Cluster data from K-Means registry ────────────────────────────────
+        result["cluster_id"] = None
+        result["cluster_label"] = None
+        result["cluster_size_pct"] = None
+        result["cluster_centroid"] = None
+        result["player_scaled_vec"] = None
+        try:
+            from ai_models.model_registry import ModelRegistry
+            from ai_models.clustering import label_archetypes, apply_quality_filters
+            from sklearn.preprocessing import StandardScaler
+            from data.processors.ml_preprocessor import MLPreprocessor
+
+            dm_c = get_hong_kong_data_manager()
+            df_c = dm_c.processed_data
+            if df_c is not None and not df_c.empty:
+                from models.db_models import Player, PlayerSeasonStat
+                from utils.db_engine import SessionFactory
+                from sqlalchemy import select
+
+                db_session = SessionFactory()
+                career_metrics = {}
+                total_minutes = 0
+
+                try:
+                    stmt = (
+                        select(PlayerSeasonStat)
+                        .join(Player, PlayerSeasonStat.player_id == Player.id)
+                        .where(Player.name.contains(player_name))
                     )
-                    # Post-filter by position group
-                    _pos_group = result.get("pos_group") or ""
-                    if "Position" in _sim_df.columns and _pos_group:
-                        _sim_df = _sim_df[
-                            _sim_df["Position"].apply(_infer_position_group) == _pos_group
-                        ]
+                    all_seasons = db_session.execute(stmt).scalars().all()
 
-                    _top5 = _sim_df.head(5)
-                    _similar_list = []
-                    for _, _row in _top5.iterrows():
-                        _sname = str(_row.get(_name_col, _row.get("player_name", "")))
-                        _steam = str(_row.get("Team", _row.get("team", "")))
-                        _spos  = str(_row.get("Position", _row.get("position", "")))
-                        _score = float(_row.get("similarity_score", 0.0))
-                        _similar_list.append({
-                            "name":            _sname,
-                            "team_name":       _steam,
-                            "team_logo_path":  _resolve_team_logo(_steam),
-                            "position":        _spos,
-                            "similarity_score": _score,
-                        })
+                    if all_seasons:
+                        for stat in all_seasons:
+                            mins = stat.minutes_played or 0
+                            if mins <= 0 or not stat.advanced_stats:
+                                continue
 
-                    result["similar_players_meta"] = {
-                        "similar_players":             _similar_list,
-                        "query_player_embedding_idx":  _qidx,
+                            total_minutes += mins
+                            for k, v in stat.advanced_stats.items():
+                                if isinstance(v, (int, float)):
+                                    career_metrics[k] = career_metrics.get(k, 0) + (v * mins)
+
+                        if total_minutes > 0:
+                            for k in career_metrics:
+                                career_metrics[k] /= total_minutes
+
+                            career_row = career_metrics.copy()
+                            career_row["Player"] = player_name
+                            career_row["Season"] = "Career"
+                            career_row["Minutes played"] = total_minutes
+                            career_row["Team"] = result.get("team_name") or "Historical"
+                            career_row["Position"] = result.get("position_main") or "Unknown"
+
+                            df_c = pd.concat([df_c, pd.DataFrame([career_row])], ignore_index=True)
+                            real_player_name = player_name
+                        else:
+                            p_match = df_c[df_c["Player"].str.contains(player_name, case=False, na=False)]
+                            real_player_name = p_match.iloc[0]["Player"] if not p_match.empty else None
+                    else:
+                        real_player_name = None
+                except Exception as e:
+                    logger.warning(f"Career aggregation failed for {player_name}: {e}")
+                    real_player_name = None
+                finally:
+                    db_session.close()
+
+                if real_player_name:
+                    meta_cols_c = {"Player", "Season", "Team", "Position"}
+                    pp = MLPreprocessor()
+                    numeric_cols_raw = [
+                        c for c in df_c.columns if c not in meta_cols_c and pd.api.types.is_numeric_dtype(df_c[c])
+                    ]
+                    df_c = pp.compute_temporal_features(df_c, numeric_cols_raw)
+                    df_c = pp.compute_positional_zscores(df_c, numeric_cols_raw)
+                    df_c = pp.compute_benchmark_deltas(df_c, numeric_cols_raw)
+                    df_c = pp.inject_composite_metrics(df_c)
+
+                    km = ModelRegistry().load("kmeans_overall_k5")
+                    if km is not None:
+                        registry = ModelRegistry()
+                        reg_data = registry._load_registry()
+                        expected_features = reg_data.get("kmeans_overall_k5", {}).get("latest", {}).get("features")
+
+                        if expected_features:
+                            available_cols = [c for c in expected_features if c in df_c.columns]
+                            X_input_df = df_c[available_cols].fillna(0).copy()
+                            for mc in expected_features:
+                                if mc not in X_input_df.columns:
+                                    X_input_df[mc] = 0.0
+                            X_input = _align_cluster_feature_frame(X_input_df, expected_features)
+                            feature_cols_c = expected_features
+                        else:
+                            feature_cols_c = [
+                                c for c in df_c.columns if c not in meta_cols_c and pd.api.types.is_numeric_dtype(df_c[c])
+                            ]
+                            X_input = _align_cluster_feature_frame(df_c, feature_cols_c)
+
+                        df_train_set = apply_quality_filters(df_c, min_minutes=180, smooth_rates=True)
+                        if df_train_set.empty:
+                            df_train_set = df_c
+
+                        scaler = StandardScaler()
+                        scaler.fit(_align_cluster_feature_frame(df_train_set, feature_cols_c))
+                        X_all_scaled = scaler.transform(X_input)
+
+                        all_preds = km.predict(X_all_scaled)
+                        loc_idx = df_c[df_c["Player"] == real_player_name].index[-1]
+                        loc = df_c.index.get_loc(loc_idx)
+                        player_vector_scaled = X_all_scaled[loc : loc + 1]
+                        cluster_id = int(all_preds[loc])
+
+                        archetype_labels_c = label_archetypes(km, feature_cols_c, cluster_df=df_c)
+                        centroids = km.cluster_centers_
+                        cluster_label = (
+                            archetype_labels_c[cluster_id]
+                            if cluster_id < len(archetype_labels_c)
+                            else f"Cluster {cluster_id}"
+                        )
+
+                        derived_exclude = ("_roll_", "_delta_", "_benchmark", "_composite", "lag_", "roll_")
+                        discipline = {"red card", "yellow card", "foul", "conceded", "loss", "lost"}
+                        physical_attrs = {"height", "weight", "age", "market value", "contract"}
+
+                        archetype_priority = {
+                            "Physical": ["distance", "sprint", "hsr", "hi distance", "speed", "duel"],
+                            "Defensive": ["interception", "tackle", "clearance", "block", "duel"],
+                            "Distributor": ["pass", "accurate pass", "long pass", "forward pass"],
+                            "Maestro": ["key pass", "smart pass", "through pass", "assist", "xa"],
+                            "Finisher": ["goal", "xg", "shot", "conversion"],
+                            "Winger": ["dribble", "cross", "progressive run", "acceleration"],
+                        }
+
+                        priority_keywords = []
+                        for kw, features in archetype_priority.items():
+                            if kw.lower() in cluster_label.lower():
+                                priority_keywords.extend(features)
+
+                        valid_idx = []
+                        p_z_vec = player_vector_scaled[0]
+
+                        for i, name in enumerate(feature_cols_c):
+                            name_l = name.lower()
+                            if any(s in name for s in derived_exclude):
+                                continue
+                            if any(d in name_l for d in discipline | physical_attrs):
+                                continue
+
+                            raw_col = name.replace("_zscore_positional", "")
+                            p_val_raw = 0.0
+                            if raw_col in df_c.columns:
+                                p_val_raw = float(df_c[df_c["Player"] == real_player_name].iloc[-1][raw_col] or 0)
+
+                            if p_z_vec[i] < -0.2:
+                                continue
+                            if "per 90" in name_l and p_val_raw < 0.15:
+                                continue
+
+                            valid_idx.append(i)
+
+                        if not valid_idx:
+                            valid_idx = [
+                                i for i, name in enumerate(feature_cols_c)
+                                if "_zscore_positional" in name and p_z_vec[i] >= 0
+                            ]
+
+                        scores = []
+                        for idx in valid_idx:
+                            name_l = feature_cols_c[idx].lower()
+                            score = p_z_vec[idx]
+                            if any(pk in name_l for pk in priority_keywords):
+                                score += 2.5
+                            scores.append(score)
+
+                        top5_local = np.argsort(scores)[::-1][:5]
+                        final_top_idx = [valid_idx[i] for i in top5_local]
+
+                        result["cluster_id"] = cluster_id
+                        result["cluster_label"] = cluster_label
+                        result["cluster_size_pct"] = float((all_preds == cluster_id).mean() * 100)
+                        result["cluster_centroid"] = {
+                            feature_cols_c[i]: float(centroids[cluster_id][i]) for i in final_top_idx
+                        }
+                        result["player_scaled_vec"] = {
+                            feature_cols_c[i]: float(p_z_vec[i]) for i in final_top_idx
+                        }
+
+        except Exception as e:
+            logger.warning(f"_fetch_dashboard_data cluster error: {e}")
+
+        result["history_df"] = _fetch_player_season_history(player_name)
+        if isinstance(result["history_df"], pd.DataFrame) and not result["history_df"].empty:
+            for column in ("Birthday", "birth_date", "date_of_birth", "birthday"):
+                if column in result["history_df"].columns:
+                    series = result["history_df"][column].dropna()
+                    if not series.empty:
+                        try:
+                            birth_dt = pd.to_datetime(series.iloc[0], errors="coerce")
+                            if pd.notna(birth_dt):
+                                today = pd.Timestamp.today()
+                                result["age"] = int(
+                                    today.year
+                                    - birth_dt.year
+                                    - ((today.month, today.day) < (birth_dt.month, birth_dt.day))
+                                )
+                        except Exception:
+                            pass
+                    break
+
+        result["similar_players_meta"] = {"similar_players": [], "query_player_embedding_idx": -1}
+        try:
+            from ai_models.similarity import build_embeddings, find_similar
+            from ai_models.model_registry import ModelRegistry as _MReg
+
+            _dm_s = get_hong_kong_data_manager()
+            if _dm_s.processed_data is not None and not _dm_s.processed_data.empty:
+                _corpus_emb = build_embeddings(_dm_s.processed_data)
+                _meta_df = _MReg().load("player_embeddings_meta")
+
+                if _meta_df is not None:
+                    _name_col = "Player" if "Player" in _meta_df.columns else "player_name"
+                    _matches = _meta_df.index[_meta_df[_name_col] == player_name].tolist()
+
+                    if _matches:
+                        _qidx = _matches[0]
+                        _query_emb = _corpus_emb[_qidx]
+                        _sim_df = find_similar(
+                            _query_emb,
+                            _corpus_emb,
+                            _meta_df,
+                            k=20,
+                            query_index=_qidx,
+                            position=None,
+                        )
+                        _pos_group = result.get("pos_group") or ""
+                        if "Position" in _sim_df.columns and _pos_group:
+                            _sim_df = _sim_df[_sim_df["Position"].apply(_infer_position_group) == _pos_group]
+
+                        _top5 = _sim_df.head(5)
+                        _similar_list = []
+                        for _, _row in _top5.iterrows():
+                            _sname = str(_row.get(_name_col, _row.get("player_name", "")))
+                            _steam = str(_row.get("Team", _row.get("team", "")))
+                            _spos = str(_row.get("Position", _row.get("position", "")))
+                            _score = float(_row.get("similarity_score", 0.0))
+                            _similar_list.append(
+                                {
+                                    "name": _sname,
+                                    "team_name": _steam,
+                                    "team_logo_path": _resolve_team_logo(_steam),
+                                    "position": _spos,
+                                    "similarity_score": _score,
+                                }
+                            )
+
+                        result["similar_players_meta"] = {
+                            "similar_players": _similar_list,
+                            "query_player_embedding_idx": _qidx,
+                        }
+        except Exception as _se:
+            logger.debug(f"_fetch_dashboard_data similar players meta error: {_se}")
+
+        result["form_trend"] = None
+        result["transferability"] = None
+        try:
+            from sqlalchemy import select
+            from models.db_models import MatchHistory as MH
+            from utils.db_engine import SessionFactory
+            from ai_models.time_series import get_form_trend
+            from ai_models.predictor import get_transferability_score
+
+            with SessionFactory() as sess:
+                rows = sess.execute(
+                    select(MH)
+                    .where(MH.player_id == player_id)
+                    .order_by(MH.date.asc())
+                ).scalars().all()
+                match_records = [
+                    {
+                        "minutes_played": r.minutes_played or 0,
+                        "goals": r.goals or 0,
+                        "assists": r.assists or 0,
                     }
-    except Exception as _se:
-        logger.debug(f"_fetch_dashboard_data similar players meta error: {_se}")
+                    for r in rows
+                ]
 
-    # ── Hybrid AI: LSTM form trend + TabPFN transferability ───────────────
-    result["form_trend"] = None
-    result["transferability"] = None
-    try:
-        from sqlalchemy import select
-        from models.db_models import MatchHistory as MH
-        from utils.db_engine import SessionFactory
-        from ai_models.time_series import get_form_trend
-        from ai_models.predictor import get_transferability_score
-
-        with SessionFactory() as sess:
-            rows = sess.execute(
-                select(MH)
-                .where(MH.player_id == player_id)
-                .order_by(MH.date.asc())
-            ).scalars().all()
-            match_records = [
-                {
-                    "minutes_played": r.minutes_played or 0,
-                    "goals": r.goals or 0,
-                    "assists": r.assists or 0,
-                }
-                for r in rows
-            ]
-
-        # 1. LSTM Form Trend
-        lstm_metric = "goals" if result["pos_group"] in ("Forward", "Winger") else (
-            "assists" if result["pos_group"] == "Midfielder" else "minutes_played"
-        )
-        if len(match_records) >= 5: # Lowered threshold slightly for form detection
-            result["form_trend"] = get_form_trend(match_records, lstm_metric, window=5)
-
-        # 2. TabPFN Transferability
-        if not result["history_df"].empty:
-            career_dict = (
-                result["history_df"].drop(columns=["Season"], errors="ignore").mean().to_dict()
+            lstm_metric = "goals" if result["pos_group"] in ("Forward", "Winger") else (
+                "assists" if result["pos_group"] == "Midfielder" else "minutes_played"
             )
-            result["transferability"] = get_transferability_score(
-                career_dict, result["pos_group"], player_id=player_id
-            )
+            if len(match_records) >= 5:
+                result["form_trend"] = get_form_trend(match_records, lstm_metric, window=5)
 
-    except Exception as _hae:
-        logger.debug(f"_fetch_dashboard_data hybrid ai error: {_hae}")
+            if not result["history_df"].empty:
+                career_dict = result["history_df"].drop(columns=["Season"], errors="ignore").mean().to_dict()
+                result["transferability"] = get_transferability_score(
+                    career_dict, result["pos_group"], player_id=player_id
+                )
 
-    return result
+        except Exception as _hae:
+            logger.debug(f"_fetch_dashboard_data hybrid ai error: {_hae}")
+
+        _set_cached_dashboard_data(player_name, player_id, result)
+        return copy.deepcopy(result)
 
 
 _PHASE_LABELS: Dict[str, str] = {
@@ -3192,12 +3387,13 @@ def _build_season_pulse(data: Dict) -> html.Div:
     ])
 
 
-def _build_league_standing(data: Dict) -> html.Div:
+def _build_league_standing(data: Dict, focus_metric: str = "") -> html.Div:
     """§3 League Standing: positional percentile bars via PercentileRankingSystem."""
     from utils.chart_helpers import create_percentile_bars
 
-    pos_group       = data.get("pos_group") or ""
+    pos_group = data.get("pos_group") or ""
     percentiles_all = data.get("percentiles_data") or {}
+    resolved_focus_metric = ""
 
     header = html.H6([
         html.I(className="bi bi-bar-chart-line-fill me-2"),
@@ -3220,7 +3416,14 @@ def _build_league_standing(data: Dict) -> html.Div:
         if comp_m not in metrics:
             metrics.append(comp_m)
 
-    filtered = {m: percentiles_all[m] for m in metrics if m in percentiles_all}
+    if focus_metric:
+        metric_lookup = {str(metric).strip().lower(): metric for metric in percentiles_all.keys()}
+        resolved_focus_metric = metric_lookup.get(str(focus_metric).strip().lower(), "")
+
+    if resolved_focus_metric and resolved_focus_metric in percentiles_all:
+        filtered = {resolved_focus_metric: percentiles_all[resolved_focus_metric]}
+    else:
+        filtered = {m: percentiles_all[m] for m in metrics if m in percentiles_all}
 
     if not filtered:
         return html.Div([
@@ -3230,13 +3433,31 @@ def _build_league_standing(data: Dict) -> html.Div:
         ])
 
     bars = create_percentile_bars(filtered)
+    focus_summary = html.Div()
+    if resolved_focus_metric:
+        focus_data = percentiles_all.get(resolved_focus_metric) or {}
+        percentile = int(float(focus_data.get("percentile", 0) or 0))
+        group_avg = focus_data.get("group_avg_percentile")
+        pos_avg = focus_data.get("pos_avg_percentile")
+        summary_bits = [f"{resolved_focus_metric} is currently at the {percentile}th percentile."]
+        if group_avg is not None:
+            summary_bits.append(f"Group average is around {float(group_avg):.0f}.")
+        if pos_avg is not None:
+            summary_bits.append(f"Position average is around {float(pos_avg):.0f}.")
+        focus_summary = html.Div(
+            [
+                html.Div("Focused Metric", className="career-dashboard-card__eyebrow"),
+                html.P(" ".join(summary_bits), className="career-dashboard-card__body"),
+            ],
+            className="career-outlook-card mb-3",
+        )
     comparison_label = html.Div(
-        f"vs. {pos_group}s in HKPL",
+        f"vs. {pos_group}s in HKPL" if not resolved_focus_metric else f"Focused on {resolved_focus_metric} vs. {pos_group}s in HKPL",
         style={"fontSize": "0.65rem", "color": HKFATheme.TEXT_SECONDARY,
                "textAlign": "right", "marginBottom": "8px", "letterSpacing": "0.03em"},
     )
 
-    return html.Div([header, comparison_label, bars])
+    return html.Div([header, focus_summary, comparison_label, bars])
 
 
 def _build_career_arc(data: Dict) -> html.Div:
@@ -3886,14 +4107,17 @@ def _build_career_evidence_button(
     label: str = "See evidence",
     source: str = "dashboard",
     trigger_index: str = "",
+    focus_metric: str = "",
 ) -> dbc.Button:
+    resolved_key = resolve_career_surface_evidence_key(evidence_key)
     return dbc.Button(
         [label, html.I(className="bi bi-arrow-up-right ms-2")],
         id={
             "type": "career-evidence-trigger",
-            "key": evidence_key,
+            "key": resolved_key,
             "source": source,
-            "index": trigger_index or normalize_evidence_key(evidence_key),
+            "index": trigger_index or normalize_evidence_key(resolved_key),
+            "focus_metric": str(focus_metric or ""),
         },
         color="link",
         size="sm",
@@ -3906,8 +4130,10 @@ def _get_career_surface_meta(item: Any, section_label: str) -> Dict[str, str]:
     evidence_key = str(getattr(item, "evidence_key", "") or "")
     emphasis = str(getattr(item, "emphasis", "neutral") or "neutral")
 
-    if evidence_key in {"minutes_trend", "career_arc"}:
+    if evidence_key in {"minutes_trend", "career_arc", "career_trend", "career_value_summary", "recent_form"}:
         icon_class = "bi bi-graph-up-arrow"
+    elif evidence_key == "career_phase_resolution":
+        icon_class = "bi bi-signpost-split"
     elif evidence_key == "projection_outlook":
         icon_class = "bi bi-compass"
     elif evidence_key == "similarity_profiles":
@@ -3951,7 +4177,7 @@ def _career_kpi_specs_for_position(pos_group: str) -> List[Dict[str, Any]]:
     if pos_group == "Goalkeeper":
         return [
             {"key": "matches", "label": "Matches", "secondary_label": "Minutes/Match", "primary": {"kind": "sum", "columns": ["Matches played"], "decimals": 0}, "secondary": {"kind": "weighted_avg", "columns": ["Minutes_per_Match"], "decimals": 1}, "icon_name": "bi bi-calendar2-week", "accent_color": HKFATheme.ACCENT_GOLD},
-            {"key": "conceded", "label": "Goals Conceded", "secondary_label": "Conceded/90", "primary": {"kind": "sum", "columns": ["Goals conceded"], "decimals": 0}, "secondary": {"kind": "weighted_avg", "columns": ["Conceded goals per 90"], "decimals": 2}, "icon_name": "bi bi-bullseye", "accent_color": HKFATheme.NEGATIVE},
+            {"key": "conceded", "label": "Goals Conceded", "secondary_label": "Conceded/90", "primary": {"kind": "sum", "columns": ["Conceded goals", "Goals conceded"], "decimals": 0}, "secondary": {"kind": "weighted_avg", "columns": ["Conceded goals per 90"], "decimals": 2}, "icon_name": "bi bi-bullseye", "accent_color": HKFATheme.NEGATIVE},
             {"key": "xga", "label": "xG Against", "secondary_label": "xGA/90", "primary": {"kind": "sum", "columns": ["xG against"], "decimals": 2}, "secondary": {"kind": "weighted_avg", "columns": ["xG against per 90"], "decimals": 2}, "icon_name": "bi bi-grid-3x3-gap", "accent_color": "#f97316"},
             {"key": "prevented", "label": "Prevented/90", "secondary_label": "Shots Against", "primary": {"kind": "weighted_avg", "columns": ["Prevented goals per 90"], "decimals": 2}, "secondary": {"kind": "sum", "columns": ["Shots against"], "decimals": 0}, "icon_name": "bi bi-hand-index-thumb", "accent_color": HKFATheme.POSITIVE},
             {"key": "back_passes", "label": "Back Passes/90", "secondary_label": "Save Rate", "primary": {"kind": "weighted_avg", "columns": ["Back passes received as GK per 90"], "decimals": 1}, "secondary": {"kind": "weighted_avg", "columns": ["Save rate, %"], "decimals": 1, "pct": True}, "icon_name": "bi bi-arrow-counterclockwise", "accent_color": HKFATheme.ACCENT_BLUE},
@@ -4064,17 +4290,35 @@ def _metric_card(label: str, value: str, sub_label: str, sub_value: str, icon_na
     )
 
 
-def _build_career_kpi_trend_view(player_name: str, player_id: str, metric_key: str) -> Dict[str, Any]:
-    data = _fetch_dashboard_data(player_name, player_id)
-    history_df = data.get("history_df", pd.DataFrame())
-    pos_group = str(data.get("pos_group") or "")
-    spec = next((item for item in _career_kpi_specs_for_position(pos_group) if item["key"] == metric_key), None)
-    if spec is None or not isinstance(history_df, pd.DataFrame) or history_df.empty:
-        return {"title": "KPI Trend", "content": html.P("Career KPI history is not available.", className="text-muted small mb-0")}
-    primary_series = _career_kpi_metric_series(history_df, spec["primary"])
-    secondary_series = _career_kpi_metric_series(history_df, spec["secondary"])
-    if primary_series is None or secondary_series is None or primary_series.empty or secondary_series.empty:
-        return {"title": f"{spec['label']} Trend", "content": html.P("Trend detail is not available for this KPI.", className="text-muted small mb-0")}
+def _build_career_kpi_trend_summary(history_df: pd.DataFrame, spec: Dict[str, Any]) -> html.Div:
+    return html.Div(
+        [
+            html.Div(
+                [
+                    html.Span(spec["label"], className="career-kpi-trend-summary__label"),
+                    html.Span(
+                        _format_kpi_metric_value(_career_kpi_metric_aggregate(history_df, spec["primary"]), spec["primary"]),
+                        className="career-kpi-trend-summary__value",
+                    ),
+                ],
+                className="career-kpi-trend-summary__item",
+            ),
+            html.Div(
+                [
+                    html.Span(spec["secondary_label"], className="career-kpi-trend-summary__label"),
+                    html.Span(
+                        _format_kpi_metric_value(_career_kpi_metric_aggregate(history_df, spec["secondary"]), spec["secondary"]),
+                        className="career-kpi-trend-summary__value",
+                    ),
+                ],
+                className="career-kpi-trend-summary__item",
+            ),
+        ],
+        className="career-kpi-trend-summary",
+    )
+
+
+def _build_career_kpi_trend_view_2d(history_df: pd.DataFrame, spec: Dict[str, Any], primary_series: pd.Series, secondary_series: pd.Series) -> Dict[str, Any]:
     seasons = list(dict.fromkeys(list(primary_series.index) + list(secondary_series.index)))
     plot_df = pd.DataFrame({"Season": seasons})
     plot_df = plot_df.assign(_season_sort=plot_df["Season"].apply(_season_sort_key)).sort_values("_season_sort")
@@ -4089,6 +4333,7 @@ def _build_career_kpi_trend_view(player_name: str, player_id: str, metric_key: s
             name=spec["label"],
             line=dict(color=spec["accent_color"], width=3, shape="spline", smoothing=0.8),
             marker=dict(size=8, color=spec["accent_color"]),
+            hovertemplate=spec["label"] + ": %{y:.2f}<extra></extra>",
         )
     )
     fig.add_trace(
@@ -4100,15 +4345,19 @@ def _build_career_kpi_trend_view(player_name: str, player_id: str, metric_key: s
             line=dict(color="rgba(225, 236, 255, 0.78)", width=2.5, dash="dot", shape="spline", smoothing=0.8),
             marker=dict(size=7, color="rgba(225, 236, 255, 0.92)"),
             yaxis="y2",
+            hovertemplate=spec["secondary_label"] + ": %{y:.2f}<extra></extra>",
         )
     )
     fig.update_layout(
         xaxis_title="Season",
         yaxis_title=spec["label"],
         height=360,
-        margin=dict(t=20, r=56, b=42, l=128),
+        margin=dict(t=20, r=56, b=42, l=190),
         showlegend=True,
+        hovermode="closest",
     )
+    fig.update_xaxes(showspikes=False)
+    fig.update_yaxes(showspikes=False)
     fig.update_layout(
         yaxis2=dict(
             title=dict(text=spec["secondary_label"], font=dict(color="rgba(225, 236, 255, 0.76)")),
@@ -4116,17 +4365,25 @@ def _build_career_kpi_trend_view(player_name: str, player_id: str, metric_key: s
             side="right",
             showgrid=False,
             tickfont=dict(color="rgba(225, 236, 255, 0.76)"),
+            showspikes=False,
         )
     )
     fig = glass_figure_layout(fig)
     fig.update_layout(
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
+        hoverlabel=dict(
+            bgcolor="rgba(44, 47, 58, 0.92)",
+            bordercolor="rgba(255, 255, 255, 0.14)",
+            font_size=13,
+            font_family="Roboto, sans-serif",
+            font_color="rgba(245, 250, 255, 0.96)",
+        ),
         legend=dict(
             bgcolor="rgba(0,0,0,0)",
             bordercolor="rgba(255,255,255,0.08)",
             borderwidth=1,
-            x=-0.14,
+            x=-0.24,
             y=0.78,
             xanchor="left",
             yanchor="top",
@@ -4134,22 +4391,29 @@ def _build_career_kpi_trend_view(player_name: str, player_id: str, metric_key: s
             font=dict(size=14, color="rgba(245, 250, 255, 0.94)"),
         ),
     )
-    summary = html.Div(
-        [
-            html.Div([html.Span(spec["label"], className="career-kpi-trend-summary__label"), html.Span(_format_kpi_metric_value(_career_kpi_metric_aggregate(history_df, spec["primary"]), spec["primary"]), className="career-kpi-trend-summary__value")], className="career-kpi-trend-summary__item"),
-            html.Div([html.Span(spec["secondary_label"], className="career-kpi-trend-summary__label"), html.Span(_format_kpi_metric_value(_career_kpi_metric_aggregate(history_df, spec["secondary"]), spec["secondary"]), className="career-kpi-trend-summary__value")], className="career-kpi-trend-summary__item"),
-        ],
-        className="career-kpi-trend-summary",
-    )
     return {
         "title": f"{spec['label']} Trend",
         "content": html.Div(
             [
-                summary,
+                _build_career_kpi_trend_summary(history_df, spec),
                 dcc.Graph(figure=fig, config={"displayModeBar": False}, className="career-kpi-trend-panel"),
             ]
         ),
     }
+
+
+def _build_career_kpi_trend_view(player_name: str, player_id: str, metric_key: str) -> Dict[str, Any]:
+    data = _fetch_dashboard_data(player_name, player_id)
+    history_df = data.get("history_df", pd.DataFrame())
+    pos_group = str(data.get("pos_group") or "")
+    spec = next((item for item in _career_kpi_specs_for_position(pos_group) if item["key"] == metric_key), None)
+    if spec is None or not isinstance(history_df, pd.DataFrame) or history_df.empty:
+        return {"title": "KPI Trend", "content": html.P("Career KPI history is not available.", className="text-muted small mb-0")}
+    primary_series = _career_kpi_metric_series(history_df, spec["primary"])
+    secondary_series = _career_kpi_metric_series(history_df, spec["secondary"])
+    if primary_series is None or secondary_series is None or primary_series.empty or secondary_series.empty:
+        return {"title": f"{spec['label']} Trend", "content": html.P("Trend detail is not available for this KPI.", className="text-muted small mb-0")}
+    return _build_career_kpi_trend_view_2d(history_df, spec, primary_series, secondary_series)
 
 
 def _build_command_metrics_strip(data: Dict) -> html.Div:
@@ -4183,7 +4447,15 @@ def _build_command_metrics_strip(data: Dict) -> html.Div:
     )
 
 
-def _build_career_progression_summary(data: Dict[str, Any], career_phase_data: Dict[str, Any]) -> str:
+def _build_career_progression_summary(
+    data: Dict[str, Any],
+    career_phase_data: Dict[str, Any],
+    thesis: Optional[Dict[str, Any]] = None,
+) -> str:
+    thesis_body = str((thesis or {}).get("body") or "").strip()
+    if thesis_body:
+        return thesis_body
+
     phase = str((career_phase_data or {}).get("career_phase") or "unknown").lower()
     momentum = int((career_phase_data or {}).get("momentum_score") or 3)
     goals = int(data.get("goals", 0) or 0)
@@ -4198,7 +4470,7 @@ def _build_career_progression_summary(data: Dict[str, Any], career_phase_data: D
         production.append(f"{minutes:,} minutes")
     production_text = ", ".join(production[:2]) if production else "the long-term record"
     if phase == "post-peak" and momentum >= 4:
-        return f"You are beyond the standard peak window, but {production_text} still support strong momentum."
+        return f"You are beyond the standard peak window, but {production_text} still give your career real weight."
     if phase == "peak" and momentum >= 4:
         return f"You are in your peak phase, and {production_text} are reinforcing that status."
     if phase == "peak" and momentum <= 2:
@@ -4230,7 +4502,11 @@ def _build_support_chip(label: str, value: str, tone: str = "neutral") -> Dict[s
     return {"label": label, "value": value, "tone": tone}
 
 
-def _build_career_thesis_support_groups(data: Dict[str, Any], career_phase_data: Dict[str, Any], thesis: Dict[str, Any]) -> Optional[html.Div]:
+def _get_career_thesis_support_groups(
+    data: Dict[str, Any],
+    career_phase_data: Dict[str, Any],
+    thesis: Dict[str, Any],
+) -> Dict[str, List[Dict[str, Any]]]:
     items = [item for item in [*(thesis.get("drivers") or []), *(thesis.get("risks") or [])] if isinstance(item, dict)]
     features = (career_phase_data or {}).get("progression_features")
     if hasattr(features, "peak_range"):
@@ -4272,27 +4548,135 @@ def _build_career_thesis_support_groups(data: Dict[str, Any], career_phase_data:
     if minutes:
         synthesis_items.append(_build_support_chip("Career minutes", f"{minutes:,}", "positive"))
 
-    groups_payload = [
-        ("Momentum is based on", momentum_items),
-        ("Career phase is based on", phase_items),
-        ("Career synthesis is based on", synthesis_items),
+    return {
+        "summary": synthesis_items,
+        "momentum": momentum_items,
+        "phase": phase_items,
+    }
+
+
+def _build_career_support_tooltip(title: str, chips: List[Dict[str, Any]]) -> html.Div:
+    return html.Div(
+        [
+            html.Div(title, className="career-command-chip-group__title"),
+            html.Div(
+                [_build_career_thesis_chip(item) for item in chips],
+                className="career-command-chip-group__chips",
+            ),
+        ],
+        className="career-command-chip-group",
+    )
+
+
+def _extract_season_rating_series(history_df: pd.DataFrame) -> Optional[pd.DataFrame]:
+    if not isinstance(history_df, pd.DataFrame) or history_df.empty or "Season" not in history_df.columns:
+        return None
+
+    rating_columns = [
+        "Rating",
+        "rating",
+        "Average rating",
+        "average_rating",
+        "besoccer_season_rating",
+        "besoccer_rating",
+        "Besoccer rating",
+        "Sofascore rating",
+        "sofascore_rating",
     ]
-    groups: List[Any] = []
-    for title, chips in groups_payload:
-        if not chips:
-            continue
-        groups.append(
+    rating_col = next((column for column in rating_columns if column in history_df.columns), None)
+    if not rating_col:
+        return None
+
+    plot_df = history_df[["Season", rating_col]].copy()
+    plot_df[rating_col] = pd.to_numeric(plot_df[rating_col], errors="coerce")
+    plot_df = plot_df.dropna(subset=[rating_col]).reset_index(drop=True)
+    if plot_df.empty:
+        return None
+
+    plot_df["Season"] = plot_df["Season"].apply(_normalize_season_label)
+    plot_df = (
+        plot_df.assign(_season_sort=plot_df["Season"].apply(_season_sort_key))
+        .sort_values("_season_sort")
+        .drop(columns="_season_sort")
+        .reset_index(drop=True)
+    )
+    plot_df = plot_df.rename(columns={rating_col: "Rating"})
+    return plot_df
+
+
+def _build_career_progression_rating_chart(data: Dict[str, Any]) -> Optional[html.Div]:
+    history_df = data.get("history_df", pd.DataFrame())
+    plot_df = _extract_season_rating_series(history_df)
+    if plot_df is None or plot_df.empty:
+        return None
+
+    rating_min = max(0.0, float(plot_df["Rating"].min()) - 0.12)
+    rating_max = min(10.0, float(plot_df["Rating"].max()) + 0.08)
+    latest_rating = float(plot_df["Rating"].iloc[-1])
+    best_rating = float(plot_df["Rating"].max())
+    best_season = str(plot_df.loc[plot_df["Rating"].idxmax(), "Season"])
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=plot_df["Season"],
+            y=plot_df["Rating"],
+            mode="lines",
+            line=dict(color="#ffcf70", width=3, shape="spline", smoothing=0.7),
+            name="Season rating",
+            hovertemplate="Rating %{y:.2f}<extra></extra>",
+        )
+    )
+    fig = glass_figure_layout(fig)
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=34, r=18, t=12, b=34),
+        height=400,
+        hovermode="x unified",
+        showlegend=False,
+        legend=dict(
+            bgcolor="rgba(0,0,0,0)",
+            bordercolor="rgba(255,255,255,0.08)",
+            borderwidth=1,
+        ),
+        hoverlabel=dict(
+            bgcolor="rgba(24,24,26,0.96)",
+            bordercolor="rgba(255,255,255,0.12)",
+            font_size=13,
+            font_family="Roboto, sans-serif",
+            font_color="#FFFFFF",
+        ),
+    )
+    fig.update_xaxes(title=None, ticklabelstandoff=8)
+    fig.update_yaxes(title="Rating", range=[rating_min, rating_max], tickformat=".1f")
+
+    return html.Div(
+        [
             html.Div(
                 [
-                    html.Div(title, className="career-command-chip-group__title"),
-                    html.Div([_build_career_thesis_chip(item) for item in chips], className="career-command-chip-group__chips"),
+                    html.Div("Season Rating", className="career-command-trend__title"),
+                    html.Div(
+                        [
+                            html.Span(f"{latest_rating:.2f}", className="career-command-trend__stat-value"),
+                            html.Span("latest", className="career-command-trend__stat-label"),
+                            html.Span(f"Best {best_rating:.2f} in {best_season}", className="career-command-trend__best"),
+                        ],
+                        className="career-command-trend__meta",
+                    ),
                 ],
-                className="career-command-chip-group",
-            )
-        )
-    if not groups:
-        return None
-    return html.Div(groups, className="career-command-card__chips")
+                className="career-command-trend__header",
+            ),
+            dcc.Graph(
+                figure=fig,
+                config={"displayModeBar": False, "responsive": True},
+                className="career-command-trend__graph",
+                responsive=True,
+                style={"width": "100%", "minWidth": "0", "height": "400px"},
+            ),
+        ],
+        className="career-command-trend",
+    )
 
 
 def _build_career_command(
@@ -4302,10 +4686,43 @@ def _build_career_command(
 ) -> html.Div:
     thesis = brief.career_thesis
     trajectory_label = "Career Progression"
-    body = _build_career_progression_summary(data, career_phase_data)
+    body = _build_career_progression_summary(data, career_phase_data, thesis)
     momentum = int(career_phase_data.get("momentum_score", 3) or 3)
     phase_display = _format_career_phase_display(career_phase_data)
-    chips_block = _build_career_thesis_support_groups(data, career_phase_data, thesis)
+    support_groups = _get_career_thesis_support_groups(data, career_phase_data, thesis)
+    rating_chart = _build_career_progression_rating_chart(data)
+    summary_id = "career-progression-summary-panel"
+    momentum_id = "career-progression-momentum-kpi"
+    phase_id = "career-progression-phase-kpi"
+
+    tooltip_nodes: List[Any] = []
+    if support_groups.get("summary"):
+        tooltip_nodes.append(
+            dbc.Tooltip(
+                _build_career_support_tooltip("Career synthesis is based on", support_groups["summary"]),
+                target=summary_id,
+                placement="top",
+                className="ai-tooltip-dark career-command-tooltip",
+            )
+        )
+    if support_groups.get("momentum"):
+        tooltip_nodes.append(
+            dbc.Tooltip(
+                _build_career_support_tooltip("Momentum is based on", support_groups["momentum"]),
+                target=momentum_id,
+                placement="top",
+                className="ai-tooltip-dark career-command-tooltip",
+            )
+        )
+    if support_groups.get("phase"):
+        tooltip_nodes.append(
+            dbc.Tooltip(
+                _build_career_support_tooltip("Career phase is based on", support_groups["phase"]),
+                target=phase_id,
+                placement="top",
+                className="ai-tooltip-dark career-command-tooltip",
+            )
+        )
 
     return html.Div(
         className="career-command-card",
@@ -4328,7 +4745,8 @@ def _build_career_command(
                                 [
                                     html.Div(
                                         html.P(body, className="career-command-card__body"),
-                                        className="career-command-card__headline-panel",
+                                        className="career-command-card__headline-panel career-command-card__tooltip-target",
+                                        id=summary_id,
                                     ),
                                     html.Div(
                                         [
@@ -4337,14 +4755,16 @@ def _build_career_command(
                                                     html.Span("Momentum", className="career-command-kpi__label"),
                                                     _build_momentum_dots(momentum),
                                                 ],
-                                                className="career-command-kpi",
+                                                className="career-command-kpi career-command-card__tooltip-target",
+                                                id=momentum_id,
                                             ),
                                             html.Div(
                                                 [
                                                     html.Span("Phase", className="career-command-kpi__label"),
                                                     _build_phase_badge(phase_display, class_name="career-phase-badge career-phase-badge--inline"),
                                                 ],
-                                                className="career-command-kpi",
+                                                className="career-command-kpi career-command-card__tooltip-target",
+                                                id=phase_id,
                                             ),
                                         ],
                                         className="career-command-kpis career-command-kpis--side",
@@ -4352,11 +4772,12 @@ def _build_career_command(
                                 ],
                                 className="career-command-card__headline-layout",
                             ),
-                            chips_block,
+                            *tooltip_nodes,
                         ],
                     ),
                 ],
             ),
+            rating_chart,
             _build_command_metrics_strip(data),
         ],
     )
@@ -4365,6 +4786,11 @@ def _build_career_command(
 def _build_insight_card(item: Any, section_label: str, source: str = "dashboard") -> html.Div:
     meta = _get_career_surface_meta(item, section_label)
     llm_generated = bool(getattr(item, "llm_generated", False))
+    resolved_evidence_key = resolve_career_surface_evidence_key(
+        getattr(item, "evidence_key", ""),
+        label=getattr(item, "title", ""),
+    )
+    focus_metric = str(getattr(item, "focus_metric", "") or "")
     stat_items = []
     if getattr(item, "badge_value", "") and getattr(item, "badge_label", ""):
         stat_items.append((item.badge_value, item.badge_label))
@@ -4420,9 +4846,10 @@ def _build_insight_card(item: Any, section_label: str, source: str = "dashboard"
             ),
             html.Div(
                 _build_career_evidence_button(
-                    item.evidence_key,
+                    resolved_evidence_key,
                     source=source,
                     trigger_index=f"{section_label.lower()}:{getattr(item, 'title', '')}",
+                    focus_metric=focus_metric,
                 ),
                 className="career-dashboard-card__footer",
             ),
@@ -4508,6 +4935,337 @@ def _build_minutes_trend_evidence(data: Dict) -> html.Div:
     ])
 
 
+def _build_recent_form_evidence(data: Dict) -> html.Div:
+    recent_windows = data.get("recent_form_windows") or {}
+    comparison = (recent_windows.get("comparisons") or {}).get("last5_vs_previous5") or {}
+    last5 = recent_windows.get("last5") or {}
+    previous5 = recent_windows.get("previous5") or {}
+    header = html.H6([
+        html.I(className="bi bi-activity me-2"),
+        html.Span("Recent Form", className="animate-glass-draw"),
+    ], className="mb-3 fw-semibold", style={"color": "var(--accent-cyan, #00d4ff)"})
+
+    if not comparison or not last5 or not previous5:
+        return html.Div([header, html.P("Recent form comparison is not available.", className="text-muted small")])
+
+    def _per90(total: Any, minutes: Any) -> float:
+        try:
+            total_value = float(total)
+            minutes_value = float(minutes)
+        except (TypeError, ValueError):
+            return 0.0
+        if minutes_value <= 0:
+            return 0.0
+        return (total_value * 90.0) / minutes_value
+
+    compare_rows = [
+        ("Minutes", int(last5.get("minutes_total", 0) or 0), int(previous5.get("minutes_total", 0) or 0), comparison.get("minutes_trend_pct", 0.0), False),
+        ("Goals", int(last5.get("goals_total", 0) or 0), int(previous5.get("goals_total", 0) or 0), comparison.get("goals_trend_pct", 0.0), False),
+        ("Assists", int(last5.get("assists_total", 0) or 0), int(previous5.get("assists_total", 0) or 0), comparison.get("assists_trend_pct", 0.0), False),
+        (
+            "Goal contributions/90",
+            round(_per90(last5.get("goal_contributions_total", 0), last5.get("minutes_total", 0)), 2),
+            round(_per90(previous5.get("goal_contributions_total", 0), previous5.get("minutes_total", 0)), 2),
+            round(
+                (
+                    (
+                        _per90(last5.get("goal_contributions_total", 0), last5.get("minutes_total", 0))
+                        - _per90(previous5.get("goal_contributions_total", 0), previous5.get("minutes_total", 0))
+                    )
+                    / abs(_per90(previous5.get("goal_contributions_total", 0), previous5.get("minutes_total", 0)))
+                    * 100.0
+                ),
+                2,
+            ) if _per90(previous5.get("goal_contributions_total", 0), previous5.get("minutes_total", 0)) > 0 else 0.0,
+            True,
+        ),
+    ]
+
+    table_rows = []
+    for label, current_value, previous_value, delta_pct, is_decimal in compare_rows:
+        tone = HKFATheme.POSITIVE if float(delta_pct) > 0 else (HKFATheme.NEGATIVE if float(delta_pct) < 0 else HKFATheme.TEXT_SECONDARY)
+        current_display = f"{current_value:.2f}" if is_decimal else f"{current_value:,}"
+        previous_display = f"{previous_value:.2f}" if is_decimal else f"{previous_value:,}"
+        table_rows.append(
+            html.Tr(
+                [
+                    html.Td(label),
+                    html.Td(current_display),
+                    html.Td(previous_display),
+                    html.Td(f"{float(delta_pct):+.1f}%", style={"color": tone, "fontWeight": "600"}),
+                ]
+            )
+        )
+
+    summary = html.Div(
+        [
+            html.Div(
+                [
+                    html.Div("Last 5", className="career-command-kpi__label"),
+                    html.Div(f"{int(last5.get('minutes_total', 0) or 0):,}", className="career-command-kpi__value"),
+                    html.Div("minutes", className="career-command-kpi__label"),
+                ],
+                className="career-command-kpi",
+            ),
+            html.Div(
+                [
+                    html.Div("Previous 5", className="career-command-kpi__label"),
+                    html.Div(f"{int(previous5.get('minutes_total', 0) or 0):,}", className="career-command-kpi__value"),
+                    html.Div("minutes", className="career-command-kpi__label"),
+                ],
+                className="career-command-kpi",
+            ),
+        ],
+        className="career-command-kpis",
+    )
+
+    table = dbc.Table(
+        [
+            html.Thead(html.Tr([html.Th("Metric"), html.Th("Last 5"), html.Th("Previous 5"), html.Th("Delta")])),
+            html.Tbody(table_rows),
+        ],
+        bordered=False,
+        hover=True,
+        responsive=True,
+        className="mb-0",
+    )
+
+    return html.Div([header, summary, table])
+
+
+def _build_career_trend_evidence(data: Dict, career_facts: Optional[Dict[str, Any]] = None) -> html.Div:
+    history_df = data.get("history_df", pd.DataFrame())
+    header = html.H6([
+        html.I(className="bi bi-graph-up-arrow me-2"),
+        html.Span("Career Trend", className="animate-glass-draw"),
+    ], className="mb-3 fw-semibold", style={"color": "var(--accent-cyan, #00d4ff)"})
+
+    if history_df is None or history_df.empty or "Season" not in history_df.columns:
+        return html.Div([header, html.P("Career trend is not available.", className="text-muted small")])
+
+    summary = (career_facts or {}).get("career_summary") or {}
+    primary_metric = str(summary.get("primary_metric") or "")
+    minutes_col = next((c for c in history_df.columns if "minute" in str(c).lower()), None)
+    metric_col = primary_metric if primary_metric in history_df.columns else (minutes_col or "")
+    if not metric_col:
+        return html.Div([header, html.P("Career trend is not available.", className="text-muted small")])
+
+    plot_df = history_df[["Season", metric_col]].copy()
+    plot_df[metric_col] = pd.to_numeric(plot_df[metric_col], errors="coerce")
+    plot_df = plot_df.dropna(subset=[metric_col]).reset_index(drop=True)
+    if plot_df.empty:
+        return html.Div([header, html.P("Career trend is not available.", className="text-muted small")])
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=plot_df["Season"],
+        y=plot_df[metric_col],
+        mode="lines+markers",
+        line=dict(color=HKFATheme.ACCENT_BLUE, width=3),
+        marker=dict(size=8, color=HKFATheme.ACCENT_CYAN if hasattr(HKFATheme, "ACCENT_CYAN") else HKFATheme.ACCENT_BLUE),
+        fill="tozeroy",
+        fillcolor="rgba(83, 228, 255, 0.10)",
+        hovertemplate=f"%{{x}}<br>{metric_col}: %{{y:.2f}}<extra></extra>",
+    ))
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=36, r=18, t=10, b=46),
+        height=300,
+        xaxis=dict(title=None, ticklabelstandoff=8),
+        yaxis=dict(title=metric_col, rangemode="tozero"),
+        hovermode="x unified",
+        showlegend=False,
+    )
+    fig = glass_figure_layout(fig)
+
+    latest_value = float(plot_df[metric_col].iloc[-1]) if not plot_df.empty else 0.0
+    metric_trend_pct = float(summary.get("primary_metric_trend_pct") or 0.0)
+    consistency_level = str(summary.get("consistency_level") or "MODERADA")
+
+    meta = html.Div(
+        [
+            html.Div(
+                [
+                    html.Div(f"{latest_value:.1f}", className="career-command-kpi__value"),
+                    html.Div(f"latest {metric_col.lower()}", className="career-command-kpi__label"),
+                ],
+                className="career-command-kpi",
+            ),
+            html.Div(
+                [
+                    html.Div(f"{metric_trend_pct:+.1f}%", className="career-command-kpi__value"),
+                    html.Div("trend", className="career-command-kpi__label"),
+                ],
+                className="career-command-kpi",
+            ),
+            html.Div(
+                [
+                    html.Div(consistency_level, className="career-command-kpi__value"),
+                    html.Div("consistency", className="career-command-kpi__label"),
+                ],
+                className="career-command-kpi",
+            ),
+        ],
+        className="career-command-kpis",
+    )
+
+    return html.Div([
+        header,
+        meta,
+        dcc.Graph(
+            figure=fig,
+            config={"displayModeBar": False, "responsive": True},
+            className="w-100",
+            responsive=True,
+            style={"width": "100%", "minWidth": "0"},
+        ),
+    ])
+
+
+def _build_career_phase_resolution_evidence(
+    data: Dict[str, Any],
+    career_phase_data: Dict[str, Any],
+    career_signals: Dict[str, Any],
+    career_facts: Optional[Dict[str, Any]] = None,
+) -> html.Div:
+    header = html.H6([
+        html.I(className="bi bi-signpost-split me-2"),
+        html.Span("Career Phase", className="animate-glass-draw"),
+    ], className="mb-3 fw-semibold", style={"color": "var(--accent-cyan, #00d4ff)"})
+
+    evidence = ((career_facts or {}).get("evidence_facts") or {}).get("career_phase_resolution") or {}
+    resolution = dict(evidence.get("progression_resolution") or career_phase_data.get("progression_resolution") or {})
+    peak_range = evidence.get("peak_range") or career_phase_data.get("peak_range") or []
+    age = int(evidence.get("age") or career_phase_data.get("age") or data.get("age") or 0)
+    phase_key = str(career_phase_data.get("career_phase") or "unknown")
+    phase = phase_key.replace("-", " ").title()
+    momentum = int(career_phase_data.get("momentum_score") or 3)
+    transfer_quality = str(evidence.get("transfer_window_quality") or ((career_signals.get("transfer_window") or {}).get("quality") or "MODERADA"))
+    consistency_level = str(evidence.get("consistency_level") or ((career_signals.get("consistency_score") or {}).get("level") or "MODERADA"))
+    base_phase = str(resolution.get("base_phase") or "").replace("-", " ").title()
+    resolved_phase = str(resolution.get("resolved_phase") or phase_key).replace("-", " ").title()
+    peak_start = int(peak_range[0]) if len(peak_range) == 2 else 0
+    peak_end = int(peak_range[1]) if len(peak_range) == 2 else 0
+
+    if phase_key == "peak" and peak_end and age > peak_end:
+        current_read = "Peak, but under late-cycle pressure"
+        summary_title = "This still looks competitive, but it no longer reads like a clean growth phase."
+        summary_body = (
+            f"At {age}, you are beyond the typical peak window ({peak_start}-{peak_end}). "
+            "That means the priority is to protect level and stability before pushing for something bigger."
+        )
+    elif phase_key == "post-peak" and momentum >= 3:
+        current_read = "Post-peak, but still holding value"
+        summary_title = "The profile still has competitive weight, even if the cycle is no longer at its highest point."
+        summary_body = (
+            "The next step is less about acceleration and more about holding level, role, and repeatability."
+        )
+    elif phase_key == "building" and momentum >= 4:
+        current_read = "Building with force"
+        summary_title = "The player is still in a growth window and the current signs are pushing upward."
+        summary_body = (
+            "This is the kind of phase where stronger minutes and cleaner output can quickly change the next-step conversation."
+        )
+    elif phase_key == "peak":
+        current_read = "Peak, with value to protect"
+        summary_title = "The player is in a strong phase, but the next task is to keep that level stable."
+        summary_body = (
+            "The key is not just producing now, but showing that the same level can hold across the next stretch."
+        )
+    else:
+        current_read = resolved_phase
+        summary_title = "This phase read combines age, momentum, and role signals into one career checkpoint."
+        summary_body = "The next stretch will decide whether this phase strengthens, holds, or starts to soften."
+
+    if resolution.get("adjustment_applied") and base_phase and base_phase != resolved_phase:
+        current_read = f"{current_read} ({base_phase} -> {resolved_phase})"
+
+    watch_next = "Watch whether minutes and consistency hold across the next run."
+    if transfer_quality == "BAJA":
+        watch_next = "Watch whether stability improves before trying to force a bigger move."
+    elif transfer_quality == "ÓPTIMA":
+        watch_next = "Watch whether the current level stays stable enough to justify a stronger push."
+
+    kpis = html.Div(
+        [
+            html.Div([html.Div(phase, className="career-command-kpi__value"), html.Div("phase", className="career-command-kpi__label")], className="career-command-kpi"),
+            html.Div([html.Div(f"{momentum}/5", className="career-command-kpi__value"), html.Div("momentum", className="career-command-kpi__label")], className="career-command-kpi"),
+            html.Div([html.Div(f"{age}" if age else "—", className="career-command-kpi__value"), html.Div("age", className="career-command-kpi__label")], className="career-command-kpi"),
+            html.Div([html.Div(transfer_quality, className="career-command-kpi__value"), html.Div("window", className="career-command-kpi__label")], className="career-command-kpi"),
+        ],
+        className="career-command-kpis",
+    )
+
+    detail_rows = [
+        ("Peak window", f"{peak_range[0]}-{peak_range[1]}" if len(peak_range) == 2 else "—"),
+        ("Current read", current_read),
+        ("Consistency", consistency_level),
+        ("Window", transfer_quality),
+        ("Watch next", watch_next),
+    ]
+
+    body = dbc.Table(
+        [html.Tbody([html.Tr([html.Td(label), html.Td(value)]) for label, value in detail_rows])],
+        bordered=False,
+        hover=True,
+        responsive=True,
+        className="mb-0",
+    )
+
+    summary = html.Div(
+        [
+            html.Div("Why this read", className="career-dashboard-card__eyebrow"),
+            html.Div(summary_title, className="career-outlook-card__title"),
+            html.P(summary_body, className="career-dashboard-card__body"),
+        ],
+        className="career-outlook-card mb-3",
+    )
+
+    return html.Div([header, kpis, summary, html.Div(body, className="career-outlook-card")])
+
+
+def _build_career_value_summary_evidence(data: Dict[str, Any], career_facts: Optional[Dict[str, Any]] = None) -> html.Div:
+    header = html.H6([
+        html.I(className="bi bi-briefcase me-2"),
+        html.Span("Career Value", className="animate-glass-draw"),
+    ], className="mb-3 fw-semibold", style={"color": "var(--accent-cyan, #00d4ff)"})
+
+    evidence = ((career_facts or {}).get("evidence_facts") or {}).get("career_value_summary") or {}
+    season_count = int(evidence.get("season_count") or 0)
+    career_minutes = int(evidence.get("career_minutes") or data.get("minutes_played") or 0)
+    career_goals = int(evidence.get("career_goals") or data.get("goals") or 0)
+    career_assists = int(evidence.get("career_assists") or data.get("assists") or 0)
+    consistency_level = str(evidence.get("consistency_level") or "MODERADA")
+
+    kpis = html.Div(
+        [
+            html.Div([html.Div(f"{season_count}", className="career-command-kpi__value"), html.Div("seasons tracked", className="career-command-kpi__label")], className="career-command-kpi"),
+            html.Div([html.Div(f"{career_minutes:,}", className="career-command-kpi__value"), html.Div("career minutes", className="career-command-kpi__label")], className="career-command-kpi"),
+            html.Div([html.Div(f"{career_goals}", className="career-command-kpi__value"), html.Div("career goals", className="career-command-kpi__label")], className="career-command-kpi"),
+            html.Div([html.Div(f"{career_assists}", className="career-command-kpi__value"), html.Div("career assists", className="career-command-kpi__label")], className="career-command-kpi"),
+        ],
+        className="career-command-kpis",
+    )
+
+    summary_copy = html.Div(
+        [
+            html.Div("Body of Work", className="career-dashboard-card__eyebrow"),
+            html.P(
+                f"This profile already carries {career_minutes:,} minutes across {season_count} tracked seasons, with {career_goals} goals and {career_assists} assists.",
+                className="career-dashboard-card__body",
+            ),
+            html.P(
+                f"Consistency is currently read as {consistency_level}.",
+                className="career-dashboard-card__support",
+            ),
+        ],
+        className="career-outlook-card",
+    )
+
+    return html.Div([header, kpis, summary_copy])
+
+
 def _build_key_career_signals(brief: Any) -> html.Div:
     return html.Div(
         className="career-dashboard-section",
@@ -4558,9 +5316,75 @@ def _build_career_levers(brief: Any) -> html.Div:
     )
 
 
+def _build_evidence_explanation_block(explanation_payload: Optional[Dict[str, Any]]) -> html.Div:
+    """Renders the optional contextual explanation shown inside evidence modals."""
+    payload = explanation_payload if isinstance(explanation_payload, dict) else {}
+    headline = str(payload.get("headline") or "").strip()
+    what_this_shows = str(payload.get("what_this_shows") or "").strip()
+    why_it_matters = str(payload.get("why_it_matters") or "").strip()
+    what_to_watch = str(payload.get("what_to_watch") or "").strip()
+    confidence = str(payload.get("confidence") or "").strip().upper()
+    llm_generated = bool(payload.get("llm_generated", False))
+    if not all([headline, what_this_shows, why_it_matters, what_to_watch]):
+        return html.Div()
+
+    return html.Div(
+        className="career-dashboard-section",
+        children=[
+            html.Div(
+                [
+                    html.Div(
+                        [
+                            html.Span(html.I(className="bi bi-chat-square-text"), className="career-dashboard-section__icon"),
+                            html.H6("What This Means", className="career-dashboard-section__title"),
+                        ],
+                        className="career-dashboard-section__title-row",
+                    ),
+                    html.P("A deeper read of the evidence you opened, in simple language.", className="career-dashboard-section__subtitle"),
+                ],
+                className="career-dashboard-section__header",
+            ),
+            html.Div(
+                className="career-outlook-card",
+                children=[
+                    html.Div(
+                        [
+                            html.Div("Evidence Read", className="career-dashboard-card__eyebrow"),
+                            html.Div(
+                                [
+                                    html.Span(confidence or "MEDIUM"),
+                                    _build_ai_origin_badge(llm_generated),
+                                ],
+                                className="career-dashboard-card__tone",
+                            ),
+                        ],
+                        className="career-dashboard-card__meta",
+                    ),
+                    html.Div(headline, className="career-outlook-card__title"),
+                    html.Div(
+                        [
+                            html.P("What this shows", className="career-dashboard-card__eyebrow"),
+                            html.P(what_this_shows, className="career-dashboard-card__body"),
+                            html.P("Why it matters", className="career-dashboard-card__eyebrow"),
+                            html.P(why_it_matters, className="career-dashboard-card__body"),
+                            html.P("What to watch", className="career-dashboard-card__eyebrow"),
+                            html.P(what_to_watch, className="career-dashboard-card__support"),
+                        ]
+                    ),
+                ],
+            ),
+        ],
+    )
+
+
 def _build_career_outlook(brief: Any) -> html.Div:
     outlook = brief.outlook
     llm_generated = bool(outlook.get("llm_generated", False))
+    outlook_label = str(outlook.get("label", "Build") or "Build")
+    resolved_evidence_key = resolve_career_surface_evidence_key(
+        outlook.get("evidence_key", "career_arc"),
+        label=outlook_label,
+    )
     return html.Div(
         className="career-dashboard-section",
         children=[
@@ -4586,7 +5410,7 @@ def _build_career_outlook(brief: Any) -> html.Div:
                         ],
                         className="career-dashboard-card__top",
                     ),
-                    html.Div(outlook.get("label", "Build"), className="career-outlook-card__title"),
+                    html.Div(outlook_label, className="career-outlook-card__title"),
                     html.P(outlook.get("body", ""), className="career-dashboard-card__body"),
                     html.Div(
                         [
@@ -4597,8 +5421,8 @@ def _build_career_outlook(brief: Any) -> html.Div:
                     ),
                     html.Div(
                         _build_career_evidence_button(
-                            outlook.get("evidence_key", "career_arc"),
-                            trigger_index=f"outlook:{outlook.get('label', 'career-outlook')}",
+                            resolved_evidence_key,
+                            trigger_index=f"outlook:{outlook_label}",
                         ),
                         className="career-dashboard-card__footer",
                     ),
@@ -4622,18 +5446,48 @@ def _build_ai_origin_badge(llm_generated: bool) -> html.Span:
     )
 
 
-def render_career_evidence_view(evidence_key: str, player_name: str, player_id: str) -> Dict[str, Any]:
+def render_career_evidence_view(
+    evidence_key: str,
+    player_name: str,
+    player_id: str,
+    focus_metric: str = "",
+) -> Dict[str, Any]:
     """Returns modal metadata + content for a career evidence destination."""
+    from utils.career_intelligence import (
+        get_career_phase_data,
+        get_career_signals,
+        get_development_priorities,
+    )
+    from utils.domain_ai import build_career_intelligence_facts, build_evidence_explanation
+
     data = _fetch_dashboard_data(player_name, player_id)
-    meta = get_evidence_destination_meta(evidence_key)
+    career_phase_data = get_career_phase_data(data, data.get("history_df", pd.DataFrame()))
+    career_signals = get_career_signals(data, data.get("history_df", pd.DataFrame()), career_phase_data or {})
+    development_priorities = get_development_priorities(data.get("percentiles_data") or {})
+    career_facts = build_career_intelligence_facts(
+        data,
+        career_phase_data or {},
+        career_signals,
+        development_priorities,
+    )
+    resolved_key = resolve_career_surface_evidence_key(evidence_key)
+    meta = get_evidence_destination_meta(resolved_key)
     key = meta["key"]
 
     if key == "minutes_trend":
         content = _build_minutes_trend_evidence(data)
+    elif key == "recent_form":
+        content = _build_recent_form_evidence(data)
+    elif key == "career_trend":
+        content = _build_career_trend_evidence(data, career_facts)
+    elif key == "career_phase_resolution":
+        content = _build_career_phase_resolution_evidence(data, career_phase_data or {}, career_signals, career_facts)
+    elif key == "career_value_summary":
+        content = _build_career_value_summary_evidence(data, career_facts)
     elif key == "career_arc":
         content = _build_career_arc(data)
     elif key == "percentile_profile":
-        content = _build_league_standing(data)
+        content = _build_league_standing(data, focus_metric=focus_metric)
     elif key == "similarity_profiles":
         content = _build_similar_players(data)
     elif key == "projection_outlook":
@@ -4651,10 +5505,37 @@ def render_career_evidence_view(evidence_key: str, player_name: str, player_id: 
             html.P("Detailed evidence is not available for this insight yet.", className="text-muted small mb-0")
         )
 
+    explanation_payload: Optional[Dict[str, Any]] = None
+    try:
+        explanation = build_evidence_explanation(
+            player_id=player_id,
+            player_name=player_name,
+            evidence_key=key,
+            career_facts=career_facts,
+        )
+        if explanation is not None:
+            explanation_payload = {
+                "headline": explanation.headline,
+                "what_this_shows": explanation.what_this_shows,
+                "why_it_matters": explanation.why_it_matters,
+                "what_to_watch": explanation.what_to_watch,
+                "confidence": explanation.confidence,
+                "llm_generated": bool(getattr(explanation, "llm_generated", False)),
+            }
+    except Exception as exc:
+        logger.debug("career evidence explanation error: %s", exc)
+
+    wrapped_content = html.Div(
+        [
+            content,
+            _build_evidence_explanation_block(explanation_payload),
+        ]
+    )
+
     return {
         "key": key,
         "title": meta["title"],
-        "content": content,
+        "content": wrapped_content,
     }
 
 
@@ -4662,6 +5543,7 @@ def render_player_dashboard(
     player_name: str,
     player_id: str,
     user_role: str = "player",
+    ai_payload: Optional[Dict[str, Any]] = None,
 ) -> html.Div:
     """
     Orchestrates the 6-section player dashboard for Estado A (no card open).
@@ -4700,7 +5582,7 @@ def render_player_dashboard(
         career_phase_data or {},
         career_signals,
         development_priorities,
-        ai_payload=data.get("career_dashboard_ai_brief"),
+        ai_payload=ai_payload if isinstance(ai_payload, dict) else {},
     )
 
     def _safe_build(builder_fn, *args, **kwargs) -> html.Div:
@@ -6256,3 +7138,51 @@ def _build_projection_chart(
         fig = go.Figure()
         fig.add_annotation(text=f"Error: {str(e)}", showarrow=False)
         return glass_figure_layout(fig)
+
+
+def render_season_stage(payload: dict) -> html.Div:
+    """
+    Provisional season card stage — shows basic season stats without any AI calls.
+    Used when a user clicks a season milestone in the timeline.
+    """
+    season = payload.get("season", "—")
+    season_team = payload.get("season_team") or "—"
+    stats = payload.get("stats") or {}
+    mp = stats.get("matches_played", 0)
+    g = stats.get("goals", 0)
+    a = stats.get("assists", 0)
+    mn = stats.get("minutes_played", 0)
+
+    def _kpi(icon: str, label: str, value) -> html.Div:
+        return html.Div([
+            html.I(className=f"bi {icon} d-block mb-1",
+                   style={"color": HKFATheme.ACCENT_BLUE, "fontSize": "0.95rem"}),
+            html.Div(str(value), style={"fontSize": "1.3rem", "fontWeight": "800",
+                                        "color": HKFATheme.TEXT_PRIMARY, "lineHeight": "1"}),
+            html.Div(label, style={"fontSize": "0.6rem", "color": HKFATheme.TEXT_SECONDARY,
+                                   "textTransform": "uppercase", "letterSpacing": "0.08em",
+                                   "marginTop": "4px"}),
+        ], className="season-pulse-card")
+
+    return html.Div([
+        html.Div([
+            html.Span(season, style={"fontWeight": "700", "fontSize": "1.1rem",
+                                     "color": HKFATheme.TEXT_PRIMARY}),
+            html.Span(f"  ·  {season_team}",
+                      style={"color": HKFATheme.TEXT_SECONDARY, "fontSize": "0.9rem"}),
+        ], className="mb-3"),
+        html.Div([
+            _kpi("bi-calendar-check", "Matches", mp),
+            _kpi("bi-bullseye", "Goals", g),
+            _kpi("bi-hand-index-thumb", "Assists", a),
+            _kpi("bi-stopwatch", "Minutes", mn),
+        ], style={"display": "flex", "gap": "6px", "flexWrap": "wrap", "marginBottom": "24px"}),
+        html.Div([
+            html.I(className="bi bi-bar-chart-line me-2",
+                   style={"color": HKFATheme.TEXT_SECONDARY}),
+            html.Span("Season Analytics — Coming Soon",
+                      style={"color": HKFATheme.TEXT_SECONDARY, "fontSize": "0.85rem"}),
+        ], style={"padding": "12px 16px", "borderRadius": "8px",
+                  "background": "rgba(255,255,255,0.03)",
+                  "border": "1px solid rgba(255,255,255,0.08)"}),
+    ], className="p-3")

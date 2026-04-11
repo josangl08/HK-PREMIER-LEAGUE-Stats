@@ -2,6 +2,7 @@
 # ABOUTME: Integrates with Flask-Login and handles Users, Roles, and Player/Agent associations.
 
 import logging
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 from werkzeug.security import check_password_hash, generate_password_hash
 from sqlalchemy import select
@@ -79,7 +80,7 @@ class AuthRepository:
             try:
                 db_user = session.get(User, user.id)
                 if db_user:
-                    db_user.last_login = datetime.utcnow()
+                    db_user.last_login = datetime.now(timezone.utc)
                     session.commit()
             except Exception as e:
                 logger.error(f"Error al actualizar last_login para {username}: {e}")

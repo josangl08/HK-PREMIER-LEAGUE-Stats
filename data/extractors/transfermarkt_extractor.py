@@ -19,6 +19,7 @@ import json
 from requests.cookies import create_cookie
 
 from utils.proxy_manager import ProxyManager
+from utils.common import get_current_season
 
 # Known TM spellings for HKPL team IDs — used to boost club_score when our
 # internal name doesn't match TM's exact spelling.
@@ -36,6 +37,7 @@ _TEAM_TM_ALIASES: dict[str, list[str]] = {
     "sham_shui_po":      ["Sham Shui Po", "Sham Shui Po AA"],
     "yuen_long":         ["Yuen Long", "Yuen Long FC"],
     "wong_tai_sin":      ["Wong Tai Sin", "Wong Tai Sin SA"],
+    "resources_capital": ["Resources Capital", "Resources Capital FC", "RCFC"],
 }
 
 # TM club IDs for HKPL teams — used to fetch squad pages directly when
@@ -53,6 +55,7 @@ _TEAM_TM_CLUB_IDS: dict[str, int] = {
     "hong_kong_fc":      14413,   # Hong Kong Football Club
     "sham_shui_po":      34332,   # Sham Shui Po
     "yuen_long":         34397,   # Yuen Long
+    "resources_capital": 36935,   # Resources Capital
 }
 
 _USER_AGENTS = [
@@ -69,17 +72,17 @@ class TransfermarktExtractor:
     """
 
     def __init__(self, cache_dir: str = "data/cache", proxy_manager: Optional[ProxyManager] = None):
-        self.base_url = "https://www.transfermarkt.es"
+        self.base_url = "https://www.transfermarkt.com"
         self.headers = {
             'User-Agent': random.choice(_USER_AGENTS),
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-GB,en;q=0.9,es;q=0.7',
+            'Accept-Language': 'en-US,en;q=0.9',
             'Accept-Encoding': 'gzip, deflate, br',
             'DNT': '1',
             'Upgrade-Insecure-Requests': '1',
         }
-        self.delay_min = 5.0
-        self.delay_max = 9.0
+        self.delay_min = 10.0
+        self.delay_max = 20.0
         self.request_count = 0
         self.last_request_time = 0
         self.proxy_manager = proxy_manager or ProxyManager()
@@ -102,10 +105,10 @@ class TransfermarktExtractor:
             "Hong Kong Premier League", "Hong Kong FA Cup", "Hong Kong Sapling Cup",
             "Hong Kong Sapling Cup ('15-'25)", "Hong Kong Senior Challenge Shield",
             "Hong Kong Community Cup", "HKPL", "HKFA Cup", "Senior Shield", "Sapling Cup",
-            "菁英盃", "足總盃", "銀牌", "香港超級聯賽", "Play-off", "Champions League", 
-            "AFC Cup", "ACL Elite", "AFC Champions League Two", "Quali"
+            "菁英盃", "足總盃", "銀牌", "香港超級聯賽", "Play-off", "Champions League",
+            "AFC Cup", "ACL Elite", "AFC Champions League Two", "Quali",
+            "Copa de la AFC", "Clasificación", "AFC Champions League", "ACL"
         }
-
     def _wait_rate_limit(self):
         self.request_count += 1
         # Every 10 requests, take a longer break to look human.
@@ -166,10 +169,16 @@ class TransfermarktExtractor:
         text = (html or "").lower()
         if not text:
             return None
-        if "human verification" in text and ("awswaf" in text or "gokuprops" in text):
+        
+        # AWS WAF suele poner estos textos en el <title> o en encabezados h1/h2 muy específicos
+        # Evitamos falsos positivos buscando combinaciones más estrictas
+        if "human verification" in text and "awswaf" in text and "show details" in text:
             return "Human Verification (AWS WAF challenge)"
-        if "captcha" in text and ("bot" in text or "human verification" in text):
+        
+        if "captcha" in text and "bot" in text and "verification" in text and len(text) < 5000:
+            # Las páginas de captcha suelen ser cortas (< 5KB). Una página real pesa > 100KB.
             return "Captcha / bot challenge"
+            
         return None
 
     def load_cookie_jar(self, cookie_items: Sequence[Dict]) -> None:
@@ -541,6 +550,189 @@ class TransfermarktExtractor:
         """Legacy wrapper for backward compatibility."""
         profile = self.get_player_full_profile(tm_player_id)
         return profile.get("position")
+
+    def get_player_injuries(self, tm_player_id: str) -> List[Dict]:
+        """
+        Scrapes the historical injuries list for a player from Transfermarkt.
+        Returns a list of dictionaries with keys: season, injury_type, date_from, date_until, days, matches_missed.
+        """
+        url = f"{self.base_url}/x/verletzungen/spieler/{tm_player_id}"
+        soup = self._make_request(url)
+        if soup is None:
+            return []
+
+        injuries = []
+        try:
+            # The injuries table is typically in a div with class 'box'
+            table = soup.select_one(".items") or soup.find("table")
+            if not table:
+                return []
+
+            rows = table.find_all("tr", class_=["odd", "even"])
+            for row in rows:
+                cells = row.find_all("td")
+                if len(cells) < 5:
+                    continue
+
+                # Indices (may vary slightly but usually):
+                # 0: Season, 1: Injury, 2: From, 3: Until, 4: Days, 5: Games missed
+                injury_entry = {
+                    "season": cells[0].get_text(strip=True),
+                    "injury_type": cells[1].get_text(strip=True),
+                    "date_from": cells[2].get_text(strip=True),
+                    "date_until": cells[3].get_text(strip=True),
+                    "days": cells[4].get_text(strip=True),
+                }
+                if len(cells) > 5:
+                    injury_entry["matches_missed"] = cells[5].get_text(strip=True)
+                
+                injuries.append(injury_entry)
+        except Exception as e:
+            self.logger.error(f"get_player_injuries error for tm_id={tm_player_id}: {e}")
+
+        return injuries
+
+    def get_team_injuries(self, tm_club_id: Union[str, int], season_id: Optional[str] = None) -> List[Dict]:
+        """
+        Scrapes current or historical injuries for a specific team with fuzzy column detection.
+        """
+        team_slug = "team"
+        for k, v in _TEAM_TM_CLUB_IDS.items():
+            if str(v) == str(tm_club_id):
+                team_slug = k.replace("_", "-")
+                break
+
+        url = f"{self.base_url}/{team_slug}/sperrenundverletzungen/verein/{tm_club_id}/plus/1"
+        if season_id:
+            year = season_id.split("-")[0] if "-" in season_id else season_id
+            url += f"?saison_id={year}"
+            
+        soup = self._make_request(url)
+        if soup is None:
+            return []
+
+        team_injuries = []
+        try:
+            # Buscar todos los contenedores 'box' que tienen una tabla y un encabezado
+            boxes = soup.find_all("div", class_="box")
+            if not boxes:
+                return []
+
+            for box in boxes:
+                # Verificar el encabezado de la caja para saber si es de lesiones
+                header = box.find(["h2", "div"], class_=["table-header", "content-box-headline"])
+                header_text = header.get_text(strip=True).lower() if header else ""
+                
+                # Solo procesar si el encabezado menciona lesiones (en inglés o alemán)
+                # Ignoramos "suspensions", "sperren", "sanciones"
+                if not any(word in header_text for word in ["injury", "verletzung", "lesion", "lesión"]):
+                    continue
+                
+                table = box.find("table", class_="items")
+                if not table:
+                    continue
+
+                rows = table.find_all("tr", class_=["odd", "even"])
+                for row in rows:
+                    cells = row.find_all("td")
+                    if len(cells) < 5: continue
+
+                    # --- INTELLIGENT COLUMN DETECTION ---
+                    # Instead of fixed indices, we scan the cells for patterns
+                    
+                    player_data = {"name": None, "tm_id": None}
+                    injury_type = None
+                    dates = [] # Collect any DD/MM/YYYY strings
+                    missed_matches = 0
+                    days_out = 0
+
+                    for i, cell in enumerate(cells):
+                        txt = cell.get_text(strip=True)
+                        
+                        # 1. Look for Player Name & ID (usually the cell with table.inline-table)
+                        if not player_data["name"] and cell.find("table", class_="inline-table"):
+                            a_link = cell.find("a", href=re.compile(r"/spieler/"))
+                            if a_link:
+                                player_data["name"] = a_link.get_text(strip=True)
+                                m = re.search(r"/spieler/(\d+)", a_link.get("href", ""))
+                                if m: player_data["tm_id"] = m.group(1)
+
+                        # 2. Look for Dates (format DD/MM/YYYY)
+                        date_matches = re.findall(r'(\d{1,2}/\d{1,2}/\d{2,4})', txt)
+                        if date_matches:
+                            dates.extend(date_matches)
+                        
+                        # 3. Look for Missed Matches (cell with a link to fixtures)
+                        if cell.find("a", href=re.compile(r"/spielplandatum/")):
+                            missed_matches = self._parse_number(txt)
+                            # FIX: In the provided HTML, 'Days' is the IMMEDIATE NEXT cell after 'Missed Matches'
+                            if i + 1 < len(cells):
+                                days_out = self._parse_number(cells[i+1].get_text(strip=True))
+                        
+                        # 4. If we haven't found injury_type yet, and it's a 'links' cell with text
+                        if not injury_type and "links" in (cell.get("class") or []) and len(txt) > 3:
+                            if not any(char.isdigit() for char in txt): # Injury text doesn't usually have digits
+                                injury_type = txt
+
+                    # Assign dates based on position (usually first is since, second is until)
+                    date_from = dates[0] if len(dates) > 0 else None
+                    date_until = dates[1] if len(dates) > 1 else None
+                    
+                    # Emergency fallback for days_out if it's still 0
+                    if days_out == 0 and len(cells) > 6:
+                        # Sometimes 'Days' is in cell index 6 or the one before 'rechts' (market value)
+                        # We'll take the highest number in the last 3 cells
+                        last_numeric_vals = [self._parse_number(c.get_text(strip=True)) for c in cells[-3:]]
+                        if last_numeric_vals: days_out = max(last_numeric_vals)
+
+                    if player_data["name"]:
+                        injury_data = {
+                            "player_name": player_data["name"],
+                            "tm_id": player_data["tm_id"],
+                            "injury_type": injury_type or "unknown injury",
+                            "date_from": date_from,
+                            "date_until": date_until,
+                            "missed_matches": missed_matches,
+                            "days_out": days_out,
+                            "season": season_id or get_current_season()
+                        }
+                        team_injuries.append(injury_data)
+                
+            self.logger.info(f"Extracted {len(team_injuries)} injuries for team {tm_club_id}")
+        except Exception as e:
+            self.logger.error(f"get_team_injuries error for club_id={tm_club_id}: {e}")
+
+        return team_injuries
+
+    def extract_all_injuries(self, league_id: str = "HKL1", force_refresh: bool = False, historical: bool = False) -> List[Dict]:
+        """
+        Scrapes current (and optionally historical) injuries by iterating over HKPL teams.
+        """
+        all_injuries = []
+        
+        # Decide which seasons to scrape
+        seasons_to_scrape = [get_current_season()]
+        if historical:
+            # We can expand this list to past years if needed
+            seasons_to_scrape = ["2024-25", "2023-24", "2022-23", "2021-22", "2020-21", "2019-20", "2018-19"]
+
+        for season in seasons_to_scrape:
+            self.logger.info(f"--- Starting scraping for season: {season} ---")
+            for team_key, tm_club_id in _TEAM_TM_CLUB_IDS.items():
+                self.logger.info(f"Scraping injuries for: {team_key} ({season})")
+                team_data = self.get_team_injuries(tm_club_id, season_id=season)
+                for entry in team_data:
+                    entry["team_key"] = team_key
+                    all_injuries.append(entry)
+                
+                # VERY LONG DELAY to simulate human reading time (15-40 seconds)
+                if len(_TEAM_TM_CLUB_IDS) > 1:
+                    wait_time = random.uniform(15, 40)
+                    self.logger.info(f"Human pause: {wait_time:.1f}s...")
+                    time.sleep(wait_time)
+                
+        self.logger.info(f"Extracted {len(all_injuries)} total injuries from team-specific pages.")
+        return all_injuries
 
     def _search_player_in_squad(
         self,

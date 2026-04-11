@@ -42,6 +42,20 @@ class CareerProgressionAssessmentPayload:
     rationale: str
 
 
+@dataclass(frozen=True)
+class EvidenceExplanationPayload:
+    """Structured evidence-modal explanation contract for deeper contextual reading."""
+
+    evidence_key: str
+    headline: str
+    what_this_shows: str
+    why_it_matters: str
+    what_to_watch: str
+    confidence: str
+    llm_generated: bool = False
+    source_model: str = ""
+
+
 def normalize_confidence(value: Any, default: str = "medium") -> str:
     """Normalizes numeric or free-text confidence values to the platform enum."""
     if isinstance(value, (int, float)):
@@ -122,6 +136,67 @@ def validate_career_progression_assessment(raw_payload: Any) -> bool:
     if payload.momentum_adjustment not in (-1, 0, 1):
         return False
     return bool(payload.rationale)
+
+
+def build_fallback_evidence_explanation_payload(
+    *,
+    evidence_key: str,
+    headline: str,
+    what_this_shows: str,
+    why_it_matters: str,
+    what_to_watch: str,
+    confidence: Any = "medium",
+    llm_generated: bool = False,
+    source_model: str = "",
+) -> EvidenceExplanationPayload:
+    """Builds a normalized deterministic evidence explanation payload."""
+    return EvidenceExplanationPayload(
+        evidence_key=normalize_evidence_key(evidence_key),
+        headline=str(headline or "").strip(),
+        what_this_shows=str(what_this_shows or "").strip(),
+        why_it_matters=str(why_it_matters or "").strip(),
+        what_to_watch=str(what_to_watch or "").strip(),
+        confidence=normalize_confidence(confidence),
+        llm_generated=bool(llm_generated),
+        source_model=str(source_model or "").strip(),
+    )
+
+
+def coerce_evidence_explanation_payload(raw_payload: Any) -> Optional[EvidenceExplanationPayload]:
+    """Converts dict-like inputs into the structured evidence explanation contract."""
+    if isinstance(raw_payload, EvidenceExplanationPayload):
+        return raw_payload
+    if not isinstance(raw_payload, dict):
+        return None
+    return build_fallback_evidence_explanation_payload(
+        evidence_key=str(raw_payload.get("evidence_key") or ""),
+        headline=str(raw_payload.get("headline") or "").strip(),
+        what_this_shows=str(raw_payload.get("what_this_shows") or "").strip(),
+        why_it_matters=str(raw_payload.get("why_it_matters") or "").strip(),
+        what_to_watch=str(raw_payload.get("what_to_watch") or "").strip(),
+        confidence=raw_payload.get("confidence", "medium"),
+        llm_generated=raw_payload.get("llm_generated", False),
+        source_model=str(raw_payload.get("source_model") or "").strip(),
+    )
+
+
+def validate_evidence_explanation_payload(raw_payload: Any) -> bool:
+    """Returns True only when the evidence explanation satisfies the shared modal contract."""
+    payload = coerce_evidence_explanation_payload(raw_payload)
+    if payload is None:
+        return False
+    if payload.confidence not in ALLOWED_CONFIDENCE_LEVELS:
+        return False
+    if payload.evidence_key != normalize_evidence_key(payload.evidence_key):
+        return False
+    return all(
+        [
+            bool(payload.headline),
+            bool(payload.what_this_shows),
+            bool(payload.why_it_matters),
+            bool(payload.what_to_watch),
+        ]
+    )
 
 
 def build_fallback_insight_payload(

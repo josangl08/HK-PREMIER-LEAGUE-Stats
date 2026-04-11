@@ -9,7 +9,7 @@ from flask_login import current_user
 from data.aggregators.timeline_aggregator import TimelineAggregator
 from data.aggregators.hong_kong_aggregator import get_h2h_record
 from data.managers.transfermarkt_runtime_manager import TransfermarktRuntimeManager
-from utils.ai_services.evidence_router import normalize_evidence_key
+from utils.ai_services.evidence_router import normalize_evidence_key, resolve_career_surface_evidence_key
 from utils.stage_helpers import (
     render_post_match,
     render_pre_match,
@@ -17,6 +17,7 @@ from utils.stage_helpers import (
     render_career_overview,
     render_player_dashboard,
     render_career_evidence_view,
+    render_season_stage,
     _build_career_kpi_trend_view,
     get_cached_image_path,
     render_image_gallery,
@@ -47,12 +48,19 @@ def _get_active_player_identity():
     return player_id, player_name, user_role
 
 
-def _render_default_stage_content():
+def _render_default_stage_content(ai_payload=None):
     """Renders the default dashboard stage inside the persistent shell."""
     try:
         player_id, player_name, user_role = _get_active_player_identity()
         if player_id and player_name:
-            return render_player_dashboard(player_name, player_id, user_role)
+            if ai_payload is None:
+                return render_player_dashboard(player_name, player_id, user_role)
+            return render_player_dashboard(
+                player_name,
+                player_id,
+                user_role,
+                ai_payload=ai_payload,
+            )
     except Exception as exc:
         logger.warning(f"default stage render error: {exc}")
     return no_update
@@ -121,7 +129,7 @@ def _render_stage_content_for_context(context):
         )
 
     if m_type == "career":
-        return render_career_insights(payload, user_role)
+        return render_season_stage(payload)
 
     return dbc.Alert(f"Tipo de contexto desconocido: {m_type}", color="warning")
 
@@ -1559,10 +1567,17 @@ def register_player_portal_callbacks(app):
             ]
             return content, {"display": "flex"}, True
 
-        if tm_mode == "ASSISTED_ACTIVE" and state in {"ready", "no_history"}:
+        if tm_mode == "ASSISTED_ACTIVE" and state == "ready":
             content = [
                 html.I(className="bi bi-arrow-repeat me-2", style={"fontSize": "0.8rem", "opacity": "0.65"}),
-                html.Span("Your recent match details are being refreshed." if state == "no_history" else "Recent rival data is being refreshed."),
+                html.Span("Recent rival data is being refreshed."),
+            ]
+            return content, {"display": "flex"}, True
+
+        if tm_mode == "ASSISTED_ACTIVE" and state == "no_history":
+            content = [
+                html.I(className="bi bi-arrow-repeat me-2", style={"fontSize": "0.8rem", "opacity": "0.65"}),
+                html.Span("Your recent match details are being refreshed."),
             ]
             return content, {"display": "flex"}, False
 
@@ -1923,16 +1938,72 @@ def register_player_portal_callbacks(app):
     @app.callback(
         Output("stage-content", "children", allow_duplicate=True),
         Input("milestones-data-store", "data"),
+        State("career-dashboard-brief-store", "data"),
         prevent_initial_call=True,
     )
-    def render_initial_stage(milestones_data):
+    def render_initial_stage(milestones_data, career_dashboard_brief):
         """
         Shows the Career Overview as the default stage when milestones first load
         and no card has been selected yet.
         """
         if milestones_data is None:
             return no_update
-        return _render_default_stage_content()
+        return _render_default_stage_content(ai_payload=career_dashboard_brief)
+
+    @app.callback(
+        Output("career-dashboard-brief-store", "data"),
+        Input("milestones-data-store", "data"),
+        prevent_initial_call=True,
+    )
+    def build_career_dashboard_ai_brief(milestones_data):
+        """Synthesizes AI-only career dashboard overrides after the deterministic stage has already rendered."""
+        if milestones_data is None:
+            return no_update
+        try:
+            from utils.career_intelligence import (
+                DashboardInsightItem,
+                CareerDashboardBrief,
+                get_career_phase_data,
+                get_career_signals,
+                get_development_priorities,
+            )
+            from utils.domain_ai import synthesize_career_dashboard_ai_payload
+            from utils.stage_helpers import _fetch_dashboard_data
+
+            player_id, player_name, _user_role = _get_active_player_identity()
+            if not player_id or not player_name:
+                return no_update
+
+            data = _fetch_dashboard_data(player_name, player_id)
+            career_phase_data = get_career_phase_data(data, data.get("history_df"))
+            career_signals = get_career_signals(data, data.get("history_df"), career_phase_data or {})
+            development_priorities = get_development_priorities(data.get("percentiles_data") or {})
+            synthesized = synthesize_career_dashboard_ai_payload(
+                CareerDashboardBrief,
+                DashboardInsightItem,
+                data,
+                career_phase_data or {},
+                career_signals,
+                development_priorities,
+            )
+            return synthesized.get("payload") if isinstance(synthesized, dict) else no_update
+        except Exception as exc:
+            logger.debug(f"build_career_dashboard_ai_brief error: {exc}")
+            return no_update
+
+    @app.callback(
+        Output("stage-content", "children", allow_duplicate=True),
+        Input("career-dashboard-brief-store", "data"),
+        State("timeline-context-store", "data"),
+        prevent_initial_call=True,
+    )
+    def refresh_default_stage_with_ai(career_dashboard_brief, timeline_context):
+        """Updates the default career dashboard only when AI copy arrives and no other stage is active."""
+        if not career_dashboard_brief:
+            return no_update
+        if timeline_context:
+            return no_update
+        return _render_default_stage_content(ai_payload=career_dashboard_brief)
 
     # ------------------------------------------------------------------ #
     # timeline-context-store → Stage content                              #
@@ -2101,6 +2172,7 @@ def register_player_portal_callbacks(app):
         Output("timeline-pagination-store", "data", allow_duplicate=True),
         Output("card-editor-state", "data", allow_duplicate=True),
         Output("gallery-close-btn", "style", allow_duplicate=True),
+        Output("player-photos-store", "data", allow_duplicate=True),
         Input({"type": "action-node-pill", "index": ALL}, "n_clicks"),
         State("milestones-data-store", "data"),
         State("timeline-pagination-store", "data"),
@@ -2109,22 +2181,22 @@ def register_player_portal_callbacks(app):
     def handle_action_node_pill(n_clicks_list, milestones_data, pagination_store):
         """Open Card Studio on first click; show gallery if already generated."""
         if not ctx.triggered_id or not any(n_clicks_list or []):
-            return no_update, no_update, no_update, no_update
+            return no_update, no_update, no_update, no_update, no_update
         triggered = ctx.triggered_id
         if (
             not isinstance(triggered, dict)
             or triggered.get("type") != "action-node-pill"
         ):
-            return no_update, no_update, no_update, no_update
+            return no_update, no_update, no_update, no_update, no_update
 
         milestone_id = triggered["index"]
         if not milestones_data:
-            return no_update, no_update, no_update, no_update
+            return no_update, no_update, no_update, no_update, no_update
         m = next(
             (item for item in milestones_data if item.get("id") == milestone_id), None
         )
         if not m:
-            return no_update, no_update, no_update, no_update
+            return no_update, no_update, no_update, no_update, no_update
 
         store = pagination_store or {}
         generated = dict(store.get("generated", {}))
@@ -2138,11 +2210,11 @@ def register_player_portal_callbacks(app):
             return render_image_gallery(path), no_update, no_update, {
                 "display": "inline-flex",
                 "alignItems": "center",
-            }
+            }, no_update
 
         # Only handle card-type milestones
         if m_type not in ("pre-match", "post-match"):
-            return no_update, no_update, no_update, no_update
+            return no_update, no_update, no_update, no_update, no_update
 
         card_type = m_type
 
@@ -2187,33 +2259,45 @@ def register_player_portal_callbacks(app):
 
             if saved_draft:
                 editor_state = saved_draft
+                # Always clear transient generation flags so loading a draft
+                # never auto-triggers the AI agent.
                 editor_state["needs_ai"] = False
+                editor_state["needs_background_refresh"] = False
+                editor_state["generating"] = False
                 editor_state["editor_active"] = True
             else:
+                # Default photo selection (first available)
+                default_photo_idx = album[0].get("idx") if album else None
+                
                 editor_state = {
                     "milestone_id": milestone_id,
                     "card_type": card_type,
                     "template": "A",
-                    "format": "1:1",
+                    "format": "9:16", # DEFAULT FORMAT
                     "ai_proposal": {},
                     "layout_modifiers": {},
-                    "selected_photo_idx": None,
-                    "needs_ai": True,  # TRIGGER FOR ASYNC AI
+                    "selected_photo_idx": default_photo_idx, # AUTO-SELECT PHOTO
+                    "needs_ai": True,   # Active for One-Shot flow
+                    "generating": False,
+                    "progress": {"phase": "Listo para diseñar", "pct": 0},
                     "last_saved": None,
-                    "editor_active": True,  # Guard: tells render_editor_updates the studio is mounted
+                    "editor_active": True,
                 }
 
-            from callbacks.card_editor_callbacks import _build_preview_layout
-
-            # Pass empty/placeholder state initially
-            initial_preview = _build_preview_layout(editor_state, {"album": album}, milestones_data)
+            # For saved drafts show the last preview; for fresh cards the progress view renders via callback
+            initial_preview = None
+            if saved_draft:
+                from callbacks.card_editor_callbacks import _build_preview_layout
+                initial_preview = _build_preview_layout(editor_state, {"album": album}, milestones_data)
 
             if card_type == "pre-match":
-                studio = create_pre_game_card_studio(milestone_id, match_context, [], initial_preview=initial_preview, album=album)
+                studio = create_pre_game_card_studio(milestone_id, match_context, [], initial_preview=initial_preview, album=album, selected_idx=editor_state.get("selected_photo_idx"))
             else:
-                studio = create_performance_card_studio(milestone_id, match_context, [], initial_preview=initial_preview, album=album)
+                studio = create_performance_card_studio(milestone_id, match_context, [], initial_preview=initial_preview, album=album, selected_idx=editor_state.get("selected_photo_idx"))
 
-            return studio, no_update, editor_state, {"display": "none"}
+            # Populate store with THIS player's photos — prevents cross-player data bleed
+            photos_store = {"album": album, "player_id": player_id}
+            return studio, no_update, editor_state, {"display": "none"}, photos_store
         except Exception as exc:
             logger.error(f"handle_action_node_pill studio render error: {exc}")
             return (
@@ -2221,6 +2305,7 @@ def register_player_portal_callbacks(app):
                 no_update,
                 no_update,
                 {"display": "none"},
+                no_update,
             )
 
     # ------------------------------------------------------------------ #
@@ -2542,7 +2627,7 @@ def register_career_intelligence_callbacks(app):
     @app.callback(
         Output("portal-overlay-store", "data"),
         Input("insight-inbox-btn", "n_clicks"),
-        Input({"type": "career-evidence-trigger", "key": ALL, "source": ALL, "index": ALL}, "n_clicks"),
+        Input({"type": "career-evidence-trigger", "key": ALL, "source": ALL, "index": ALL, "focus_metric": ALL}, "n_clicks"),
         Input({"type": "ai-overlay-t1-btn", "action": ALL, "evidence_key": ALL}, "n_clicks"),
         Input({"type": "ai-overlay-t2-cta", "index": ALL, "evidence_key": ALL}, "n_clicks"),
         Input("career-evidence-modal-close", "n_clicks"),
@@ -2572,21 +2657,24 @@ def register_career_intelligence_callbacks(app):
         if triggered_id.get("type") == "career-evidence-trigger":
             return {
                 "type": "evidence",
-                "evidence_key": triggered_id.get("key", "career_arc"),
+                "evidence_key": resolve_career_surface_evidence_key(triggered_id.get("key", "career_arc")),
+                "focus_metric": str(triggered_id.get("focus_metric", "") or ""),
                 "source": triggered_id.get("source", "dashboard"),
                 "nonce": ctx.triggered[0]["value"],
             }
         if triggered_id.get("type") == "ai-overlay-t1-btn" and triggered_id.get("action") == "cta":
             return {
                 "type": "evidence",
-                "evidence_key": triggered_id.get("evidence_key", "career_arc"),
+                "evidence_key": resolve_career_surface_evidence_key(triggered_id.get("evidence_key", "career_arc")),
+                "focus_metric": "",
                 "source": "overlay-t1",
                 "nonce": ctx.triggered[0]["value"],
             }
         if triggered_id.get("type") == "ai-overlay-t2-cta":
             return {
                 "type": "evidence",
-                "evidence_key": triggered_id.get("evidence_key", "career_arc"),
+                "evidence_key": resolve_career_surface_evidence_key(triggered_id.get("evidence_key", "career_arc")),
+                "focus_metric": "",
                 "source": "overlay-t2",
                 "nonce": ctx.triggered[0]["value"],
             }
@@ -2620,6 +2708,7 @@ def register_career_intelligence_callbacks(app):
                 state.get("evidence_key", "career_arc"),
                 player_name,
                 player_id,
+                focus_metric=str(state.get("focus_metric", "") or ""),
             )
             return payload["title"], payload["content"], True, False
         except Exception as exc:
@@ -2683,7 +2772,11 @@ def register_career_intelligence_callbacks(app):
                     "title": t1_data.get("title", ""),
                     "body": t1_data.get("body", ""),
                     "tier": t1_data.get("tier", 1),
-                    "evidence_key": normalize_evidence_key(t1_data.get("evidence_key", "career_arc")),
+                    "evidence_key": resolve_career_surface_evidence_key(
+                        t1_data.get("evidence_key", "career_arc"),
+                        label=t1_data.get("title", ""),
+                    ),
+                    "focus_metric": "",
                     "timestamp": _dt.utcnow().isoformat(),
                 })
                 updated_state["history"] = history
@@ -2738,7 +2831,11 @@ def register_career_intelligence_callbacks(app):
                     "title": dismissed.get("title", ""),
                     "body": dismissed.get("body", ""),
                     "tier": dismissed.get("tier", 2),
-                    "evidence_key": normalize_evidence_key(dismissed.get("evidence_key", "career_arc")),
+                    "evidence_key": resolve_career_surface_evidence_key(
+                        dismissed.get("evidence_key", "career_arc"),
+                        label=dismissed.get("title", ""),
+                    ),
+                    "focus_metric": "",
                     "timestamp": _dt.utcnow().isoformat(),
                 })
                 updated_session["history"] = history
@@ -2823,7 +2920,11 @@ def register_career_intelligence_callbacks(app):
             tier = entry.get("tier", 2)
             title = entry.get("title", "—")
             body = entry.get("body", "")
-            evidence_key = normalize_evidence_key(entry.get("evidence_key", "career_arc"))
+            evidence_key = resolve_career_surface_evidence_key(
+                entry.get("evidence_key", "career_arc"),
+                label=title,
+            )
+            focus_metric = str(entry.get("focus_metric", "") or "")
             timestamp_raw = entry.get("timestamp", "")
             tier_class = "insight-inbox-item--t1" if tier == 1 else "insight-inbox-item--t2"
             tier_label = "CRITICAL" if tier == 1 else "TREND"
@@ -2866,6 +2967,7 @@ def register_career_intelligence_callbacks(app):
                         "key": evidence_key,
                         "source": "inbox",
                         "index": f"inbox:{timestamp_raw or title}",
+                        "focus_metric": focus_metric,
                     },
                     color="link",
                     className="insight-inbox-item__cta px-0 mt-2",

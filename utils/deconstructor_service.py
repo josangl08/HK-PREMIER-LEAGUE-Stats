@@ -14,6 +14,15 @@ from google import genai
 from google.genai import types
 from PIL import Image
 
+# Project
+from utils.ai_config import AI_DEFAULTS
+
+_VISION_MODELS = [
+    AI_DEFAULTS["worker"]["primary"],    # gemini-3-flash-preview
+    AI_DEFAULTS["worker"]["fallback_1"], # gemini-2.5-flash
+    AI_DEFAULTS["worker"]["fallback_2"], # gemini-2.5-flash-lite
+]
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -187,28 +196,38 @@ def deconstruct_master_image(
     client = _get_client()
     image_part = types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
 
-    try:
-        response = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=[_DECONSTRUCT_PROMPT, image_part],
-            config=types.GenerateContentConfig(response_mime_type="application/json"),
-        )
-        layout = json.loads(response.text)
-    except json.JSONDecodeError as e:
-        raise DeconstructorValidationError(f"Gemini returned non-JSON response: {e}") from e
-    except Exception as e:
-        err_str = str(e)
-        if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "spending cap" in err_str.lower():
-            logger.warning(f"Deconstructor: Gemini Vision quota exhausted — using default layout for {img_w}x{img_h}.")
-            layout = {
-                "player_bbox": {"x": 0, "y": 0, "w": 0, "h": 0, "confidence": 0.0},
-                "logo_home_bbox": {"x": 0, "y": 0, "w": 0, "h": 0},
-                "logo_away_bbox": {"x": 0, "y": 0, "w": 0, "h": 0},
-                "text_safe_area": {"x": 0, "y": 0, "w": 0, "h": 0},
-                "atmosphere_mask_regions": [],
-            }
-        else:
+    _DEFAULT_LAYOUT = {
+        "player_bbox": {"x": 0, "y": 0, "w": 0, "h": 0, "confidence": 0.0},
+        "logo_home_bbox": {"x": 0, "y": 0, "w": 0, "h": 0},
+        "logo_away_bbox": {"x": 0, "y": 0, "w": 0, "h": 0},
+        "text_safe_area": {"x": 0, "y": 0, "w": 0, "h": 0},
+        "atmosphere_mask_regions": [],
+    }
+    layout = None
+    for model_name in _VISION_MODELS:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=[_DECONSTRUCT_PROMPT, image_part],
+                config=types.GenerateContentConfig(response_mime_type="application/json"),
+            )
+            layout = json.loads(response.text)
+            break
+        except json.JSONDecodeError as e:
+            raise DeconstructorValidationError(f"Gemini returned non-JSON response: {e}") from e
+        except Exception as e:
+            err_str = str(e)
+            if "404" in err_str or "NOT_FOUND" in err_str or "503" in err_str or "UNAVAILABLE" in err_str:
+                logger.warning(f"Deconstructor: model {model_name} unavailable, trying next. ({e})")
+                continue
+            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "spending cap" in err_str.lower():
+                logger.warning(f"Deconstructor: Gemini Vision quota exhausted — using default layout.")
+                layout = _DEFAULT_LAYOUT
+                break
             raise DeconstructorValidationError(f"Gemini Vision call failed: {e}") from e
+    if layout is None:
+        logger.warning("Deconstructor: all vision models unavailable — using default layout.")
+        layout = _DEFAULT_LAYOUT
 
     if not isinstance(layout, dict):
         raise DeconstructorValidationError(f"Expected a JSON object, got {type(layout).__name__}")
