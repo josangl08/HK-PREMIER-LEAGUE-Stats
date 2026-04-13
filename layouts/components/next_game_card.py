@@ -6,6 +6,7 @@ from pathlib import Path
 
 from dash import html
 import dash_bootstrap_components as dbc
+from data.competition_registry import get_competition_display_name
 from utils.performance_helpers import get_streaming_label
 
 
@@ -121,7 +122,7 @@ def render_next_game_card(
     home_logo = milestone_payload.get("home_logo")
     away_logo = milestone_payload.get("away_logo")
     competition_raw = milestone_payload.get("competition", "")
-    competition = _normalize_comp(competition_raw)
+    competition = get_competition_display_name(competition_raw, long_form=False)
     kickoff_display = milestone_payload.get("kickoff_display", "")
     stadium = milestone_payload.get("stadium")
     streaming_url = milestone_payload.get("streaming_url")

@@ -10,12 +10,12 @@ import time
 import re
 import difflib
 import urllib.parse
+import os
 from datetime import datetime, timedelta
 import logging
 from typing import Dict, List, Optional, Tuple, Union, Sequence
 from bs4.element import PageElement
 from pathlib import Path
-import json
 from requests.cookies import create_cookie
 
 from utils.proxy_manager import ProxyManager
@@ -87,8 +87,8 @@ class TransfermarktExtractor:
         self.last_request_time = 0
         self.proxy_manager = proxy_manager or ProxyManager()
         self.cache_dir = Path(cache_dir)
-        self.historical_records_dir = Path("data/historical_records")
         self.competition_logos_dir = Path("assets/competition_logos")
+        self.team_logos_dir = Path("assets/team_logos")
         self.logger = logging.getLogger(__name__)
         self.last_http_status: Optional[int] = None
         self.last_block_type: Optional[str] = None
@@ -109,6 +109,107 @@ class TransfermarktExtractor:
             "AFC Cup", "ACL Elite", "AFC Champions League Two", "Quali",
             "Copa de la AFC", "Clasificación", "AFC Champions League", "ACL"
         }
+
+    def _is_national_team_competition(self, comp_name: str | None) -> bool:
+        text = str(comp_name or "").lower()
+        national_tokens = [
+            "asian cup",
+            "world cup",
+            "qualification",
+            "qualifier",
+            "nations cup",
+            "friendly international",
+            "u17",
+            "u20",
+            "u23",
+            "u-17",
+            "u-20",
+            "u-23",
+        ]
+        return any(token in text for token in national_tokens)
+
+    def _filter_supported_match_history_result(self, result: Dict) -> Dict:
+        filtered_matches: List[Dict] = []
+        summary = {
+            "goals": 0,
+            "assists": 0,
+            "yellow_cards": 0,
+            "red_cards": 0,
+            "minutes_played": 0,
+            "total_matches": 0,
+            "own_goals": 0,
+        }
+
+        for match in result.get("matches", []):
+            competition = match.get("competition")
+            if self._is_national_team_competition(competition):
+                continue
+
+            filtered_matches.append(match)
+            if str(match.get("status") or "") != "Jugado":
+                continue
+
+            summary["goals"] += int(match.get("goals", 0) or 0)
+            summary["assists"] += int(match.get("assists", 0) or 0)
+            summary["yellow_cards"] += int(match.get("yellow_cards", 0) or 0)
+            summary["red_cards"] += int(match.get("red_cards", 0) or 0)
+            summary["minutes_played"] += int(match.get("minutes_played", 0) or 0)
+            summary["own_goals"] += int(match.get("own_goals", 0) or 0)
+            summary["total_matches"] += 1
+
+        return {"matches": filtered_matches, "summary": summary}
+
+    def _season_date_bounds(self, season_key: str) -> tuple[datetime, datetime]:
+        start_year = int(str(season_key).split("-")[0])
+        season_start = datetime(start_year, 7, 1)
+        season_end = datetime(start_year + 1, 6, 30, 23, 59, 59)
+        return season_start, season_end
+
+    def _read_db_cached_match_history(self, tm_player_id: str, season_key: str) -> List[Dict]:
+        try:
+            from sqlalchemy import select
+
+            from models.db_models import MatchHistory, Player
+            from utils.db_engine import SessionFactory
+
+            season_start, season_end = self._season_date_bounds(season_key)
+            with SessionFactory() as session:
+                player = session.execute(
+                    select(Player).where(Player.tm_id == int(tm_player_id))
+                ).scalars().first()
+                if not player:
+                    return []
+
+                rows = session.execute(
+                    select(MatchHistory)
+                    .where(
+                        MatchHistory.player_id == player.id,
+                        MatchHistory.date >= season_start,
+                        MatchHistory.date <= season_end,
+                    )
+                    .order_by(MatchHistory.date.desc())
+                ).scalars().all()
+
+                matches: List[Dict] = []
+                for row in rows:
+                    payload = dict(row.raw_data or {})
+                    payload.setdefault("date", row.date.strftime("%d/%m/%Y"))
+                    payload.setdefault("competition", row.competition_name)
+                    payload.setdefault("competition_logo", row.competition_logo)
+                    payload.setdefault("opponent", row.opponent)
+                    payload.setdefault("result", row.result)
+                    payload.setdefault("minutes_played", row.minutes_played or 0)
+                    payload.setdefault("goals", row.goals or 0)
+                    payload.setdefault("assists", row.assists or 0)
+                    payload.setdefault("yellow_cards", row.yellow_cards or 0)
+                    payload.setdefault("red_cards", row.red_cards or 0)
+                    payload.setdefault("position", row.position)
+                    payload.setdefault("status", row.status)
+                    matches.append(payload)
+                return matches
+        except Exception as exc:
+            self.logger.debug("Failed reading DB cached match history for %s (%s): %s", tm_player_id, season_key, exc)
+            return []
     def _wait_rate_limit(self):
         self.request_count += 1
         # Every 10 requests, take a longer break to look human.
@@ -201,43 +302,31 @@ class TransfermarktExtractor:
         Usa cache persistente para evitar scraping redundante (TTL diario para temporadas activas).
         """
         season_key, tm_season_id = self._season_key(season_id)
+        force_network = os.getenv("TM_FORCE_NETWORK", "").strip().lower() in {"1", "true", "yes", "on"}
         
-        # 1. Intentar cargar desde cache local
-        records = self._read_historical_records(player_id)
         is_completed = self._is_season_completed(season_key)
-        
-        if season_key in records.get("seasons", {}):
-            last_updated_str = records.get("last_updated", "")
-            if last_updated_str:
-                try:
-                    # Soportar tanto formato ISO date como datetime
-                    last_updated = datetime.fromisoformat(last_updated_str).date()
-                    
-                    # Si la temporada ya terminó, o si se actualizó HOY, usar cache
-                    if is_completed or last_updated == datetime.now().date():
-                        self.last_result_source = "cache"
-                        self.last_cache_fresh = True
-                        self.last_http_status = 200
-                        self.last_block_type = None
-                        self.last_block_reason = None
-                        self.logger.info(f"✓ Usando cache de Transfermarkt para {player_id} ({season_key}) - Actualizado: {last_updated}")
-                        return records["seasons"][season_key].get("matches", [])
-                except Exception as e:
-                    self.logger.debug(f"Error parseando timestamp de cache: {e}")
 
-        # 2. Scraping detallado (vista ampliada plus/1) si no hay cache válido
+        if not force_network and is_completed:
+            cached_matches = self._read_db_cached_match_history(player_id, season_key)
+            if cached_matches:
+                self.last_result_source = "db_cache"
+                self.last_cache_fresh = True
+                self.last_http_status = 200
+                self.last_block_type = None
+                self.last_block_reason = None
+                self.logger.info(f"✓ Usando cache SQL de Transfermarkt para {player_id} ({season_key})")
+                return cached_matches
+        elif force_network:
+            self.logger.info("TM_FORCE_NETWORK active — bypassing cache for %s (%s).", player_id, season_key)
+
+        # 2. Scraping detallado (vista ampliada plus/1) si no hay cache SQL válido
         url = f"{self.base_url}/x/leistungsdatendetails/spieler/{player_id}/saison/{tm_season_id}/plus/1"
         soup = self._make_request(url)
         if not soup:
-            # Fallback a cache aunque sea viejo si falla la red
-            return records.get("seasons", {}).get(season_key, {}).get("matches", []) if records else []
+            return []
         
         result = self._parse_detailed_performance(soup)
-        
-        # 3. Persistir en registros históricos
-        records.setdefault("seasons", {})[season_key] = result
-        records["last_updated"] = datetime.now().isoformat()
-        self._write_historical_records(player_id, records)
+        result = self._filter_supported_match_history_result(result)
             
         return result.get("matches", [])
 
@@ -257,6 +346,149 @@ class TransfermarktExtractor:
         except Exception as e:
             self.logger.warning(f"Failed to download logo for '{comp_name}': {e}")
             return None
+
+    def _normalize_image_url(self, img_url: str) -> str:
+        if not img_url:
+            return img_url
+        if img_url.startswith("//"):
+            return f"https:{img_url}"
+        if img_url.startswith("/"):
+            return f"{self.base_url}{img_url}"
+        return img_url
+
+    def _download_team_logo(self, team_name: str, img_url: str) -> Optional[str]:
+        """Download team crest from Transfermarkt CDN. Returns local web path or None."""
+        if not team_name or not img_url:
+            return None
+        slug = re.sub(r"[^a-z0-9]", "_", team_name.lower()).strip("_")
+        self.team_logos_dir.mkdir(parents=True, exist_ok=True)
+        local_path = self.team_logos_dir / f"tm_{slug}.png"
+        if local_path.exists():
+            return f"/assets/team_logos/{local_path.name}"
+        try:
+            normalized_url = self._normalize_image_url(img_url)
+            r = requests.get(normalized_url, headers=self.headers, timeout=10)
+            r.raise_for_status()
+            local_path.write_bytes(r.content)
+            self.logger.info(f"Downloaded team logo: {team_name} → {local_path.name}")
+            return f"/assets/team_logos/{local_path.name}"
+        except Exception as e:
+            self.logger.warning(f"Failed to download team logo for '{team_name}': {e}")
+            return None
+
+    def _extract_team_logo_from_cells(self, cells: List[Tag], team_name: str, team_idx: int) -> Optional[str]:
+        """Best-effort crest extraction around the home/away team cells."""
+        candidate_indices = [team_idx, team_idx - 1, team_idx + 1]
+        for idx in candidate_indices:
+            if idx < 0 or idx >= len(cells):
+                continue
+            cell = cells[idx]
+            img = cell.find("img")
+            if not img:
+                continue
+            img_src = img.get("src") or img.get("data-src") or ""
+            if not img_src:
+                continue
+            img_class = " ".join(img.get("class") or [])
+            if "flaggenrahmen" in img_class:
+                continue
+            return self._download_team_logo(team_name, img_src)
+        return None
+
+    def _is_continental_competition(self, comp_name: str) -> bool:
+        text = str(comp_name or "").lower()
+        return any(token in text for token in ["afc", "champions league", "acl"])
+
+    def _extract_match_report_url(self, row: Tag) -> Optional[str]:
+        for link in row.find_all("a", href=True):
+            href = link.get("href") or ""
+            if any(token in href.lower() for token in ["/spielbericht/", "/spielbericht/index", "/index/spielbericht", "/bericht/index"]):
+                return self._normalize_image_url(href)
+        return None
+
+    def _normalize_team_text(self, team_name: str) -> str:
+        text = re.sub(r"\(\d+\.\)", "", str(team_name or "")).strip().lower()
+        text = re.sub(r"[^a-z0-9]+", " ", text).strip()
+        return text
+
+    def _team_logo_slug(self, team_name: str) -> str:
+        normalized = self._normalize_team_text(team_name)
+        return re.sub(r"[^a-z0-9]+", "_", normalized).strip("_")
+
+    def _download_resolved_team_logo(self, team_name: str, img_url: str) -> Optional[str]:
+        """Download a display-quality team crest using stable, canonical asset naming."""
+        if not team_name or not img_url:
+            return None
+        slug = self._team_logo_slug(team_name)
+        if not slug:
+            return None
+        self.team_logos_dir.mkdir(parents=True, exist_ok=True)
+        local_path = self.team_logos_dir / f"{slug}.png"
+        if local_path.exists():
+            return f"/assets/team_logos/{local_path.name}"
+        try:
+            normalized_url = self._normalize_image_url(img_url)
+            r = requests.get(normalized_url, headers=self.headers, timeout=12)
+            r.raise_for_status()
+            local_path.write_bytes(r.content)
+            self.logger.info(f"Downloaded resolved team logo: {team_name} → {local_path.name}")
+            return f"/assets/team_logos/{local_path.name}"
+        except Exception as e:
+            self.logger.warning(f"Failed to download resolved team logo for '{team_name}': {e}")
+            return None
+
+    def _extract_large_team_logo_from_report(self, soup: BeautifulSoup, team_name: str) -> Optional[str]:
+        target = self._normalize_team_text(team_name)
+        if not target:
+            return None
+        candidates: list[tuple[float, int, str]] = []
+        for img in soup.find_all("img"):
+            src = img.get("src") or img.get("data-src") or ""
+            if not src:
+                continue
+            img_class = " ".join(img.get("class") or [])
+            if "flaggenrahmen" in img_class:
+                continue
+            meta_parts = [
+                img.get("alt") or "",
+                img.get("title") or "",
+                img.find_parent("a").get_text(" ", strip=True) if img.find_parent("a") else "",
+                img.find_parent().get_text(" ", strip=True)[:120] if img.find_parent() else "",
+            ]
+            haystack = " ".join(meta_parts).strip().lower()
+            if not haystack:
+                continue
+            ratio = difflib.SequenceMatcher(None, target, self._normalize_team_text(haystack)).ratio()
+            if target in haystack:
+                ratio += 0.35
+            width = int(re.sub(r"[^\d]", "", str(img.get("width") or "")) or 0)
+            height = int(re.sub(r"[^\d]", "", str(img.get("height") or "")) or 0)
+            area = width * height
+            if ratio >= 0.45:
+                candidates.append((ratio, area, src))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return candidates[0][2]
+
+    def resolve_match_report_logos(
+        self,
+        match_report_url: str,
+        home_team: str,
+        away_team: str,
+    ) -> Dict[str, Optional[str]]:
+        """Resolve larger crests from the Transfermarkt match report page."""
+        if not match_report_url:
+            return {"home_logo": None, "away_logo": None}
+        soup = self._make_request(match_report_url)
+        if not soup:
+            return {"home_logo": None, "away_logo": None}
+        home_src = self._extract_large_team_logo_from_report(soup, home_team)
+        away_src = self._extract_large_team_logo_from_report(soup, away_team)
+        return {
+            "home_logo": self._download_resolved_team_logo(home_team, home_src) if home_src else None,
+            "away_logo": self._download_resolved_team_logo(away_team, away_src) if away_src else None,
+        }
 
     def _parse_detailed_performance(self, soup: BeautifulSoup) -> Dict:
         matches = []
@@ -317,10 +549,18 @@ class TransfermarktExtractor:
                     home = cells[3].get_text(strip=True)
                     away = cells[5].get_text(strip=True)
                     res = cells[6].get_text(strip=True)
-
+                    is_continental = self._is_continental_competition(comp_name)
+                    match_report_url = self._extract_match_report_url(row)
                     match_entry = {
                         "date": date_txt,
                         "opponent": f"{home} vs {away}",
+                        "home_team": home,
+                        "away_team": away,
+                        "home_logo": None,
+                        "away_logo": None,
+                        "match_report_url": match_report_url,
+                        "logo_resolution_source": "transfermarkt_match_report" if is_continental else None,
+                        "logo_resolution_status": "pending" if is_continental else None,
                         "competition": comp_name,
                         "competition_logo": comp_logo_url,
                         "result": res,
@@ -380,16 +620,6 @@ class TransfermarktExtractor:
             start_year = int(season_id.split('-')[0])
             return datetime.now() > datetime(start_year + 1, 7, 31)
         except: return False
-
-    def _read_historical_records(self, player_id: str) -> dict:
-        record_file = self.historical_records_dir / f"{player_id}.json"
-        if not record_file.exists(): return {}
-        with open(record_file, "r", encoding="utf-8") as f: return json.load(f)
-
-    def _write_historical_records(self, player_id: str, data: dict) -> None:
-        self.historical_records_dir.mkdir(parents=True, exist_ok=True)
-        with open(self.historical_records_dir / f"{player_id}.json", "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
 
     def _season_key(self, season_id: str) -> tuple:
         if '-' in season_id: return season_id, str(season_id.split('-')[0])

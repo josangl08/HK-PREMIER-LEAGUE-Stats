@@ -9,7 +9,7 @@ import logging
 import re
 from dataclasses import asdict, is_dataclass
 from difflib import SequenceMatcher
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
@@ -22,11 +22,12 @@ from utils.ai_services.orchestration import parse_structured_json, validate_payl
 from utils.ai_services.prompt_builders import (
     build_career_dashboard_synthesis_prompt,
 )
-from utils.ai_services.evidence_router import normalize_evidence_key
+from utils.ai_services.evidence_router import normalize_evidence_key, resolve_career_surface_evidence_key
 from utils.ai_services.validators import (
     InsightPayload,
     build_fallback_insight_payload,
     coerce_insight_payload,
+    normalize_career_decision_phase,
 )
 from utils.domain_ai.career_facts import build_career_intelligence_facts
 
@@ -90,6 +91,156 @@ _GENERIC_UNLOCKS = {
 }
 
 
+def _safe_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _normalize_dashboard_item_payload(raw_item: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(raw_item, dict):
+        return None
+
+    metadata = raw_item.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    title = _safe_text(raw_item.get("title") or raw_item.get("label") or raw_item.get("headline"))
+    body = _safe_text(
+        raw_item.get("body")
+        or raw_item.get("summary")
+        or raw_item.get("plain_fact")
+        or raw_item.get("what_this_means_now")
+    )
+    support = _safe_text(
+        raw_item.get("support")
+        or raw_item.get("why_it_matters")
+        or raw_item.get("why_now")
+        or raw_item.get("what_changes")
+        or raw_item.get("what_changes_status")
+        or raw_item.get("explanation")
+    )
+    if not title and not body and not support:
+        return None
+
+    return {
+        "title": title or "Insight",
+        "body": body,
+        "support": support,
+        "evidence_key": normalize_evidence_key(
+            raw_item.get("evidence_key")
+            or metadata.get("evidence_key")
+            or raw_item.get("metric_key")
+            or "career_arc"
+        ),
+        "focus_metric": _safe_text(
+            raw_item.get("focus_metric")
+            or raw_item.get("metric")
+            or metadata.get("focus_metric")
+        ),
+        "llm_generated": bool(
+            raw_item.get("llm_generated")
+            if raw_item.get("llm_generated") is not None
+            else metadata.get("llm_generated", False)
+        ),
+        "source_model": _safe_text(raw_item.get("source_model") or metadata.get("source_model")),
+        "emphasis": _safe_text(raw_item.get("emphasis") or metadata.get("emphasis") or "neutral") or "neutral",
+        "badge_value": _safe_text(raw_item.get("badge_value") or metadata.get("badge_value")),
+        "badge_label": _safe_text(raw_item.get("badge_label") or metadata.get("badge_label")),
+        "secondary_value": _safe_text(raw_item.get("secondary_value") or metadata.get("secondary_value")),
+        "secondary_label": _safe_text(raw_item.get("secondary_label") or metadata.get("secondary_label")),
+    }
+
+
+def normalize_career_dashboard_brief_payload(raw_payload: Any) -> Dict[str, Any]:
+    """Normalizes cached or persisted dashboard payloads across contract revisions."""
+    if isinstance(raw_payload, dict) and isinstance(raw_payload.get("payload"), dict):
+        payload = dict(raw_payload.get("payload") or {})
+        payload.setdefault("model", _safe_text(raw_payload.get("model")))
+    elif isinstance(raw_payload, dict):
+        payload = dict(raw_payload)
+    else:
+        return {}
+
+    career_thesis = payload.get("career_thesis")
+    if not isinstance(career_thesis, dict):
+        career_thesis = payload.get("thesis") if isinstance(payload.get("thesis"), dict) else {}
+    normalized_thesis = {
+        "label": _safe_text(career_thesis.get("label") or career_thesis.get("title") or "Career Progression"),
+        "body": _safe_text(career_thesis.get("body") or career_thesis.get("summary")),
+        "support": _safe_text(career_thesis.get("support") or career_thesis.get("why_it_matters")),
+        "explanation": _safe_text(career_thesis.get("explanation") or career_thesis.get("what_this_means_now")),
+        "drivers": _normalize_fact_items(career_thesis.get("drivers"), fallback=[], max_items=3),
+        "risks": _normalize_fact_items(career_thesis.get("risks"), fallback=[], max_items=2),
+        "llm_generated": bool(career_thesis.get("llm_generated", False)),
+        "llm_model": _safe_text(career_thesis.get("llm_model") or payload.get("model")),
+    }
+
+    raw_outlook = payload.get("outlook")
+    if not isinstance(raw_outlook, dict):
+        raw_outlook = payload.get("recommendation") if isinstance(payload.get("recommendation"), dict) else {}
+    fallback_outlook = {
+        "label": normalize_career_decision_phase(
+            raw_outlook.get("label")
+            or raw_outlook.get("phase")
+            or raw_outlook.get("recommended_phase")
+            or raw_outlook.get("recommendation")
+            or payload.get("recommended_phase")
+            or payload.get("career_decision_phase")
+            or payload.get("phase")
+            or "Keep Pushing"
+        ),
+        "body": _safe_text(
+            raw_outlook.get("body")
+            or raw_outlook.get("headline")
+            or raw_outlook.get("plain_fact")
+            or raw_outlook.get("what_this_means_now")
+        ),
+        "support": _safe_text(
+            raw_outlook.get("support")
+            or raw_outlook.get("why_now")
+            or raw_outlook.get("what_changes")
+            or raw_outlook.get("what_changes_status")
+        ),
+        "evidence_key": resolve_career_surface_evidence_key(
+            raw_outlook.get("evidence_key") or payload.get("evidence_key") or "career_phase_resolution",
+            label=normalize_career_decision_phase(
+                raw_outlook.get("label")
+                or raw_outlook.get("phase")
+                or raw_outlook.get("recommended_phase")
+                or raw_outlook.get("recommendation")
+                or payload.get("recommended_phase")
+                or payload.get("career_decision_phase")
+                or payload.get("phase")
+                or "Keep Pushing"
+            ),
+        ),
+    }
+    normalized_outlook = _normalize_outlook_payload(
+        raw_outlook if isinstance(raw_outlook, dict) else {},
+        fallback_outlook,
+        llm_generated=bool(raw_outlook.get("llm_generated", False)),
+        llm_model=_safe_text(raw_outlook.get("llm_model") or payload.get("model")),
+    )
+
+    signals: List[Dict[str, Any]] = []
+    for item in payload.get("signals") or payload.get("recommendations") or []:
+        normalized = _normalize_dashboard_item_payload(item)
+        if normalized:
+            signals.append(normalized)
+
+    levers: List[Dict[str, Any]] = []
+    for item in payload.get("levers") or payload.get("priorities") or []:
+        normalized = _normalize_dashboard_item_payload(item)
+        if normalized:
+            levers.append(normalized)
+
+    return {
+        "career_thesis": normalized_thesis,
+        "signals": signals,
+        "levers": levers,
+        "outlook": normalized_outlook,
+    }
+
+
 def _safe_int(value: Any) -> int:
     try:
         return int(round(float(value)))
@@ -115,6 +266,25 @@ def _format_ordinal(value: Any) -> str:
     else:
         suffix = {1: "st", 2: "nd", 3: "rd"}.get(number % 10, "th")
     return f"{number}{suffix}"
+
+
+def _normalize_legacy_outlook_label(value: Any) -> str:
+    return normalize_career_decision_phase(value)
+
+
+def _normalize_outlook_payload(outlook: Dict[str, Any], fallback_outlook: Dict[str, Any], *, llm_generated: bool, llm_model: str) -> Dict[str, Any]:
+    label = _normalize_legacy_outlook_label(outlook.get("label") or fallback_outlook["label"])
+    return {
+        "label": label,
+        "body": str(outlook.get("body") or fallback_outlook["body"]),
+        "support": str(outlook.get("support") or fallback_outlook["support"]),
+        "evidence_key": resolve_career_surface_evidence_key(
+            outlook.get("evidence_key") or fallback_outlook["evidence_key"],
+            label=label,
+        ),
+        "llm_generated": llm_generated,
+        "llm_model": llm_model,
+    }
 
 
 def _normalize_rewrite_text(value: Any) -> str:
@@ -1021,6 +1191,8 @@ def _serialize_brief_for_cache(brief: Any) -> Dict[str, Any]:
 
 def _deserialize_brief_from_cache(brief_cls: Any, item_cls: Any, payload: Dict[str, Any]) -> Any:
     """Rebuilds a brief object from cached raw data."""
+    payload = normalize_career_dashboard_brief_payload(payload)
+
     def _build_item(raw_item: Dict[str, Any]) -> Any:
         return item_cls(
             title=str(raw_item.get("title") or ""),
@@ -1104,7 +1276,15 @@ def _get_cached_career_dashboard_ai_payload(cache_key: str) -> Dict[str, Any]:
         from utils.cache import cache
 
         cached_payload = cache.get(_build_career_dashboard_ai_payload_cache_key(cache_key))
-        return cached_payload if isinstance(cached_payload, dict) else {}
+        if not isinstance(cached_payload, dict):
+            return {}
+        normalized_payload = normalize_career_dashboard_brief_payload(cached_payload)
+        if normalized_payload:
+            return {
+                "payload": normalized_payload,
+                "model": _safe_text(cached_payload.get("model")),
+            }
+        return {}
     except Exception:
         return {}
 def _set_cached_career_dashboard_ai_payload(cache_key: str, payload: Dict[str, Any]) -> None:
@@ -1510,22 +1690,22 @@ def build_fallback_career_dashboard_brief(
     outlook_facts = career_facts.get("outlook_facts") or []
     if outlook_facts:
         primary_outlook = outlook_facts[0]
-        outlook_label = str(primary_outlook.get("mode") or "Build")
-        outlook_body = str(primary_outlook.get("plain_fact") or "The next 1–2 seasons should focus on strengthening identity and separation.")
+        outlook_label = _normalize_legacy_outlook_label(primary_outlook.get("mode") or "Keep Pushing")
+        outlook_body = str(primary_outlook.get("plain_fact") or "The next phase needs a clearer football case before you force something bigger.")
         outlook_support = str(primary_outlook.get("why_now") or "")
-        outlook_evidence_key = str(primary_outlook.get("evidence_key") or "career_arc")
+        outlook_evidence_key = str(primary_outlook.get("evidence_key") or "career_phase_resolution")
     elif transfer_quality == "ÓPTIMA":
-        outlook_label = "Push"
-        outlook_body = "Your current trajectory supports a more aggressive next-step strategy."
+        outlook_label = "Ambitious"
+        outlook_body = "Your current level gives you a case to aim higher, not just hold ground."
         outlook_support = f"Phase {phase.upper()} at age {age or '—'} with momentum {momentum}/5 and transfer window {transfer_quality}."
-        outlook_evidence_key = "projection_outlook"
+        outlook_evidence_key = "top_tier_gap"
     elif direction == "up" and consistency_level == "ALTA":
-        outlook_label = "Consolidate"
-        outlook_body = "You are in a strong value-building phase and should reinforce repeatability."
+        outlook_label = "Maintain Consistency"
+        outlook_body = "The level is strong enough to respect, so the next job is proving it holds."
         outlook_support = f"Phase {phase.upper()} at age {age or '—'} with momentum {momentum}/5 and transfer window {transfer_quality}."
-        outlook_evidence_key = "career_phase_resolution"
+        outlook_evidence_key = "consistency_profile"
     elif direction == "down":
-        outlook_label = "Reposition"
+        outlook_label = "Find Consistency"
         if phase == "post-peak":
             outlook_body = "Focus on getting your level and minutes steady again before thinking about something bigger."
         else:
@@ -1533,12 +1713,12 @@ def build_fallback_career_dashboard_brief(
         outlook_support = (
             f"Your role trend has softened, so the priority is to steady your level first. If the next run is strong again, you can think bigger after that."
         )
-        outlook_evidence_key = "career_phase_resolution"
+        outlook_evidence_key = "team_context"
     else:
-        outlook_label = "Build"
-        outlook_body = "The next 1–2 seasons should focus on strengthening identity and separation."
+        outlook_label = "Keep Pushing"
+        outlook_body = "The signs are moving, but you still need more weight before the next step becomes obvious."
         outlook_support = f"Phase {phase.upper()} at age {age or '—'} with momentum {momentum}/5 and transfer window {transfer_quality}."
-        outlook_evidence_key = "career_phase_resolution"
+        outlook_evidence_key = "league_positional_standing"
 
     fallback_outlook = {
         "label": outlook_label,
@@ -1559,7 +1739,7 @@ def build_fallback_career_dashboard_brief(
         },
         signals=[_to_dashboard_item(item_cls, payload) for payload in signal_payloads[:3]],
         levers=[_to_dashboard_item(item_cls, payload) for payload in lever_payloads[:3]],
-        outlook={**fallback_outlook, "llm_generated": False},
+        outlook=_normalize_outlook_payload(fallback_outlook, fallback_outlook, llm_generated=False, llm_model=""),
     )
 
 
@@ -1609,7 +1789,7 @@ def synthesize_career_dashboard_ai_payload(
         )
         return {}
     payload = {
-        "payload": ai_payload,
+        "payload": normalize_career_dashboard_brief_payload(ai_payload),
         "model": resolved_model,
     }
     logger.info(
@@ -1628,8 +1808,10 @@ def build_career_dashboard_brief(
     career_signals: Dict[str, Any],
     development_priorities: List[Dict[str, Any]],
     ai_payload: Any = None,
+    synthesize_with_ai: bool = True,
 ) -> Any:
     """Builds the career dashboard brief from deterministic fallback plus validated structured AI overrides."""
+    normalized_ai_payload = normalize_career_dashboard_brief_payload(ai_payload)
     cache_key = _build_career_dashboard_cache_key(
         data,
         career_phase_data,
@@ -1637,8 +1819,8 @@ def build_career_dashboard_brief(
         development_priorities,
     )
     has_structured_ai_payload = (
-        isinstance(ai_payload, dict)
-        and any(key in ai_payload for key in ("career_thesis", "signals", "levers", "outlook"))
+        bool(normalized_ai_payload)
+        and any(key in normalized_ai_payload for key in ("career_thesis", "signals", "levers", "outlook"))
     )
     if not has_structured_ai_payload:
         cached_brief = _get_cached_career_dashboard_brief(brief_cls, item_cls, cache_key)
@@ -1653,7 +1835,7 @@ def build_career_dashboard_brief(
         career_signals,
         development_priorities,
     )
-    if not has_structured_ai_payload:
+    if not has_structured_ai_payload and synthesize_with_ai:
         ai_payload, resolved_model = _synthesize_career_dashboard_payload(
             fallback,
             data,
@@ -1661,8 +1843,17 @@ def build_career_dashboard_brief(
             career_signals,
             development_priorities,
         )
-    else:
+    elif has_structured_ai_payload:
+        ai_payload = normalized_ai_payload
         resolved_model = "structured_ai_payload"
+    else:
+        resolved_model = ""
+        _set_cached_career_dashboard_brief(
+            cache_key,
+            fallback,
+            synthesized_by_llm=False,
+        )
+        return fallback
     if not isinstance(ai_payload, dict):
         _set_cached_career_dashboard_brief(
             cache_key,
@@ -1720,16 +1911,9 @@ def build_career_dashboard_brief(
                 )
             ],
             outlook=(
-                {
-                    "label": str(outlook.get("label") or fallback.outlook["label"]),
-                    "body": str(outlook.get("body") or fallback.outlook["body"]),
-                    "support": str(outlook.get("support") or fallback.outlook["support"]),
-                    "evidence_key": normalize_evidence_key(outlook.get("evidence_key") or fallback.outlook["evidence_key"]),
-                    "llm_generated": True,
-                    "llm_model": resolved_model,
-                }
+                _normalize_outlook_payload(outlook, fallback.outlook, llm_generated=True, llm_model=resolved_model)
                 if _outlook_passes_quality_gate(outlook, fallback.outlook)
-                else {**fallback.outlook, "llm_generated": False, "llm_model": ""}
+                else _normalize_outlook_payload(fallback.outlook, fallback.outlook, llm_generated=False, llm_model="")
             ),
         )
         _set_cached_career_dashboard_brief(

@@ -10,7 +10,7 @@ from layouts.register import create_register_form
 from layouts.not_found import layout as not_found_layout
 from layouts.performance import create_performance_layout
 from layouts.injuries import create_injuries_layout
-from components.navbar import create_navbar
+from layouts.components.shared.navbar import create_navbar
 try:
     from layouts.ai_insights import create_ai_insights_layout
     _AI_INSIGHTS_AVAILABLE = True

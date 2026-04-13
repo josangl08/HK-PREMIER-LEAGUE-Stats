@@ -7,6 +7,7 @@ import logging
 import time
 import argparse
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 from sqlalchemy import select, and_, or_
 
 # Add root to path
@@ -113,6 +114,20 @@ class MatchWatcher:
             session.flush()
         return state
 
+    def _resolve_active_season_id(self, session, reference_dt: Optional[datetime] = None) -> Optional[str]:
+        reference_dt = self._to_naive_utc(reference_dt) if reference_dt else self._utcnow()
+        upcoming = session.execute(
+            select(Fixture.season_id)
+            .where(Fixture.date_utc >= reference_dt)
+            .order_by(Fixture.date_utc.asc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if upcoming:
+            return upcoming
+        return session.execute(
+            select(Fixture.season_id).order_by(Fixture.date_utc.desc()).limit(1)
+        ).scalar_one_or_none()
+
     def _mark_refresh_state(
         self,
         session,
@@ -153,7 +168,7 @@ class MatchWatcher:
             ).scalars().all()
             priority_team_ids = {fix.home_team_id for fix in upcoming_fixtures} | {fix.away_team_id for fix in upcoming_fixtures}
 
-            current_season = session.execute(select(Fixture.season_id).order_by(Fixture.date_utc.desc()).limit(1)).scalar_one_or_none()
+            current_season = self._resolve_active_season_id(session, now)
 
             # All HK players with a Transfermarkt ID — not filtered by fixture teams
             # because some HK clubs may be absent from the fixtures table.
@@ -199,6 +214,7 @@ class MatchWatcher:
                 select(Fixture).where(and_(Fixture.date_utc >= now, Fixture.date_utc <= horizon))
             ).scalars().all()
             team_ids = {fix.home_team_id for fix in fixtures} | {fix.away_team_id for fix in fixtures}
+            active_season = self._resolve_active_season_id(session, now)
             if not team_ids:
                 return 0
 
@@ -224,6 +240,7 @@ class MatchWatcher:
                     priority=90,
                     source="hkfa_upcoming",
                     reason=f"Upcoming fixture window {days_ahead}d",
+                    season_id=active_season,
                 ):
                     added += 1
             session.commit()
@@ -236,6 +253,7 @@ class MatchWatcher:
         session = SessionFactory()
         try:
             now = self._utcnow()
+            active_season = self._resolve_active_season_id(session, now)
             players_stmt = (
                 select(Player)
                 .outerjoin(UserPlayerLink)
@@ -263,6 +281,7 @@ class MatchWatcher:
                     priority=120,
                     source="weekly_refresh",
                     reason="User/agent priority player refresh",
+                    season_id=active_season,
                 ):
                     added += 1
             session.commit()

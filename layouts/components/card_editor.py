@@ -23,37 +23,39 @@ _TEXT_LIGHT = "rgba(255,255,255,0.85)"
 _PANEL_STYLE = {
     "background": _BG_SECONDARY,
     "border": f"1px solid {_GLASS_BORDER}",
-    "borderRadius": "14px",
-    "padding": "18px 16px",
+    "borderRadius": "12px",
+    "padding": "12px 14px",
     "height": "100%",
+    "display": "flex",
+    "flexDirection": "column",
 }
 
 _SECTION_LABEL_STYLE = {
     "color": _ACCENT_CYAN,
-    "fontSize": "0.72rem",
+    "fontSize": "0.65rem",
     "fontWeight": "700",
-    "letterSpacing": "0.12em",
+    "letterSpacing": "0.1em",
     "textTransform": "uppercase",
-    "marginBottom": "10px",
+    "marginBottom": "6px",
     "marginTop": "0",
 }
 
 _DIVIDER_STYLE = {
     "border": "none",
     "borderTop": f"1px solid {_GLASS_BORDER}",
-    "margin": "14px 0",
+    "margin": "10px 0",
 }
 
 _UPLOAD_STYLE = {
     "border": f"1.5px dashed {_ACCENT_CYAN_BORDER}",
     "borderRadius": "8px",
-    "padding": "12px",
+    "padding": "8px",
     "textAlign": "center",
     "cursor": "pointer",
     "color": _TEXT_MUTED,
-    "fontSize": "0.8rem",
+    "fontSize": "0.75rem",
     "background": _GLASS_BG,
-    "marginTop": "8px",
+    "marginTop": "4px",
 }
 
 _GENERATE_BTN_STYLE = {
@@ -62,6 +64,7 @@ _GENERATE_BTN_STYLE = {
     "color": "white",
     "borderRadius": "6px",
     "fontWeight": "700",
+    "fontSize": "0.75rem",
 }
 
 _SECONDARY_BTN_STYLE = {
@@ -69,6 +72,7 @@ _SECONDARY_BTN_STYLE = {
     "border": f"1px solid {_GLASS_BORDER}",
     "color": "rgba(255,255,255,0.7)",
     "borderRadius": "6px",
+    "fontSize": "0.75rem",
 }
 
 _TAB_STYLE = {
@@ -76,8 +80,8 @@ _TAB_STYLE = {
     "border": f"1px solid {_GLASS_BORDER}",
     "color": "rgba(255,255,255,0.6)",
     "borderRadius": "6px 6px 0 0",
-    "fontSize": "0.75rem",
-    "padding": "4px 12px",
+    "fontSize": "0.7rem",
+    "padding": "3px 10px",
 }
 
 _TAB_ACTIVE_STYLE = {
@@ -86,17 +90,9 @@ _TAB_ACTIVE_STYLE = {
     "borderBottom": "none",
     "color": _ACCENT_CYAN,
     "borderRadius": "6px 6px 0 0",
-    "fontSize": "0.75rem",
+    "fontSize": "0.7rem",
     "fontWeight": "700",
-    "padding": "4px 12px",
-}
-
-_SELECT_STYLE = {
-    "background": "rgba(255,255,255,0.06)",
-    "border": f"1px solid {_GLASS_BORDER}",
-    "color": "rgba(255,255,255,0.85)",
-    "borderRadius": "8px",
-    "fontSize": "0.82rem",
+    "padding": "3px 10px",
 }
 
 
@@ -116,79 +112,110 @@ def _save_toast():
     )
 
 
-def _progress_indicator(id_name="card-generation-status"):
-    """Labelled multi-phase progress bar for V3 generation pipeline."""
-    return html.Div([
-        html.Div(id=f"{id_name}-label", className="small text-info mb-1 font-monospace", style={"fontSize": "0.6rem", "textTransform": "uppercase"}),
-        dbc.Progress(
-            id=id_name,
-            value=0,
-            striped=True,
-            animated=True,
-            color="info",
-            style={"height": "4px", "background": "rgba(255,255,255,0.05)", "width": "200px"}
-        )
-    ], className="ms-auto d-flex flex-column align-items-end")
-
-
 # ---------------------------------------------------------------------------
 # Pre-Game Card Studio
 # ---------------------------------------------------------------------------
 
-def create_pre_game_card_studio(milestone_id, match_context, proposals, initial_preview=None, album=None, selected_idx=None):
+def create_pre_game_card_studio(milestone_id, match_context, album=None, selected_idx=None, initial_preview=None):
     """Renders the simplified Pre-Game Card Studio (Imagen 3 full-card generation)."""
-    return _create_card_studio_layout(milestone_id, match_context, album, studio_type="pre-match", selected_idx=selected_idx)
+    return _create_card_studio_layout(milestone_id, match_context, album, studio_type="pre-match", selected_idx=selected_idx, initial_preview=initial_preview)
 
 
-def _create_card_studio_layout(milestone_id, match_context, album, studio_type="pre-match", selected_idx=None):
-    """Shared layout for both pre-match and post-match card studios."""
+def create_performance_card_studio(milestone_id, match_context, album=None, selected_idx=None, initial_preview=None):
+    """Renders the simplified Performance Card Studio (Imagen 3 full-card generation)."""
+    return _create_card_studio_layout(milestone_id, match_context, album, studio_type="post-match", selected_idx=selected_idx, initial_preview=initial_preview)
+
+
+def _create_card_studio_layout(milestone_id, match_context, album, studio_type="pre-match", selected_idx=None, initial_preview=None):
+    """Internal factory for the Studio UI."""
     home = match_context.get("home_team") or "—"
     away = match_context.get("away_team") or "—"
     competition = match_context.get("competition") or ""
     date_str = match_context.get("date") or ""
 
-    return html.Div([
-        _save_toast(),
-        dcc.Download(id="card-download"),
+    # Initial loading content if no preview provided
+    if not initial_preview:
+        initial_preview = html.Div([
+            html.I(className="bi bi-stars animate-glass-pulse",
+                   style={"fontSize": "2.2rem", "color": _ACCENT_CYAN, "marginBottom": "12px", "opacity": "0.8"}),
+            html.H5("AI Design Studio", className="text-white fw-bold mb-1"),
+            html.P("Preparando lienzo...", className="text-white-50 small mb-0"),
+        ], className="d-flex flex-column align-items-center justify-content-center h-100",
+           style={"position": "absolute", "inset": "0", "background": "#0a1a2f"})
 
+    return html.Div([
         dbc.Row([
-            # ---- Left: Card Preview (8 cols) ----
+            # ---- Left: High-Fidelity Preview (8 cols) ----
             dbc.Col([
-                # Header
                 html.Div([
                     html.Div([
                         html.I(className="bi bi-stars me-2", style={"color": _ACCENT_CYAN}),
-                        html.Span("AI Card Studio", style={"color": "white", "fontWeight": "700", "fontSize": "0.9rem"}),
+                        html.Span("AI Card Studio", style={"color": "white", "fontWeight": "700", "fontSize": "0.85rem"}),
                     ]),
                     html.Div([
-                        html.Span(f"{home} vs {away}", style={"color": _ACCENT_CYAN, "fontSize": "0.75rem", "fontWeight": "600"}),
-                        html.Span(f"  ·  {competition}", style={"color": "rgba(255,255,255,0.4)", "fontSize": "0.7rem"}) if competition else None,
-                        html.Span(f"  ·  {date_str}", style={"color": "rgba(255,255,255,0.4)", "fontSize": "0.7rem"}) if date_str else None,
-                    ]),
-                ], className="mb-3 d-flex align-items-center justify-content-between"),
+                        html.Span(f"{home} vs {away}", style={"color": _ACCENT_CYAN, "fontSize": "0.7rem", "fontWeight": "600"}),
+                        html.Span(f"  ·  {competition}", style={"color": "rgba(255,255,255,0.4)", "fontSize": "0.65rem"}) if competition else None,
+                    ], className="d-none d-sm-block"),
+                ], className="mb-2 d-flex align-items-center justify-content-between"),
 
-                # Preview container — populated by render_editor_updates callback
+                # ---- Preview Visor (Responsive height) ----
                 html.Div(
-                    html.Div([
-                        html.I(className="bi bi-stars",
-                               style={"fontSize": "2.5rem", "color": _ACCENT_CYAN, "marginBottom": "12px"}),
-                        html.P("Select format and photos, then press Design", className="text-white-50 small mb-1"),
-                        html.P("AI will generate a unique matchday card", style={"fontSize": "0.7rem", "color": "rgba(255,255,255,0.25)"}),
-                    ], className="d-flex flex-column align-items-center justify-content-center h-100",
-                       style={"position": "absolute", "inset": "0"}),
-                    id={"type": "studio-element", "index": "preview-container"},
+                    [
+                        # Centering wrapper
+                        html.Div(
+                            [
+                                # Main ID'd container — height/width/aspect managed by callback
+                                html.Div(
+                                    initial_preview,
+                                    id={"type": "studio-element", "index": "preview-container"},
+                                    style={
+                                        "borderRadius": "20px",
+                                        "border": f"1px solid {_GLASS_BORDER}",
+                                        "position": "relative",
+                                        "overflow": "hidden",
+                                        "boxShadow": "0 20px 40px rgba(0,0,0,0.5)",
+                                        "background": "#05050a",
+                                        "height": "100%",
+                                        "width": "auto",
+                                        "aspectRatio": "9/16",
+                                        "maxHeight": "100%",
+                                    },
+                                ),
+                            ],
+                            className="d-flex justify-content-center align-items-center h-100",
+                        ),
+                        
+                        # Expand action
+                        dbc.Button(
+                            [html.I(className="bi bi-arrows-angle-expand me-1"), "Expandir"],
+                            id="card-expand-preview-btn",
+                            size="sm",
+                            className="position-absolute",
+                            style={
+                                "bottom": "15px", "right": "15px", "zIndex": "100",
+                                "background": "rgba(0,0,0,0.6)", "backdropFilter": "blur(8px)",
+                                "border": "1px solid rgba(255,255,255,0.15)",
+                                "borderRadius": "20px", "padding": "4px 12px",
+                                "color": "white", "fontWeight": "600", "fontSize": "0.65rem"
+                            }
+                        )
+                    ],
                     style={
-                        "background": "#05050a",
-                        "borderRadius": "16px",
-                        "border": f"1px solid {_GLASS_BORDER}",
-                        "width": "100%",
-                        "paddingTop": "177.77%", # Default 9:16
+                        "background": "rgba(0,0,0,0.2)",
+                        "borderRadius": "24px",
+                        "flex": "1",
+                        "minHeight": "0",
+                        # Concrete height so height:100% resolves for the portrait card child
+                        "height": "calc(var(--portal-desktop-height) - 80px)",
                         "position": "relative",
+                        "display": "flex",
+                        "alignItems": "center",
+                        "justifyContent": "center",
                         "overflow": "hidden",
-                        "boxShadow": "0 25px 50px rgba(0,0,0,0.6)",
+                        "padding": "12px"
                     },
                 ),
-            ], width=8),
+            ], width=8, className="d-flex flex-column", style={"minHeight": "0"}),
 
             # ---- Right: Simple Controls (4 cols) ----
             dbc.Col([
@@ -196,20 +223,20 @@ def _create_card_studio_layout(milestone_id, match_context, album, studio_type="
                     # Action buttons
                     html.Div([
                         dbc.Button(
-                            [html.I(className="bi bi-stars me-1"), "Design"],
+                            [html.I(className="bi bi-stars me-2"), "Design"],
                             id="card-repropose-btn",
-                            style={**_GENERATE_BTN_STYLE, "fontSize": "0.7rem", "width": "100%"},
+                            style={**_GENERATE_BTN_STYLE, "width": "100%", "padding": "8px"},
                             n_clicks=0,
                             className="mb-2",
                         ),
                         dbc.Button(
-                            [html.I(className="bi bi-download me-1"), "Download Card"],
+                            [html.I(className="bi bi-download me-2"), "Download Card"],
                             id="card-generate-btn",
                             color="success",
-                            style={**_SECONDARY_BTN_STYLE, "fontSize": "0.7rem", "width": "100%"},
+                            style={**_SECONDARY_BTN_STYLE, "width": "100%", "padding": "8px"},
                             n_clicks=0,
                         ),
-                    ], className="mb-3"),
+                    ], className="mb-2"),
 
                     html.Hr(style=_DIVIDER_STYLE),
 
@@ -219,27 +246,17 @@ def _create_card_studio_layout(milestone_id, match_context, album, studio_type="
                         [
                             dbc.Tab(label="9:16", tab_id="9:16", label_style=_TAB_STYLE, active_label_style=_TAB_ACTIVE_STYLE),
                             dbc.Tab(label="1:1", tab_id="1:1", label_style=_TAB_STYLE, active_label_style=_TAB_ACTIVE_STYLE),
-                            dbc.Tab(label="16:9", tab_id="16:9", label_style=_TAB_STYLE, active_label_style=_TAB_ACTIVE_STYLE),
+                            dbc.Tab(label="4:5", tab_id="4:5", label_style=_TAB_STYLE, active_label_style=_TAB_ACTIVE_STYLE),
                         ],
                         id="card-format-tabs",
                         active_tab="9:16",
-                        className="justify-content-start mb-3",
+                        className="justify-content-start mb-2",
                     ),
 
-                    html.Hr(style=_DIVIDER_STYLE),
-
-                    # My Photos
-                    html.P("MY PHOTOS", style=_SECTION_LABEL_STYLE),
-                    html.P(
-                        "Upload a photo to include yourself in the design. "
-                        "Best results: plain background, full body.",
-                        style={"fontSize": "0.68rem", "color": "rgba(255,255,255,0.4)", "marginBottom": "8px"},
-                    ),
-                    html.Div(
-                        _build_album_grid_static(album, selected_idx=selected_idx) if album else html.P("No photos yet", className="text-muted small"),
-                        id="card-photo-album",
-                        style={"maxHeight": "120px", "overflowY": "auto", "marginBottom": "8px"},
-                    ),
+                    # Photo selection
+                    html.P("PHOTOS", style=_SECTION_LABEL_STYLE),
+                    html.Div(id="card-photo-album", style={"maxHeight": "140px", "overflowY": "auto", "marginBottom": "10px"}),
+                    
                     dcc.Upload(
                         id="card-photo-upload",
                         children=html.Div([
@@ -249,58 +266,35 @@ def _create_card_studio_layout(milestone_id, match_context, album, studio_type="
                         style=_UPLOAD_STYLE,
                         multiple=False,
                     ),
-                    html.Div(id="card-upload-status", className="mt-1"),
+                    html.Div(id="card-upload-status", className="small mt-1"),
 
-                    # Hidden elements required by existing callbacks
-                    dcc.Store(id="card-element-selector", data="headline"),
-                    dcc.Store(id="card-ai-signal", data=False), # New signal store
-                    dcc.Interval(id="card-generation-interval", interval=4000, n_intervals=0, disabled=True),
-                    # Hidden tabs required by update_card_editor_state callback
-                    html.Div(dbc.Tabs(id="card-template-tabs", active_tab="A"), style={"display": "none"}),
-                    html.Div(id="card-templates-library", style={"display": "none"}),
-                    # Hidden sliders (callbacks reference them)
-                    html.Div([
-                        dcc.Slider(id="card-element-x-slider", min=0, max=100, step=1, value=50),
-                        dcc.Slider(id="card-element-y-slider", min=0, max=100, step=1, value=50),
-                        dcc.Slider(id="card-element-scale-slider", min=10, max=250, step=5, value=100),
-                        dbc.Select(id="card-layout-presets", options=[]),
-                    ], style={"display": "none"}),
-                ], style={**_PANEL_STYLE, "overflowY": "auto", "maxHeight": "85vh"}),
-            ], width=4),
-        ]),
-    ], id="card-editor-container", className="px-3 py-2")
+                    html.Hr(style=_DIVIDER_STYLE),
 
+                    # Stats selection
+                    html.P("HIGHLIGHT STATS", style=_SECTION_LABEL_STYLE),
+                    dcc.Dropdown(
+                        id="card-stats-selection",
+                        multi=True,
+                        disabled=True,
+                        placeholder="Agent choosing stats...",
+                        className="card-studio-stats-dropdown mb-2",
+                    ),
 
-def _build_album_grid_static(album: list, selected_idx=None):
-    """Static album grid with clickable thumbnails and selection border."""
-    if not album:
-        return html.P("No photos yet", className="text-muted small")
-    thumbs = []
-    for entry in album:
-        idx = entry.get("idx", 0)
-        path = entry.get("bg_removed") or entry.get("original")
-        if path and Path(path).exists():
-            with open(path, "rb") as f:
-                src = "data:image/png;base64," + base64.b64encode(f.read()).decode()
-            is_selected = (selected_idx is not None and idx == selected_idx)
-            thumbs.append(html.Img(
-                src=src,
-                id={"type": "card-photo-thumb", "index": idx},
-                style={
-                    "width": "60px", "height": "60px", "objectFit": "cover",
-                    "margin": "2px", "borderRadius": "4px", "cursor": "pointer",
-                    "border": f"2px solid {'#00f2ff' if is_selected else 'transparent'}",
-                    "boxShadow": "0 0 8px rgba(0,242,255,0.6)" if is_selected else "none",
-                    "transition": "border 0.15s",
-                }
-            ))
-    return html.Div(thumbs, className="d-flex flex-wrap")
+                    html.Hr(style=_DIVIDER_STYLE),
 
+                    # Design History Gallery (below stats, not pushed to bottom)
+                    html.P("HISTORY", style=_SECTION_LABEL_STYLE),
+                    html.Div(id="card-history-gallery", style={"overflowY": "auto", "maxHeight": "160px"}),
 
-# ---------------------------------------------------------------------------
-# Performance Card Studio (Post-Match)
-# ---------------------------------------------------------------------------
+                ], style=_PANEL_STYLE)
+            ], width=4, className="h-100"),
+        ], className="g-3 h-100"), # Use small gap and full height
 
-def create_performance_card_studio(milestone_id, match_context, proposals, initial_preview=None, album=None, selected_idx=None):
-    """Renders the simplified Performance Card Studio (Imagen 3 full-card generation)."""
-    return _create_card_studio_layout(milestone_id, match_context, album, studio_type="post-match", selected_idx=selected_idx)
+        # Hidden stores for studio state
+        dcc.Store(id="card-element-selector", data="player_photo"),
+        dcc.Store(id="card-ai-signal", data=False),
+        # AI Card Studio polling interval (now local to the editor to ensure it's always in DOM when needed)
+        dcc.Interval(id="card-generation-interval", interval=2000, disabled=True),
+        dcc.Download(id="card-download"),
+        _save_toast(),
+    ], className="card-studio-container p-0 h-100", style={"height": "100%", "overflow": "hidden"})

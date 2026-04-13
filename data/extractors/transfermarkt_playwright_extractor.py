@@ -7,6 +7,7 @@ import logging
 import random
 import time
 import json
+import os
 from pathlib import Path
 from typing import Dict, Optional, Sequence
 
@@ -56,6 +57,8 @@ class TransfermarktPlaywrightExtractor(TransfermarktExtractor):
         self._pending_cookies: list[Dict] = []  # cookies to inject after launch
         self._active_proxy: Optional[str] = None  # proxy used by current browser session
         self._runtime = TransfermarktRuntimeManager()
+        self._visible_debug = os.getenv("TM_VISIBLE_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
+        self._focused_once = False
 
     # ------------------------------------------------------------------ #
     # Browser lifecycle                                                    #
@@ -88,6 +91,9 @@ class TransfermarktPlaywrightExtractor(TransfermarktExtractor):
             headless=False,  # CAMBIO CRITICO: Modo visible para parecer 100% humano
             args=[
                 "--no-sandbox",
+                "--disable-crash-reporter",
+                "--disable-crashpad",
+                "--disable-crashpad-for-testing",
                 "--disable-blink-features=AutomationControlled",
                 "--disable-dev-shm-usage",
             ],
@@ -99,6 +105,11 @@ class TransfermarktPlaywrightExtractor(TransfermarktExtractor):
             timezone_id="Asia/Hong_Kong",
             viewport={"width": 1280, "height": 800},
             java_script_enabled=True,
+            env={
+                **os.environ,
+                "CHROME_CRASHPAD_PIPE_NAME": "",
+                "CHROME_HEADLESS": "0",
+            },
         )
         if proxy_url:
             launch_kwargs["proxy"] = self.proxy_manager.as_playwright_dict(proxy_url)
@@ -118,7 +129,24 @@ class TransfermarktPlaywrightExtractor(TransfermarktExtractor):
             self._pending_cookies = []
 
         self._page = self._context.new_page()
-        logger.info("TransfermarktPlaywrightExtractor: browser launched (headless Chromium + stealth).")
+        if self._visible_debug:
+            try:
+                self._page.on(
+                    "framenavigated",
+                    lambda frame: logger.info(
+                        "TM visible debug navigation: %s",
+                        frame.url,
+                    ) if frame == self._page.main_frame else None,
+                )
+                if not self._focused_once:
+                    self._page.bring_to_front()
+                    self._focused_once = True
+            except Exception as exc:
+                logger.debug("Visible debug browser setup error: %s", exc)
+        logger.info(
+            "TransfermarktPlaywrightExtractor: browser launched (%s Chromium + stealth).",
+            "visible debug" if self._visible_debug else "visible",
+        )
         return self._page
 
     def _teardown_browser(self) -> None:
@@ -247,6 +275,8 @@ class TransfermarktPlaywrightExtractor(TransfermarktExtractor):
             # Simulation of human reading/scrolling
             self._simulate_human_interaction(page)
             time.sleep(random.uniform(2.0, 4.0))
+            if self._visible_debug:
+                time.sleep(1.5)
 
             html = page.content()
 

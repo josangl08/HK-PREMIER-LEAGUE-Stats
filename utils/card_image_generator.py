@@ -5,6 +5,11 @@ import logging
 import os
 from pathlib import Path
 
+from google.genai import types
+
+from data.competition_registry import get_competition_display_name
+from utils.runtime_storage import PLAYER_CARDS_RUNTIME_ROOT
+
 logger = logging.getLogger(__name__)
 
 _DESIGN_REF_PATHS = [
@@ -41,7 +46,7 @@ def generate_matchday_card(
     player_profile: dict,
     player_photos: list,
     card_format: str = "1:1",
-    output_dir: str = "data/player_cards",
+    output_dir: str = str(PLAYER_CARDS_RUNTIME_ROOT),
     progress_cb=None,
 ) -> Path:
     """
@@ -65,7 +70,6 @@ def generate_matchday_card(
         Path to the generated PNG.
     """
     from google import genai
-    from google.genai import types
 
     api_key = os.getenv("GOOGLE_API_KEY")
     if not api_key:
@@ -131,7 +135,7 @@ def _build_content_parts(match_payload: dict, player_profile: dict, player_photo
     # 3. Instruction prompt
     home = match_payload.get("home_team") or "Home FC"
     away = match_payload.get("away_team") or "Away FC"
-    competition = match_payload.get("competition") or "League"
+    competition = get_competition_display_name(match_payload.get("competition") or "League")
     date = match_payload.get("date") or ""
     position = player_profile.get("position") or "Footballer"
     nationality = player_profile.get("nationality") or ""

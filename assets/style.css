@@ -193,6 +193,7 @@ a:hover, .link:hover {
 .glass-alert { --glass-bg: rgba(255, 136, 0, 0.05); --glass-border: rgba(255, 136, 0, 0.2); }
 .glass-success { --glass-bg: rgba(0, 255, 136, 0.05); --glass-border: rgba(0, 255, 136, 0.2); }
 .glass-danger { --glass-bg: rgba(255, 51, 68, 0.05); --glass-border: rgba(255, 51, 68, 0.2); }
+.glass-live { --glass-bg: rgba(168, 85, 247, 0.08); --glass-border: rgba(168, 85, 247, 0.28); }
 
 /* Glass Animations */
 @keyframes glass-spin {

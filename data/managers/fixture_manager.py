@@ -17,6 +17,9 @@ from utils.common import get_current_season
 
 logger = logging.getLogger(__name__)
 
+LIVE_LOOKBACK_HOURS = 3
+NEXT_FIXTURE_LOOKAHEAD_DAYS = 21
+
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 TEAM_MAPPING: dict[str, str] = {
@@ -125,20 +128,40 @@ class FixtureManager:
         finally:
             session.close()
 
+    def _get_live_or_pending_threshold(self, now_utc: Optional[datetime] = None) -> datetime:
+        """Return the lower bound used to surface recently started fixtures."""
+        current_time = now_utc or datetime.now(timezone.utc)
+        return current_time - timedelta(hours=LIVE_LOOKBACK_HOURS)
+
+    def _get_next_fixture_lookahead_end(self, now_utc: Optional[datetime] = None) -> datetime:
+        """Return the upper bound for future next-fixture discovery."""
+        current_time = now_utc or datetime.now(timezone.utc)
+        return current_time + timedelta(days=NEXT_FIXTURE_LOOKAHEAD_DAYS)
+
     def get_next_fixtures(self, team_id: str, limit: int = 1) -> List[Dict[str, Any]]:
         """
-        Gets upcoming fixtures for a specific team, including those started recently (up to 3h ago).
+        Gets recently-started fixtures plus the next upcoming fixtures in a bounded window.
         """
         session = SessionFactory()
         try:
-            # We look back 3 hours to catch matches in progress (LIVE) or recently finished (PENDING)
-            threshold = datetime.now(timezone.utc) - timedelta(hours=3)
+            now_utc = datetime.now(timezone.utc)
+            recent_threshold = self._get_live_or_pending_threshold(now_utc)
+            next_window_end = self._get_next_fixture_lookahead_end(now_utc)
             stmt = (
                 select(Fixture)
                 .where(
                     and_(
                         or_(Fixture.home_team_id == team_id, Fixture.away_team_id == team_id),
-                        Fixture.date_utc >= threshold
+                        or_(
+                            and_(
+                                Fixture.date_utc >= recent_threshold,
+                                Fixture.date_utc <= now_utc,
+                            ),
+                            and_(
+                                Fixture.date_utc >= now_utc,
+                                Fixture.date_utc <= next_window_end,
+                            ),
+                        ),
                     )
                 )
                 .order_by(Fixture.date_utc.asc())

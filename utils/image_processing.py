@@ -18,26 +18,14 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
+from data.team_branding_registry import get_team_asset_key
+from utils.runtime_storage import LEGACY_PLAYER_CARDS_ROOT, PLAYER_CARDS_RUNTIME_ROOT
+
 # --- Constants ---
 MAX_PHOTOS = 5
-ALBUM_ROOT = "data/player_cards"
+ALBUM_ROOT = str(PLAYER_CARDS_RUNTIME_ROOT)
+LEGACY_ALBUM_ROOT = str(LEGACY_PLAYER_CARDS_ROOT)
 ASSETS_ROOT = "assets"
-
-# Mapping for team assets (prefix matches for filenames)
-TEAM_PREFIX_MAPPING = {
-    "eastern": "eastern",
-    "kitchee": "kitchee",
-    "lee_man": "leeman",
-    "tai_po": "taipo",
-    "hong_kong_football_club": "hkfc",
-    "kowloon_city": "kowloon",
-    "north_district": "northdt",
-    "southern_district": "southern",
-    "eastern_district": "easterndt",
-    "rangers": "rangers",
-    "bc_rangers": "rangers",
-    "hkfc": "hkfc"
-}
 
 # --- Asset Indexing Functions ---
 
@@ -46,7 +34,8 @@ def get_team_assets(team_id: str) -> Dict[str, Optional[str]]:
     Retrieves indexed assets for a specific team.
     Returns paths to home/away jerseys and stadium thumbnail.
     """
-    prefix = TEAM_PREFIX_MAPPING.get(team_id, team_id)
+    tid = str(team_id).lower().strip()
+    prefix = get_team_asset_key(team_id)
     
     # 1. Jerseys
     jersey_dir = Path(ASSETS_ROOT) / "team_jersey"
@@ -60,17 +49,18 @@ def get_team_assets(team_id: str) -> Dict[str, Optional[str]]:
         away_j = jersey_dir / "kitche_away.png"
 
     # 2. Stadium
-    # Check assets/team_media/{team_id}/stadium_thumb.jpg
-    # and also try with prefix
-    stadium_path = Path(ASSETS_ROOT) / "team_media" / team_id / "stadium_thumb.jpg"
+    stadium_path = Path(ASSETS_ROOT) / "team_media" / prefix / "stadium_thumb.jpg"
     if not stadium_path.exists():
-        stadium_path = Path(ASSETS_ROOT) / "team_media" / prefix / "stadium_thumb.jpg"
+        # Try with team_id if prefix lookup failed
+        stadium_path = Path(ASSETS_ROOT) / "team_media" / team_id / "stadium_thumb.jpg"
 
     # 3. Logo
     logo_path = Path(ASSETS_ROOT) / "team_logos" / f"{prefix}.png"
     if not logo_path.exists():
-        # Try team_id as fallback
-        logo_path = Path(ASSETS_ROOT) / "team_logos" / f"{team_id}.png"
+        # Try team_id variant
+        logo_path = Path(ASSETS_ROOT) / "team_logos" / f"{prefix.replace('_', ' ')}.png"
+    if not logo_path.exists():
+        logo_path = Path(ASSETS_ROOT) / "team_logos" / f"{tid}.png"
 
     return {
         "home_jersey": str(home_j) if home_j.exists() else None,
@@ -95,6 +85,14 @@ def remove_background(image_bytes: bytes) -> bytes:
         # Return original bytes if rembg fails
         return image_bytes
 
+def _get_album_dirs(player_id) -> list[Path]:
+    """Return candidate album directories in lookup order."""
+    return [
+        Path(ALBUM_ROOT) / str(player_id) / "photos",
+        Path(LEGACY_ALBUM_ROOT) / str(player_id) / "photos",
+    ]
+
+
 def save_player_photo(player_id, image_bytes: bytes, filename: str) -> dict:
     """
     Saves original and background-removed photo to the player's album.
@@ -117,10 +115,18 @@ def save_player_photo(player_id, image_bytes: bytes, filename: str) -> dict:
     with Image.open(io.BytesIO(image_bytes)) as img:
         img.convert("RGBA").save(orig_path, "PNG")
     
-    # Remove background and save
+    # Remove background, trim to silhouette bounding box, and save
     bgrm_bytes = remove_background(image_bytes)
+    with Image.open(io.BytesIO(bgrm_bytes)) as bgrm_img:
+        bgrm_img = bgrm_img.convert("RGBA")
+        bbox = bgrm_img.getbbox()
+        if bbox:
+            bgrm_img = bgrm_img.crop(bbox)
+        trimmed_buf = io.BytesIO()
+        bgrm_img.save(trimmed_buf, "PNG")
+        trimmed_bytes = trimmed_buf.getvalue()
     with open(bgrm_path, "wb") as f:
-        f.write(bgrm_bytes)
+        f.write(trimmed_bytes)
         
     return {
         "idx": idx,
@@ -133,8 +139,8 @@ def get_player_album(player_id) -> list[dict]:
     """
     Reads the player's photo album from disk.
     """
-    album_dir = Path(ALBUM_ROOT) / str(player_id) / "photos"
-    if not album_dir.exists():
+    album_dir = next((candidate for candidate in _get_album_dirs(player_id) if candidate.exists()), None)
+    if album_dir is None:
         return []
     
     album = []

@@ -71,6 +71,41 @@ def _build_fallback_explanation(
         what_this_shows = "This view explains why your current age, momentum, and role signals point to this phase."
         why_it_matters = "It helps show whether the next step is to push, steady the level, or rebuild force."
         what_to_watch = "Watch whether momentum and role signals keep supporting this read."
+    elif evidence_key in {"team_positional_rank", "team_global_rank", "league_positional_standing", "league_global_standing"}:
+        headline = str(facts.get("headline_fact") or "This shows where you currently sit in the comparison group.")
+        what_this_shows = "It compares your current level with the average line and the stronger end of the same group."
+        why_it_matters = "That helps show whether the recommendation is backed by real comparative weight."
+        what_to_watch = "Watch whether your standing keeps holding above average and moves closer to the top tier."
+    elif evidence_key == "top_tier_gap":
+        headline = str(facts.get("headline_fact") or "This shows how close you are to the top benchmark.")
+        what_this_shows = "It separates being competitive from actually being close to the strongest level."
+        why_it_matters = "That gap is one of the clearest signals behind whether a bigger push is realistic now."
+        what_to_watch = "Watch whether the gap keeps shrinking across the next run."
+    elif evidence_key == "consistency_profile":
+        headline = str(facts.get("headline_fact") or "This shows whether your level is holding.")
+        what_this_shows = "It focuses on stability across the recent run, not only on one good spell."
+        why_it_matters = "Consistency is what turns a promising level into a trusted one."
+        what_to_watch = "Watch whether the next stretch looks stable enough to hold the same recommendation."
+    elif evidence_key == "team_context":
+        context_label = str(facts.get("team_context_label") or "").strip()
+        benchmark_metric = str(facts.get("benchmark_metric") or "current benchmark").strip()
+        headline = str(facts.get("headline_fact") or "This shows how your current standing is being judged.")
+        what_this_shows = (
+            f"It compares your current {benchmark_metric.lower()} level against team and league reference groups, "
+            "then balances that with role security and consistency."
+        )
+        why_it_matters = (
+            "A softer team-context read does not mean the player lacks value. "
+            "It means the comparative edge is not yet strong enough to carry the whole recommendation by itself."
+            if context_label == "carried_by_team"
+            else "This matters because comparative standing only becomes meaningful when role security and consistency can hold it up."
+        )
+        what_to_watch = "Watch whether role security improves and whether the same comparative edge starts to hold across the next run."
+    elif evidence_key == "career_timing_context":
+        headline = str(facts.get("headline_fact") or "This shows where the current moment sits in your career cycle.")
+        what_this_shows = "It combines age-window context with the current momentum read."
+        why_it_matters = "Timing changes how much pressure there is to push, hold, or steady the level first."
+        what_to_watch = "Watch whether the next stretch strengthens the timing case or adds more pressure."
     elif evidence_key == "career_value_summary":
         headline = str(facts.get("headline_fact") or "Career value comes from repeatable work over time.")
         what_this_shows = "This view sums up the size of your tracked body of work."

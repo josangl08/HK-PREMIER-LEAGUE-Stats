@@ -51,6 +51,7 @@ coverage.xml
 *.py,cover
 .hypothesis/
 .pytest_cache/
+.pytest_cache/**
 cover/
 
 # Translations
@@ -191,6 +192,8 @@ data/archive/
 data/database.db
 data/database.db-wal
 data/database.db-shm
+*.db-wal
+*.db-shm
 data/historical_records/*.json
 
 # Archivos IDE específicos
@@ -234,7 +237,11 @@ assets/team_media/
 assets/templates
 assets/design_references/
 assets/design_trends/
-data/player_cards/
+data/player_cards/*
+!data/player_cards/.gitkeep
+!data/player_cards/README.md
+storage/
+htmlcov/
 
 
 # .claude

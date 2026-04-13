@@ -3,30 +3,30 @@ window.dash_clientside = Object.assign({}, window.dash_clientside, {
         scrollYearNavigator: function(children, selected_year) {
             if (!children || children.length === 0) return null;
             var targetYear = selected_year ? selected_year.toString() : new Date().getFullYear().toString();
-            setTimeout(function() {
+            requestAnimationFrame(function() {
                 var bar = document.getElementById("year-navigator-pills");
                 if (!bar) return;
                 var buttons = bar.querySelectorAll("button");
                 for (var i = 0; i < buttons.length; i++) {
                     if (buttons[i].textContent.trim() === targetYear) {
-                        buttons[i].scrollIntoView({behavior: "smooth", inline: "center", block: "nearest"});
+                        buttons[i].scrollIntoView({behavior: "auto", inline: "center", block: "nearest"});
                         break;
                     }
                 }
-            }, 150);
+            });
             return null;
         },
 
         scrollTimelineToYear: function(selected_year) {
             if (!selected_year) return null;
-            setTimeout(function() {
+            requestAnimationFrame(function() {
                 var container = document.querySelector(".milestone-list-container");
                 if (!container) return;
                 var target = container.querySelector(".year-" + selected_year);
                 if (target) {
-                    target.scrollIntoView({behavior: "smooth", block: "start"});
+                    target.scrollIntoView({behavior: "auto", block: "start"});
                 }
-            }, 150);
+            });
             return null;
         },
 
@@ -62,6 +62,11 @@ window.dash_clientside = Object.assign({}, window.dash_clientside, {
         toggleTimelineExpand: function(n_clicks_list, expand_store) {
             var triggered_id = dash_clientside.callback_context.triggered_id;
             if (!triggered_id || triggered_id.type !== "milestone-header") {
+                return window.dash_clientside.no_update;
+            }
+            var triggered = dash_clientside.callback_context.triggered;
+            var triggerValue = (triggered && triggered[0] && triggered[0].value) || 0;
+            if (!triggerValue) {
                 return window.dash_clientside.no_update;
             }
 
@@ -135,7 +140,7 @@ window.dash_clientside = Object.assign({}, window.dash_clientside, {
         syncTimelineExpandedClasses: function(expand_store, children) {
             if (!children) return window.dash_clientside.no_update;
             var openIds = new Set(expand_store || []);
-            setTimeout(function() {
+            requestAnimationFrame(function() {
                 document.querySelectorAll(".timeline-event").forEach(function(el) {
                     el.classList.remove("is-expanded");
                 });
@@ -152,14 +157,14 @@ window.dash_clientside = Object.assign({}, window.dash_clientside, {
                     var seasonContainer = headerEl.closest(".season-group-container");
                     if (seasonContainer) seasonContainer.classList.add("is-expanded");
                 });
-            }, 0);
+            });
             return null;
         },
 
         observeSeasonSections: function(children) {
-            setTimeout(function() {
+            requestAnimationFrame(function() {
                 if (window.lucide) window.lucide.createIcons();
-            }, 150);
+            });
 
             setTimeout(function() {
                 if (window._seasonObserver) {
@@ -200,14 +205,14 @@ window.dash_clientside = Object.assign({}, window.dash_clientside, {
                 sections.forEach(function(section) {
                     window._seasonObserver.observe(section);
                 });
-            }, 400);
+            }, 120);
             return null;
         },
 
         refreshStageLucide: function(children) {
-            setTimeout(function() {
+            requestAnimationFrame(function() {
                 if (window.lucide) window.lucide.createIcons();
-            }, 150);
+            });
             return null;
         },
 
@@ -226,17 +231,17 @@ window.dash_clientside = Object.assign({}, window.dash_clientside, {
                 scroller.scrollWidth - scroller.clientWidth,
                 targetLeft + targetWidth - scroller.clientWidth + 22
             ));
-            scroller.scrollTo({left: desired, behavior: "smooth"});
+            scroller.scrollTo({left: desired, behavior: "auto"});
             return n_clicks;
         },
 
-        togglePortalViewport: function(detail_clicks, back_clicks) {
+        togglePortalViewport: function(detail_clicks, action_pill_clicks, back_clicks) {
             var triggered = dash_clientside.callback_context.triggered;
             if (!triggered || triggered.length === 0) {
                 return [window.dash_clientside.no_update, window.dash_clientside.no_update];
             }
             var prop_id = triggered[0].prop_id || "";
-            if (prop_id.includes("milestone-detail-btn")) {
+            if (prop_id.includes("milestone-detail-btn") || prop_id.includes("action-node-pill")) {
                 return ["portal-viewport show-stage", {panel: "stage"}];
             }
             if (prop_id === "portal-back-btn.n_clicks") {

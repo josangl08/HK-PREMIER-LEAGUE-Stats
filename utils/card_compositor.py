@@ -1,8 +1,9 @@
-# ABOUTME: Precision Pillow compositor for matchday cards — Robust Fallback Engine.
-# ABOUTME: Used when Nano Banana (AI) is unavailable. Focuses on high-legibility and brand accuracy.
+# ABOUTME: Precision Pillow compositor for fallback performance cards with high legibility.
+# ABOUTME: Used when Nano Banana fails and now renders a post-match editorial summary instead of a generic matchday card.
 
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Optional, Dict, Any, Union
 
@@ -57,10 +58,7 @@ def compose_precision_card(
     narrative: Optional[Dict] = None,
     **kwargs
 ) -> Path:
-    """
-    Fallback Engine: Creates a clean, professional matchday card using Pillow.
-    Used if AI generation fails.
-    """
+    """Creates a minimal but coherent post-match performance card when AI generation fails."""
     size = FORMAT_SIZES.get(card_format, (1080, 1920))
     w, h = size
     
@@ -89,26 +87,60 @@ def compose_precision_card(
 
     # 3. Text & Info
     draw = ImageDraw.Draw(canvas)
+    editorial = narrative if isinstance(narrative, dict) else {}
+    selected_stats = editorial.get("selected_stats") if isinstance(editorial.get("selected_stats"), list) else []
+    headline = str(editorial.get("headline") or "PERFORMANCE").upper()
+    subheadline = str(editorial.get("subheadline") or "").upper()
+    story_angle = str(editorial.get("story_angle") or "").replace("_", " ").upper()
     
     # Title
-    font_main = _load_font(int(h * 0.08))
-    draw.text((w // 2, int(h * 0.15)), "MATCHDAY", font=font_main, fill="white", anchor="mm")
+    font_main = _load_font(int(h * 0.075))
+    draw.text((w // 2, int(h * 0.12)), headline, font=font_main, fill="white", anchor="mm")
+    if story_angle:
+        font_kicker = _load_font(int(h * 0.02), bold=False)
+        draw.text((w // 2, int(h * 0.06)), story_angle, font=font_kicker, fill=(180, 220, 255, 255), anchor="mm")
     
     # Player Name (Bottom)
     font_name = _load_font(int(h * 0.05))
-    draw.text((w // 2, int(h * 0.92)), player_name.upper(), font=font_name, fill="white", anchor="mm")
+    draw.text((w // 2, int(h * 0.89)), player_name.upper(), font=font_name, fill="white", anchor="mm")
     
     # Match Details
     home = match_payload.get("home_team", "HOME")
     away = match_payload.get("away_team", "AWAY")
     match_date = match_payload.get("date", "")
     
-    font_vs = _load_font(int(h * 0.035), bold=False)
-    draw.text((w // 2, int(h * 0.85)), f"{home} VS {away}", font=font_vs, fill="white", anchor="mm")
+    font_vs = _load_font(int(h * 0.03), bold=False)
+    draw.text((w // 2, int(h * 0.83)), f"{home} VS {away}", font=font_vs, fill="white", anchor="mm")
     
     if match_date:
         font_date = _load_font(int(h * 0.025), bold=False)
-        draw.text((w // 2, int(h * 0.22)), match_date.upper(), font=font_date, fill=(200, 200, 200, 255), anchor="mm")
+        draw.text((w // 2, int(h * 0.18)), str(match_date).upper(), font=font_date, fill=(200, 200, 200, 255), anchor="mm")
+    if subheadline:
+        font_sub = _load_font(int(h * 0.024), bold=False)
+        draw.text((w // 2, int(h * 0.22)), subheadline, font=font_sub, fill=(220, 220, 220, 255), anchor="mm")
+
+    # Stat panel
+    if selected_stats:
+        panel_top = int(h * 0.58)
+        panel_height = int(h * 0.13)
+        panel_width = int(w * 0.84)
+        panel_left = (w - panel_width) // 2
+        overlay = Image.new("RGBA", (panel_width, panel_height), (0, 0, 0, 150))
+        border = Image.new("RGBA", (panel_width, panel_height), (0, 0, 0, 0))
+        border_draw = ImageDraw.Draw(border)
+        border_draw.rounded_rectangle((0, 0, panel_width - 1, panel_height - 1), radius=24, outline=(120, 220, 255, 140), width=2)
+        canvas.alpha_composite(overlay, (panel_left, panel_top))
+        canvas.alpha_composite(border, (panel_left, panel_top))
+
+        stat_draw = ImageDraw.Draw(canvas)
+        card_count = min(len(selected_stats), 5)
+        col_width = panel_width / max(card_count, 1)
+        font_stat_value = _load_font(int(h * 0.03))
+        font_stat_label = _load_font(int(h * 0.014), bold=False)
+        for idx, stat in enumerate(selected_stats[:5]):
+            center_x = int(panel_left + (idx + 0.5) * col_width)
+            stat_draw.text((center_x, panel_top + int(panel_height * 0.38)), str(stat.get("value") or ""), font=font_stat_value, fill="white", anchor="mm")
+            stat_draw.text((center_x, panel_top + int(panel_height * 0.72)), str(stat.get("label") or "").upper(), font=font_stat_label, fill=(200, 200, 200, 255), anchor="mm")
 
     # 4. Save
     Path(output_dir).mkdir(parents=True, exist_ok=True)

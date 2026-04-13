@@ -1,7 +1,11 @@
 # ABOUTME: Callbacks for the Player Portal Phase 3 interactive timeline with client-side expand/collapse and scroll-sync.
-# ABOUTME: Handles Timeline population, milestone selection, Stage rendering, sliding panels, year-scroll, and Action Node gallery.
+# ABOUTME: Handles Timeline population, stage rendering, and non-disruptive card viewing via card-viewer-modal for finalized assets.
 
 import logging
+import json
+import re
+from typing import Any
+from pathlib import Path
 from dash import Input, Output, State, callback, html, no_update, ALL, ctx, dcc, ClientsideFunction
 import dash_bootstrap_components as dbc
 from flask_login import current_user
@@ -27,11 +31,28 @@ from utils.stage_helpers import (
 )
 from utils.performance_helpers import get_streaming_label
 from utils.app_context import get_hong_kong_data_manager
-from utils.competition_helpers import normalize_competition, get_competition_logo
+from data.competition_registry import (
+    get_competition_display_name,
+    get_competition_logo,
+    normalize_competition,
+)
+from data.team_branding_registry import get_team_colors as get_registered_team_colors
+from utils.runtime_storage import resolve_player_cards_path
 
 import html as _html_lib
 
 logger = logging.getLogger(__name__)
+
+_MATCH_POSITION_MAP = {
+    "CEN": "CB",
+    "ED": "RW",
+    "EI": "LW",
+    "ID": "RM",
+    "II": "LM",
+    "MCO": "AMF",
+    "CMF": "CM",
+    "DMF": "DM",
+}
 
 
 def _get_active_player_identity():
@@ -48,22 +69,41 @@ def _get_active_player_identity():
     return player_id, player_name, user_role
 
 
+def _display_match_position(position: Any) -> str:
+    raw = str(position or "").strip().upper()
+    return _MATCH_POSITION_MAP.get(raw, raw or "N/A")
+
+
 def _render_default_stage_content(ai_payload=None):
     """Renders the default dashboard stage inside the persistent shell."""
     try:
+        from utils.domain_ai.career_dashboard_ai import normalize_career_dashboard_brief_payload
+
         player_id, player_name, user_role = _get_active_player_identity()
+        normalized_ai_payload = normalize_career_dashboard_brief_payload(ai_payload)
         if player_id and player_name:
-            if ai_payload is None:
-                return render_player_dashboard(player_name, player_id, user_role)
+            if not normalized_ai_payload:
+                return render_player_dashboard(player_name, player_id, user_role, synthesize_with_ai=False)
             return render_player_dashboard(
                 player_name,
                 player_id,
                 user_role,
-                ai_payload=ai_payload,
+                ai_payload=normalized_ai_payload,
+                synthesize_with_ai=False,
             )
+        logger.warning("default stage render skipped: missing player identity id=%s name=%s", player_id, player_name)
+        return dbc.Alert(
+            "No se pudo cargar el stage del jugador. Recarga el portal e inténtalo de nuevo.",
+            color="warning",
+            className="m-3",
+        )
     except Exception as exc:
-        logger.warning(f"default stage render error: {exc}")
-    return no_update
+        logger.exception("default stage render error: %s", exc)
+        return dbc.Alert(
+            "Error al cargar el stage del jugador.",
+            color="danger",
+            className="m-3",
+        )
 
 
 def _render_stage_content_for_context(context):
@@ -76,7 +116,7 @@ def _render_stage_content_for_context(context):
     payload = context.get("payload", {})
 
     if m_type == "post-match":
-        return render_post_match(payload)
+        return render_post_match(payload, milestone_id=context.get("id", ""))
 
     if m_type == "pre-match":
         pos_group = ""
@@ -178,26 +218,11 @@ def _get_expand_ids_for_context(context) -> list[str]:
 
 
 def _get_default_expand_ids(milestones_data) -> list[str]:
-    """Returns the default expanded season when the timeline first loads."""
+    """Returns the default expanded ids when the timeline first loads."""
     if not milestones_data:
         return []
 
-    years = sorted(
-        {
-            m.get("group_year") or str(m.get("date", ""))[:4]
-            for m in milestones_data
-            if m.get("group_year") or m.get("date")
-        },
-        reverse=True,
-    )
-    most_recent_year = years[0] if years else None
-    if not most_recent_year:
-        return []
-
-    for milestone in milestones_data:
-        milestone_year = milestone.get("group_year") or str(milestone.get("date", ""))[:4]
-        if milestone.get("type") == "career" and milestone_year == most_recent_year and milestone.get("id"):
-            return [milestone["id"]]
+    # Timeline should enter in a fully collapsed state.
     return []
 
 
@@ -282,136 +307,9 @@ def _get_player_current_team_name(player_id: str) -> str:
     except Exception:
         return ""
 
-# Static team color palette — sourced from official club identity (Badge and Kits)
-_TEAM_COLORS = {
-    "kitchee": {
-        "badge": ["#14236b", "#e7b330", "#848cb2"],
-        "kit_home": ["#091e47", "#db5d96", "#0a468c"],
-        "kit_away": ["#dfdeeb", "#eb4380"],
-        "colour1": "#14236b",
-        "colour2": "#e7b330"
-    },
-    "kitchee sc": {
-        "badge": ["#14236b", "#e7b330", "#848cb2"],
-        "kit_home": ["#091e47", "#db5d96", "#0a468c"],
-        "kit_away": ["#dfdeeb", "#eb4380"],
-        "colour1": "#14236b",
-        "colour2": "#e7b330"
-    },
-    "eastern": {
-        "badge": ["#224283", "#d3242b", "#e6c8cd"],
-        "kit_home": ["#1e407e"],
-        "kit_away": ["#d0d0d5"],
-        "colour1": "#224283",
-        "colour2": "#d3242b"
-    },
-    "eastern aa": {
-        "badge": ["#224283", "#d3242b", "#e6c8cd"],
-        "kit_home": ["#1e407e"],
-        "kit_away": ["#d0d0d5"],
-        "colour1": "#224283",
-        "colour2": "#d3242b"
-    },
-    "eastern sc": {
-        "badge": ["#224283", "#d3242b", "#e6c8cd"],
-        "kit_home": ["#1e407e"],
-        "kit_away": ["#d0d0d5"],
-        "colour1": "#224283",
-        "colour2": "#d3242b"
-    },
-    "eastern district": {
-        "badge": ["#e1e3e5", "#0d1c35", "#646d78"],
-        "kit_home": ["#16233a", "#d5dbe0", "#387287"],
-        "kit_away": ["#e9363a", "#f7e4e7", "#e68184"],
-        "colour1": "#0d1c35",
-        "colour2": "#e1e3e5"
-    },
-    "lee man": {
-        "badge": ["#e7b844", "#1b2180", "#e30513"],
-        "kit_home": ["#edcc55"],
-        "kit_away": ["#1f2837", "#edcc55"],
-        "colour1": "#e7b844",
-        "colour2": "#1b2180"
-    },
-    "lee man fc": {
-        "badge": ["#e7b844", "#1b2180", "#e30513"],
-        "kit_home": ["#edcc55"],
-        "kit_away": ["#1f2837", "#edcc55"],
-        "colour1": "#e7b844",
-        "colour2": "#1b2180"
-    },
-    "southern district": {
-        "badge": ["#b91329", "#064276", "#e0cbcd"],
-        "kit_home": ["#d81d3b", "#e9d6da", "#632c38"],
-        "kit_away": ["#2b3854", "#b8c7e7"],
-        "colour1": "#b91329",
-        "colour2": "#064276"
-    },
-    "southern": {
-        "badge": ["#b91329", "#064276", "#e0cbcd"],
-        "kit_home": ["#d81d3b", "#e9d6da", "#632c38"],
-        "kit_away": ["#2b3854", "#b8c7e7"],
-        "colour1": "#b91329",
-        "colour2": "#064276"
-    },
-    "rangers": {
-        "badge": ["#a7e1fa", "#05a6e8", "#5ac5f1"],
-        "kit_home": ["#2179c0", "#c6cedc", "#04266e"],
-        "kit_away": ["#b55384", "#d4c4d8", "#2f2142"],
-        "colour1": "#05a6e8",
-        "colour2": "#a7e1fa"
-    },
-    "hk rangers": {
-        "badge": ["#a7e1fa", "#05a6e8", "#5ac5f1"],
-        "kit_home": ["#2179c0", "#c6cedc", "#04266e"],
-        "kit_away": ["#b55384", "#d4c4d8", "#2f2142"],
-        "colour1": "#05a6e8",
-        "colour2": "#a7e1fa"
-    },
-    "tai po": {
-        "badge": ["#134726", "#b4bc8e", "#60856e"],
-        "kit_home": ["#124b62", "#c0c2c4", "#2191a4"],
-        "kit_away": ["#75446b", "#e0d4d4"],
-        "colour1": "#134726",
-        "colour2": "#b4bc8e"
-    },
-    "north district": {
-        "badge": ["#272860", "#cb2220", "#dcc9cb"],
-        "kit_home": ["#8f131d", "#251216", "#dfcfd6"],
-        "kit_away": ["#ac8616", "#202021", "#c1c7b3"],
-        "colour1": "#272860",
-        "colour2": "#cb2220"
-    },
-    "hong kong football club": {
-        "badge": ["#d1dee6", "#6182ae", "#06448b"],
-        "kit_home": ["#343246"],
-        "kit_away": ["#ededec"],
-        "colour1": "#06448b",
-        "colour2": "#6182ae"
-    },
-    "hkfc": {
-        "badge": ["#d1dee6", "#6182ae", "#06448b"],
-        "kit_home": ["#343246"],
-        "kit_away": ["#ededec"],
-        "colour1": "#06448b",
-        "colour2": "#6182ae"
-    },
-    "kowloon city": {
-        "badge": ["#c0940c"],
-        "kit_home": ["#74171d", "#d8c9b4", "#1f1817"],
-        "kit_away": ["#b5ae94", "#151411", "#e7e5dd"],
-        "colour1": "#c0940c",
-        "colour2": "#1f1817"
-    },
-}
-
-
 def _get_team_colors(team_name: str) -> dict:
     """Returns team color dict {badge, kit_home, kit_away, colour1, colour2} for a given team name."""
-    if not team_name:
-        return {}
-    key = team_name.lower().strip()
-    return _TEAM_COLORS.get(key, {})
+    return get_registered_team_colors(team_name)
 
 
 # Hex color palettes per competition — sourced from official branding
@@ -445,6 +343,7 @@ def _competition_color(competition: str) -> str:
 def _comp_badge(competition: str) -> "html.Span | None":
     """Return a styled Span badge with the competition name."""
     comp = _normalize_comp(competition)
+    comp_label = get_competition_display_name(competition, long_form=False)
     if not comp:
         return None
     bg_color = _competition_color(comp)
@@ -459,7 +358,7 @@ def _comp_badge(competition: str) -> "html.Span | None":
         text_color = "#18181a"
 
     return html.Span(
-        comp,
+        comp_label,
         className="small px-2 py-0 rounded-1 fw-semibold",
         style={
             "backgroundColor": bg_color,
@@ -474,13 +373,14 @@ def _comp_badge(competition: str) -> "html.Span | None":
 def _competition_logo_img(competition: str, logo_url: str = None):
     """Return a small competition logo img element, or text abbreviation if no asset available."""
     comp = _normalize_comp(competition)
+    comp_label = get_competition_display_name(competition, long_form=False)
     # Prefer explicit logo_url if provided (e.g. from DB/TM), fallback to local mapping
     logo = logo_url if logo_url else get_competition_logo(competition)
 
     if not logo:
-        if comp:
+        if comp_label:
             return html.Span(
-                comp[:4].upper(),
+                comp_label[:4].upper(),
                 id="image-overlay",
                 className="competition-logo-img small fw-semibold portal-text-muted",
                 style={
@@ -491,7 +391,7 @@ def _competition_logo_img(competition: str, logo_url: str = None):
                     "width": "40px",
                     "height": "40px",
                 },
-                title=comp,
+                title=comp_label,
             )
         return None
 
@@ -500,7 +400,7 @@ def _competition_logo_img(competition: str, logo_url: str = None):
         id="image-overlay",
         className="competition-logo-img",
         style={"width": "40px", "height": "40px", "objectFit": "contain"},
-        title=comp,
+        title=comp_label,
     )
 
 
@@ -531,6 +431,57 @@ _GLASS_CLASS_MAP = {
 }
 
 
+def _get_timeline_priority(milestone: dict) -> tuple[int, Any]:
+    """Sorts timeline milestones within a season so future next-game cards stay above live/pending items."""
+    from datetime import datetime
+
+    payload = milestone.get("payload", {}) or {}
+    m_type = milestone.get("type", "career")
+    status = str(payload.get("confirmation_status") or milestone.get("confirmation_status") or "")
+    date_value = milestone.get("date")
+    parsed_date = None
+    if isinstance(date_value, str):
+        try:
+            parsed_date = datetime.fromisoformat(date_value.replace("Z", "+00:00"))
+        except ValueError:
+            parsed_date = None
+    elif hasattr(date_value, "timestamp"):
+        parsed_date = date_value
+
+    timestamp = parsed_date.timestamp() if parsed_date is not None else 0.0
+
+    if m_type == "pre-match" and status == "Scheduled":
+        return (0, timestamp)
+    if m_type == "pre-match" and status == "LIVE":
+        return (1, timestamp)
+    if m_type == "pre-match" and status == "Pending Update":
+        return (2, -timestamp)
+    if m_type == "post-match":
+        return (3, -timestamp)
+    return (4, -timestamp)
+
+
+def _log_timeline_snapshot(player_id: str, milestones: list[dict], source: str) -> None:
+    """Logs a compact snapshot of timeline ordering and statuses for portal debugging."""
+    try:
+        summary = []
+        for milestone in milestones or []:
+            payload = milestone.get("payload", {}) or {}
+            summary.append(
+                {
+                    "id": milestone.get("id"),
+                    "type": milestone.get("type"),
+                    "group_year": milestone.get("group_year"),
+                    "status": payload.get("confirmation_status") or milestone.get("confirmation_status"),
+                    "label": milestone.get("label"),
+                    "date": str(milestone.get("date") or ""),
+                }
+            )
+        logger.debug("[TIMELINE_%s] player_id=%s milestones=%s", source, player_id or "unknown", summary)
+    except Exception as exc:
+        logger.debug("timeline snapshot log error: %s", exc)
+
+
 def _get_glass_class(milestone: dict) -> str:
     """Returns the glass context modifier class for a milestone."""
     m_type = milestone.get("type", "career")
@@ -539,9 +490,9 @@ def _get_glass_class(milestone: dict) -> str:
     ).get("confirmation_status", "")
     
     if status == "LIVE":
-        return "glass-danger"
+        return "glass-live"
     if status == "Pending Update":
-        return "glass-prematch" # Reuse blue for pending
+        return "glass-success"
         
     if m_type == "post-match":
         return "glass-success" if status == "Confirmed" else "glass-prematch"
@@ -551,6 +502,65 @@ def _get_glass_class(milestone: dict) -> str:
 def _lucide(name: str) -> html.I:
     """Returns a Lucide icon element."""
     return html.I(**{"data-lucide": name, "className": "lucide-inline-icon me-1"})
+
+
+def _bi(icon_name: str, class_name: str = "me-1", style: dict | None = None) -> html.I:
+    """Returns a Bootstrap icon element for first-paint stable UI icons."""
+    return html.I(className=f"bi bi-{icon_name} {class_name}".strip(), style=style or {})
+
+
+def _format_match_result(result: Any, penalties: Any = None) -> str:
+    """Formats a result and appends '(p)' or '(ET)' for knockout outcomes."""
+    raw_result = str(result or "").strip()
+    if not raw_result:
+        return "- : -"
+
+    penalties_resolved = bool(penalties)
+    extra_time_resolved = False
+    lowered_result = raw_result.lower()
+
+    if "pen" in lowered_result:
+        penalties_resolved = True
+        raw_result = re.sub(
+            r"\s*(?:on\s*pens?\.?|pens?\.?)\s*$",
+            "",
+            raw_result,
+            flags=re.IGNORECASE,
+        ).strip()
+    elif "aet" in lowered_result or re.search(r"\bet\b", lowered_result) or "extra time" in lowered_result:
+        extra_time_resolved = True
+        raw_result = re.sub(
+            r"\s*(?:a\.?e\.?t\.?|after\s+extra\s+time|extra\s+time|\bet\b)\s*$",
+            "",
+            raw_result,
+            flags=re.IGNORECASE,
+        ).strip()
+
+    if penalties_resolved:
+        return f"{raw_result} (p)"
+    if extra_time_resolved:
+        return f"{raw_result} (ET)"
+    return raw_result
+
+
+def _normalize_timeline_team_name(team_name: Any) -> str:
+    """Normalizes team labels for timeline cards only."""
+    normalized = str(team_name or "").strip()
+    if not normalized:
+        return "?"
+
+    lowered = normalized.lower()
+    if lowered in {"resources capital", "resources capital fc", "rcfc"}:
+        return "RCFC"
+
+    normalized = re.sub(r"\(\d+\.\)", "", normalized).strip()
+    normalized = re.sub(r"\bDistrict\b", "Dt.", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\bDist\.?\b", "Dt.", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"Dt\.\.+", "Dt.", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    normalized = re.sub(r"\s+\.", ".", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized
 
 
 def _card_icon(color: str, size: str = "14px", class_name: str = "me-1") -> html.I:
@@ -563,8 +573,8 @@ def _card_icon(color: str, size: str = "14px", class_name: str = "me-1") -> html
 
 
 def _team_pill(name: str, logo_url, reverse: bool = False) -> html.Div:
-    """Small team block: logo + name (or name + logo when reverse=True)."""
-    
+    """Small team block: outer name + inner crest (or mirrored when reverse=True)."""
+    display_name = _normalize_timeline_team_name(name)
     resolved_logo = None
     
     # 1. Intentar resolver localmente por nombre
@@ -595,7 +605,9 @@ def _team_pill(name: str, logo_url, reverse: bool = False) -> html.Div:
                 "height": "28px",
                 "objectFit": "contain",
                 "borderRadius": "50%",
+                "flexShrink": "0",
             },
+            alt=name or "Team crest",
         )
     else:
         badge = html.Span(
@@ -614,12 +626,13 @@ def _team_pill(name: str, logo_url, reverse: bool = False) -> html.Div:
             },
         )
     label = html.Span(
-        name or "?",
-        className="small text-truncate me-1" if reverse else "small text-truncate ms-1",
-        style={"maxWidth": "70px"},
+        display_name,
+        className="small text-truncate me-2" if reverse else "small text-truncate ms-2",
+        style={"maxWidth": "84px"},
     )
-    children = [label, badge] if reverse else [badge, label]
-    return html.Div(children, className="d-flex align-items-center")
+    children = [badge, label] if reverse else [label, badge]
+    justify = "justify-content-end" if reverse else "justify-content-start"
+    return html.Div(children, className=f"d-flex align-items-center {justify}", style={"minWidth": "0", "gap": "6px"})
 
 
 def _build_header_label(
@@ -728,9 +741,15 @@ def _build_header_label(
         
         status_pill = None
         if status == "LIVE":
-            status_pill = dbc.Badge("LIVE", color="danger", className="ms-2 animate-glass-pulse")
+            status_pill = dbc.Badge(
+                "LIVE",
+                className="ms-2 animate-glass-pulse live-status-badge",
+            )
         elif status == "Pending Update":
-            status_pill = dbc.Badge("Awaiting Stats", color="warning", className="ms-2 text-dark")
+            status_pill = dbc.Badge(
+                "Awaiting Stats",
+                className="ms-2 pending-update-badge",
+            )
             
         return [
             html.Div([
@@ -743,10 +762,10 @@ def _build_header_label(
                     html.Span("vs", className="portal-text-muted mx-2 small"),
                     _team_pill(away, away_logo, reverse=True),
                 ],
-                className="d-flex align-items-center card-row--teams",
+                className="d-flex align-items-center justify-content-center gap-1 card-row--teams",
             ),
             html.Div(
-                [_lucide("clock"), html.Small(kickoff, className="ms-1")],
+                [_bi("clock"), html.Small(kickoff, className="ms-1")],
                 className="d-flex align-items-center portal-text-muted",
             ),
         ]
@@ -759,13 +778,14 @@ def _build_header_label(
     home_logo = payload.get("home_logo")
     away_logo = payload.get("away_logo")
     result = payload.get("result")  # e.g. "2:1" from TM
+    penalties = payload.get("penalties")
 
     badge = _comp_badge(competition)
 
     # Row 2: home logo | home name | result | away name | away logo
     score_el = html.Span(
-        result if result else "- : -",
-        className="fw-bold small mx-2",
+        _format_match_result(result, penalties),
+        className="fw-bold small mx-1",
         style={"color": "var(--text-primary, #fff)", "whiteSpace": "nowrap"},
     )
     match_row = html.Div(
@@ -774,14 +794,14 @@ def _build_header_label(
             score_el,
             _team_pill(away, away_logo, reverse=True),
         ],
-        className="d-flex align-items-center card-row--teams",
+        className="d-flex align-items-center justify-content-center gap-1 card-row--teams",
     )
 
     return [
         html.Div(badge, className="card-row--competition") if badge else None,
         match_row,
         html.Div(
-            [_lucide("clock"), html.Small(kickoff, className="ms-1")],
+            [_bi("clock"), html.Small(kickoff, className="ms-1")],
             className="d-flex align-items-center portal-text-muted",
         ),
     ]
@@ -823,19 +843,18 @@ def _build_collapse_content(
             rows.append(
                 html.Div(
                     [
-                        _lucide("activity"),
+                        _bi("broadcast"),
                         html.Small("Match in progress. Performance data will be available after official confirmation.", 
-                                   className="text-danger fw-bold"),
+                                   className="fw-bold live-status-text"),
                     ],
-                    className="d-flex align-items-center gap-1 mb-2 border border-danger border-opacity-25 rounded p-1",
-                    style={"backgroundColor": "rgba(220, 53, 69, 0.05)"}
+                    className="d-flex align-items-center gap-1 mb-2 live-status-panel rounded p-1",
                 )
             )
         elif status == "Pending Update":
             rows.append(
                 html.Div(
                     [
-                        _lucide("clock"),
+                        _bi("clock-history"),
                         html.Small("Finished. Awaiting official statistics update from Transfermarkt.", 
                                    className="text-warning fw-bold"),
                     ],
@@ -851,7 +870,7 @@ def _build_collapse_content(
             rows.append(
                 html.Div(
                     [
-                        _lucide("map-pin"),
+                        _bi("geo-alt"),
                         html.Small(stadium, className="portal-text-muted"),
                     ],
                     className="d-flex align-items-center gap-1 mb-1",
@@ -862,7 +881,7 @@ def _build_collapse_content(
             rows.append(
                 html.Div(
                     [
-                        _lucide("tv"),
+                        _bi("tv"),
                         html.A(
                             platform_label if platform_label else "Watch Stream",
                             href=_clean_url(streaming_url),
@@ -878,7 +897,7 @@ def _build_collapse_content(
             rows.append(
                 html.Div(
                     [
-                        _lucide("tv-off"),
+                        _bi("tv"),
                         html.Small(
                             "No Streaming",
                             className="portal-text-muted",
@@ -897,7 +916,7 @@ def _build_collapse_content(
                 html.Div(
                     [
                         html.Small(
-                            [_lucide("shield"), h2h_txt],
+                            [_bi("shield"), h2h_txt],
                             className="portal-text-muted d-block mb-1",
                         ),
                         html.Div(
@@ -934,7 +953,7 @@ def _build_collapse_content(
         else:
             rows.append(
                 html.Div(
-                    [_lucide("shield"), html.Small("H2H: sin datos", className="portal-text-muted")],
+                    [_bi("shield"), html.Small("H2H: sin datos", className="portal-text-muted")],
                     className="d-flex align-items-center gap-1",
                 )
             )
@@ -947,7 +966,7 @@ def _build_collapse_content(
             rows.append(
                 html.Div(
                     [
-                        _lucide("map-pin"),
+                        _bi("geo-alt"),
                         html.Small(stadium, className="portal-text-muted"),
                     ],
                     className="d-flex align-items-center gap-1 mb-1",
@@ -960,7 +979,7 @@ def _build_collapse_content(
         own_goals = int(payload.get("own_goals", 0) or 0)
         yellow = int(payload.get("yellow_cards", 0) or 0)
         red = int(payload.get("red_cards", 0) or 0)
-        position = payload.get("position", "N/A")
+        position = _display_match_position(payload.get("position", "N/A"))
         sub_in = payload.get("subbed_in")
         sub_out = payload.get("subbed_out")
 
@@ -971,15 +990,9 @@ def _build_collapse_content(
             rows.append(
                 html.Div(
                     [
-                        html.Small(
-                            [
-                                _lucide("user"),
-                                html.Span(
-                                    f"Pos: {position}", className="fw-bold text-white"
-                                ),
-                            ],
-                            className="portal-text-muted me-auto",
-                        ),
+                        _bi("person"),
+                        html.Small("Pos:", className="portal-text-muted fw-semibold me-2"),
+                        html.Span(position, className="portal-position-chip"),
                     ],
                     className="d-flex align-items-center mb-2",
                 )
@@ -990,7 +1003,7 @@ def _build_collapse_content(
                 html.Div([
                     html.I(className="bi bi-stopwatch me-1", style={"fontSize": "0.85rem"}),
                     html.Span(f"{minutes}'"),
-                ], className="portal-text-muted d-flex align-items-center justify-content-center", style={"flex": "1 1 0", "minWidth": "0"}),
+                ], className="portal-text-muted d-flex align-items-center justify-content-start", style={"flex": "1 1 0", "minWidth": "0"}),
                 
                 html.Div([
                     html.Img(src="/assets/icons/soccer-ball.svg", style={"width": "14px", "height": "14px", "opacity": "0.85"}, className="me-1"),
@@ -998,7 +1011,7 @@ def _build_collapse_content(
                 ], className="portal-text-muted d-flex align-items-center justify-content-center", style={"flex": "1 1 0", "minWidth": "0"}),
 
                 html.Div([
-                    html.I(**{"data-lucide": "sport-shoe"}, style={"width": "14px", "height": "14px", "opacity": "0.85"}, className="me-1"),
+                    _bi("activity", style={"fontSize": "0.85rem", "opacity": "0.85"}),
                     html.Span(f"{assists}A"),
                 ], className="portal-text-muted d-flex align-items-center justify-content-center", style={"flex": "1 1 0", "minWidth": "0"}),
             ]
@@ -1037,14 +1050,14 @@ def _build_collapse_content(
             if sub_in is not None:
                 sub_info.append(
                     html.Small(
-                        [_lucide("log-in"), f"In: {sub_in}'"],
+                        [_bi("box-arrow-in-right"), f"In: {sub_in}'"],
                         className="text-success me-2",
                     )
                 )
             if sub_out is not None:
                 sub_info.append(
                     html.Small(
-                        [_lucide("log-out"), f"Out: {sub_out}'"],
+                        [_bi("box-arrow-right"), f"Out: {sub_out}'"],
                         className="text-warning",
                     )
                 )
@@ -1074,16 +1087,20 @@ def _build_collapse_content(
                 "suspended": ("danger", "Suspension"),
                 "Banquillo": ("info", "Bench (Unused)"),
                 "bench": ("info", "Bench (Unused)"),
+                "No jugado": ("danger", "Did Not Play"),
+                "No jugo": ("danger", "Did Not Play"),
+                "Not played": ("danger", "Did Not Play"),
+                "not_played": ("danger", "Did Not Play"),
             }
             reason_raw = absence_reason or "No jugado"
-            badge_info = _ABSENCE_LABELS.get(reason_raw, ("light", reason_raw))
+            badge_info = _ABSENCE_LABELS.get(reason_raw, ("danger", "Did Not Play"))
 
             rows.append(
                 html.Div(
                     [
-                        _lucide("user-x"),
+                        _bi("person-x"),
                         dbc.Badge(
-                            badge_info[1], color=badge_info[0], className="small"
+                            badge_info[1], color=badge_info[0], className="small text-white"
                         ),
                     ],
                     className="d-flex align-items-center gap-2",
@@ -1106,7 +1123,7 @@ def _build_collapse_content(
             if mins <= 0:
                 continue
 
-            comp = m.get("competition", "Other")
+            comp = _normalize_comp(m.get("competition", "Other")) or "Other"
             if comp not in comp_agg:
                 comp_agg[comp] = {"pj": 0, "goals": 0, "assists": 0, "minutes": 0, "yellow": 0, "red": 0}
             
@@ -1124,7 +1141,7 @@ def _build_collapse_content(
                 style={"fontSize": "0.6rem", "letterSpacing": "0.05em"},
             )
         )
-        for comp, stats in comp_agg.items():
+        for comp, stats in sorted(comp_agg.items(), key=lambda item: (-item[1]["pj"], item[0])):
             # Competition Logo with Tooltip
             logo_el = _competition_logo_img(comp)
             
@@ -1262,7 +1279,9 @@ def _render_milestone_item(
     # Special case: LIVE status uses 'danger' color.
     status = payload.get("confirmation_status")
     if status == "LIVE":
-        color = "danger"
+        color = "live"
+    elif status == "Pending Update":
+        color = "success"
     else:
         color = _COLOR_MAP.get(m_type, "secondary")
         
@@ -1512,6 +1531,19 @@ def register_player_portal_callbacks(app):
     """Registers all Player Portal callbacks."""
 
     @app.callback(
+        Output("timeline-context-store", "data", allow_duplicate=True),
+        Output("selected-year-store", "data", allow_duplicate=True),
+        Output("timeline-expand-store", "data", allow_duplicate=True),
+        Input("url", "pathname"),
+        prevent_initial_call="initial_duplicate",
+    )
+    def reset_portal_navigation_state(pathname):
+        """Ensures the portal mounts with a clean collapsed navigation state."""
+        if pathname != "/player-portal":
+            return no_update, no_update, no_update
+        return None, None, []
+
+    @app.callback(
         Output("season-asset-modal", "is_open"),
         Output("season-asset-modal-image", "src"),
         Output("season-asset-modal-title", "children"),
@@ -1631,11 +1663,13 @@ def register_player_portal_callbacks(app):
 
             aggregator = TimelineAggregator(data_manager=get_hong_kong_data_manager())
             milestones = aggregator.get_player_timeline(player_id)
+            _log_timeline_snapshot(player_id, milestones, "RAW")
 
             if not milestones:
                 return no_update if current_data == [] else []
 
             serialized = _serialize_milestones(milestones)
+            _log_timeline_snapshot(player_id, serialized, "SERIALIZED")
             if serialized == current_data:
                 return no_update
             return serialized
@@ -1734,9 +1768,10 @@ def register_player_portal_callbacks(app):
         Output("timeline-milestones", "children"),
         Output("timeline-expand-store", "data"),
         Input("milestones-data-store", "data"),
+        Input("timeline-pagination-store", "data"),
         prevent_initial_call=True,
     )
-    def render_timeline_milestones(milestones_data):
+    def render_timeline_milestones(milestones_data, pagination_store):
         """
         Renders milestone items grouped by season in .season-section divs.
         Career milestones act as season headers; match groups visibility
@@ -1773,6 +1808,22 @@ def register_player_portal_callbacks(app):
         sorted_years = sorted(groups.keys(), reverse=True)
         expand_ids = _get_default_expand_ids(milestones_data)
         expand_ids_set = set(expand_ids)
+        
+        # PERSISTENCE: Build generated set from store + disk check
+        generated_set = set((pagination_store or {}).get("generated", {}).keys())
+        u_id = str(current_user.id) if current_user and current_user.is_authenticated else None
+        
+        # Cross-reference with disk for session persistence
+        if u_id:
+            from utils.stage_helpers import get_cached_image_path
+            for m in milestones_data:
+                mid = m.get("id")
+                if mid and mid not in generated_set:
+                    # PROACTIVE DISK CHECK: uses robust logic (metadata, standard names, etc)
+                    cached_path = get_cached_image_path(mid, player_id=u_id)
+                    if cached_path:
+                        generated_set.add(mid)
+                        logger.debug(f"Persistence found generated card for {mid} at {cached_path}")
 
         sections = []
         for year in sorted_years:
@@ -1783,6 +1834,29 @@ def register_player_portal_callbacks(app):
                 (m for m in year_milestones if m.get("type") == "career"), None
             )
             match_milestones = [m for m in year_milestones if m.get("type") != "career"]
+            match_milestones = sorted(
+                match_milestones,
+                key=_get_timeline_priority,
+            )
+            try:
+                logger.debug(
+                    "[TIMELINE_RENDER_ORDER] player_id=%s year=%s order=%s",
+                    getattr(current_user, "player_id", None) or "unknown",
+                    year,
+                    [
+                        {
+                            "id": m.get("id"),
+                            "type": m.get("type"),
+                            "status": (m.get("payload") or {}).get("confirmation_status"),
+                            "label": m.get("label"),
+                            "date": str(m.get("date") or ""),
+                            "priority": _get_timeline_priority(m),
+                        }
+                        for m in match_milestones
+                    ],
+                )
+            except Exception as exc:
+                logger.debug("timeline render order log error: %s", exc)
 
             items = []
 
@@ -1791,6 +1865,7 @@ def register_player_portal_callbacks(app):
                 career_item = _render_milestone_item(
                     career_m,
                     initial_open=career_m.get("id") in expand_ids_set,
+                    generated_set=generated_set,
                 )
                 career_id = career_m.get("id")
             else:
@@ -1803,6 +1878,7 @@ def register_player_portal_callbacks(app):
                     _render_milestone_item(
                         m,
                         initial_open=m.get("id") in expand_ids_set,
+                        generated_set=generated_set,
                         hidden=(i >= 5),
                     )
                     for i, m in enumerate(match_milestones)
@@ -1879,33 +1955,24 @@ def register_player_portal_callbacks(app):
         Output("timeline-context-store", "data"),
         Input({"type": "timeline-milestone", "index": ALL}, "n_clicks"),
         Input({"type": "milestone-detail-btn", "index": ALL}, "n_clicks"),
-        Input("selected-year-store", "data"),
+        Input({"type": "milestone-header", "index": ALL}, "n_clicks"),
         State("milestones-data-store", "data"),
         State("timeline-context-store", "data"),
         prevent_initial_call=True,
     )
     def select_milestone(
-        milestone_clicks, detail_clicks, selected_year, milestones_data, current_context
+        milestone_clicks, detail_clicks, header_clicks, milestones_data, current_context
     ):
-        """Updates the context store when a milestone icon, Ver Detalle, or year chip is clicked."""
+        """Updates the context store when a milestone icon or detail CTA is clicked."""
         if not ctx.triggered_id or not milestones_data:
             return no_update
 
         triggered = ctx.triggered_id
 
-        # Year chip: find career milestone for the selected year
-        if triggered == "selected-year-store":
-            if not selected_year:
-                return no_update
-            for m in milestones_data:
-                m_year = m.get("group_year") or str(m.get("date", ""))[:4]
-                if m.get("type") == "career" and m_year == str(selected_year):
-                    return {"id": m.get("id"), "type": "career", "payload": m["payload"]}
-            return no_update
-
         if isinstance(triggered, dict) and triggered.get("type") in (
             "timeline-milestone",
             "milestone-detail-btn",
+            "milestone-header",
         ):
             # Guard: Dash 4 fires ALL-pattern callbacks when components are dynamically
             # added to the DOM (n_clicks=0). Only process genuine user clicks.
@@ -1929,6 +1996,57 @@ def register_player_portal_callbacks(app):
                     if parent:
                         context["parent"] = parent
                 return context
+
+        return no_update
+
+    @app.callback(
+        Output("timeline-context-store", "data", allow_duplicate=True),
+        Input({"type": "milestone-header", "index": ALL}, "n_clicks"),
+        State("timeline-expand-store", "data"),
+        State("milestones-data-store", "data"),
+        State("timeline-context-store", "data"),
+        prevent_initial_call=True,
+    )
+    def sync_context_on_header_toggle(header_clicks, expand_store, milestones_data, current_context):
+        """Clears or restores stage context when a currently open timeline header is collapsed."""
+        if not ctx.triggered_id or not milestones_data:
+            return no_update
+
+        triggered = ctx.triggered_id
+        if not isinstance(triggered, dict) or triggered.get("type") != "milestone-header":
+            return no_update
+
+        trigger_value = ctx.triggered[0].get("value", 0) if ctx.triggered else 0
+        if not trigger_value:
+            return no_update
+
+        milestone_id = triggered.get("index")
+        if not milestone_id:
+            return no_update
+
+        open_ids = set(expand_store or [])
+        is_currently_open = milestone_id in open_ids
+        if not is_currently_open:
+            return no_update
+
+        milestone = next(
+            (item for item in (milestones_data or []) if item.get("id") == milestone_id),
+            None,
+        )
+        if not milestone:
+            return no_update
+
+        milestone_type = milestone.get("type")
+        active_id = (current_context or {}).get("id")
+        active_parent_id = ((current_context or {}).get("parent") or {}).get("id")
+
+        if milestone_type == "career":
+            if active_id == milestone_id or active_parent_id == milestone_id:
+                return None
+            return no_update
+
+        if active_id == milestone_id:
+            return (current_context or {}).get("parent") or None
 
         return no_update
 
@@ -1968,6 +2086,7 @@ def register_player_portal_callbacks(app):
                 get_development_priorities,
             )
             from utils.domain_ai import synthesize_career_dashboard_ai_payload
+            from utils.domain_ai.career_dashboard_ai import normalize_career_dashboard_brief_payload
             from utils.stage_helpers import _fetch_dashboard_data
 
             player_id, player_name, _user_role = _get_active_player_identity()
@@ -1986,7 +2105,8 @@ def register_player_portal_callbacks(app):
                 career_signals,
                 development_priorities,
             )
-            return synthesized.get("payload") if isinstance(synthesized, dict) else no_update
+            normalized = normalize_career_dashboard_brief_payload(synthesized)
+            return normalized or no_update
         except Exception as exc:
             logger.debug(f"build_career_dashboard_ai_brief error: {exc}")
             return no_update
@@ -2132,6 +2252,7 @@ def register_player_portal_callbacks(app):
         Output("portal-viewport", "className"),
         Output("portal-panel-state", "data"),
         Input({"type": "milestone-detail-btn", "index": ALL}, "n_clicks"),
+        Input({"type": "action-node-pill", "index": ALL}, "n_clicks"),
         Input("portal-back-btn", "n_clicks"),
         prevent_initial_call=True,
     )
@@ -2173,67 +2294,82 @@ def register_player_portal_callbacks(app):
         Output("card-editor-state", "data", allow_duplicate=True),
         Output("gallery-close-btn", "style", allow_duplicate=True),
         Output("player-photos-store", "data", allow_duplicate=True),
+        Output("card-viewer-modal", "is_open"),
+        Output("card-viewer-modal-content", "children"),
         Input({"type": "action-node-pill", "index": ALL}, "n_clicks"),
         State("milestones-data-store", "data"),
         State("timeline-pagination-store", "data"),
         prevent_initial_call=True,
     )
     def handle_action_node_pill(n_clicks_list, milestones_data, pagination_store):
-        """Open Card Studio on first click; show gallery if already generated."""
+        """Open Card Studio on first click; show modal viewer if already generated."""
         if not ctx.triggered_id or not any(n_clicks_list or []):
-            return no_update, no_update, no_update, no_update, no_update
+            return no_update, no_update, no_update, no_update, no_update, no_update, no_update
         triggered = ctx.triggered_id
         if (
             not isinstance(triggered, dict)
             or triggered.get("type") != "action-node-pill"
         ):
-            return no_update, no_update, no_update, no_update, no_update
+            return no_update, no_update, no_update, no_update, no_update, no_update, no_update
 
         milestone_id = triggered["index"]
         if not milestones_data:
-            return no_update, no_update, no_update, no_update, no_update
+            return no_update, no_update, no_update, no_update, no_update, no_update, no_update
         m = next(
             (item for item in milestones_data if item.get("id") == milestone_id), None
         )
         if not m:
-            return no_update, no_update, no_update, no_update, no_update
+            return no_update, no_update, no_update, no_update, no_update, no_update, no_update
 
-        store = pagination_store or {}
-        generated = dict(store.get("generated", {}))
-        is_generated = generated.get(milestone_id, False)
-        m_type = m.get("type")
-        payload = m.get("payload", {})
-
-        # Already generated → show gallery from new player_cards dir (with cache fallback)
-        if is_generated:
-            path = get_cached_image_path(milestone_id)
-            return render_image_gallery(path), no_update, no_update, {
-                "display": "inline-flex",
-                "alignItems": "center",
-            }, no_update
-
-        # Only handle card-type milestones
-        if m_type not in ("pre-match", "post-match"):
-            return no_update, no_update, no_update, no_update, no_update
-
-        card_type = m_type
-
-        # Load saved draft if it exists
+        # Identify current player
         try:
             from flask_login import current_user as _cu
-
             player_id = str(_cu.id) if _cu and _cu.is_authenticated else "unknown"
         except Exception:
             player_id = "unknown"
 
-        from pathlib import Path as _Path
+        store = pagination_store or {}
+        generated = dict(store.get("generated", {}))
+        is_generated = generated.get(milestone_id, False)
+        cached_path = None
+        
+        # PERSISTENCE CHECK: if not in store, check disk for finalized card using robust logic
+        if player_id != "unknown":
+            from utils.stage_helpers import get_cached_image_path
+            cached_path = get_cached_image_path(milestone_id, player_id=player_id)
+            if cached_path:
+                is_generated = True
+
+        m_type = m.get("type")
+        payload = m.get("payload", {})
+
+        # Already generated → show card in MODAL without changing stage
+        if is_generated:
+            if cached_path and Path(cached_path).exists():
+                import base64 as _b64
+                with open(cached_path, "rb") as f:
+                    ext = Path(cached_path).suffix.lower().replace(".", "")
+                    mime = f"image/{ext}" if ext != "jpg" else "image/jpeg"
+                    encoded = _b64.b64encode(f.read()).decode()
+                    src = f"data:{mime};base64,{encoded}"
+                
+                modal_content = html.Img(src=src, className="img-fluid rounded", style={"maxHeight": "80vh", "boxShadow": "0 20px 40px rgba(0,0,0,0.5)"})
+                return no_update, no_update, no_update, no_update, no_update, True, modal_content
+            
+            # If we thought it was generated but can't find path, don't open editor if we are in 'Past' mode
+            # unless the user explicitly wants to generate a NEW one (handled below).
+            # For now, if path is missing, we allow falling through to editor as a fallback.
+
+        # Only handle card-type milestones
+        if m_type not in ("pre-match", "post-match"):
+            return no_update, no_update, no_update, no_update, no_update, no_update, no_update
+
+        card_type = m_type
         import json as _json
 
-        draft_path = (
-            _Path("data/player_cards") / player_id / milestone_id / "card_editor.json"
-        )
+        draft_path = resolve_player_cards_path(player_id, milestone_id, "card_editor.json")
         saved_draft = None
-        if draft_path.exists():
+        if draft_path and draft_path.exists():
             try:
                 saved_draft = _json.loads(draft_path.read_text("utf-8"))
             except Exception:
@@ -2254,7 +2390,11 @@ def register_player_portal_callbacks(app):
                 "away_team": payload.get("away_team"),
                 "competition": payload.get("competition"),
                 "date": payload.get("date"),
-                "score": payload.get("score"),
+                "venue": payload.get("venue") or payload.get("stadium"),
+                "score": payload.get("score") or payload.get("result"),
+                "result": payload.get("result"),
+                "rating": payload.get("rating"),
+                "started": payload.get("started"),
             }
 
             if saved_draft:
@@ -2284,20 +2424,30 @@ def register_player_portal_callbacks(app):
                     "editor_active": True,
                 }
 
-            # For saved drafts show the last preview; for fresh cards the progress view renders via callback
-            initial_preview = None
-            if saved_draft:
-                from callbacks.card_editor_callbacks import _build_preview_layout
-                initial_preview = _build_preview_layout(editor_state, {"album": album}, milestones_data)
+            # Restore design history and last card from persistent metadata
+            from callbacks.card_editor_callbacks import _build_preview_layout, _get_card_metadata
+            meta = _get_card_metadata(str(player_id), str(milestone_id))
+            existing_designs = meta.get("designs", [])
+            last_card = meta.get("final_card") or (existing_designs[-1].get("path") if existing_designs and isinstance(existing_designs[-1], dict) else (existing_designs[-1] if existing_designs else None))
+            editor_state["design_history"] = existing_designs
+            if not editor_state.get("generated_card_path") and last_card:
+                editor_state["generated_card_path"] = last_card
+
+            # Pre-render the initial preview (blueprint) so it's visible immediately
+            initial_preview = _build_preview_layout(editor_state, {"album": album}, milestones_data)
 
             if card_type == "pre-match":
-                studio = create_pre_game_card_studio(milestone_id, match_context, [], initial_preview=initial_preview, album=album, selected_idx=editor_state.get("selected_photo_idx"))
+                studio = create_pre_game_card_studio(
+                    milestone_id, match_context, album=album, selected_idx=editor_state.get("selected_photo_idx"), initial_preview=initial_preview
+                )
             else:
-                studio = create_performance_card_studio(milestone_id, match_context, [], initial_preview=initial_preview, album=album, selected_idx=editor_state.get("selected_photo_idx"))
+                studio = create_performance_card_studio(
+                    milestone_id, match_context, album=album, selected_idx=editor_state.get("selected_photo_idx"), initial_preview=initial_preview
+                )
 
             # Populate store with THIS player's photos — prevents cross-player data bleed
             photos_store = {"album": album, "player_id": player_id}
-            return studio, no_update, editor_state, {"display": "none"}, photos_store
+            return studio, no_update, editor_state, {"display": "none"}, photos_store, False, None
         except Exception as exc:
             logger.error(f"handle_action_node_pill studio render error: {exc}")
             return (
@@ -2306,6 +2456,8 @@ def register_player_portal_callbacks(app):
                 no_update,
                 {"display": "none"},
                 no_update,
+                False,
+                None,
             )
 
     # ------------------------------------------------------------------ #
@@ -2371,6 +2523,12 @@ def register_player_portal_callbacks(app):
 
 def _serialize_milestones(milestones: list) -> list:
     """Converts datetime objects to ISO strings and adds unique IDs for Phase 3."""
+    def _slug(value: object) -> str:
+        raw = str(value or "").lower()
+        raw = re.sub(r"\(\d+\.\)", "", raw)
+        raw = re.sub(r"[^a-z0-9]+", "-", raw).strip("-")
+        return raw or "na"
+
     result = []
     for m in milestones:
         entry = dict(m)
@@ -2378,17 +2536,27 @@ def _serialize_milestones(milestones: list) -> list:
         if hasattr(date_obj, "isoformat"):
             entry["date"] = date_obj.isoformat()
 
-        # Generate Unique ID (Task 7.1)
-        # Format: {type}-{date/season}
+        # Generate stable unique IDs per milestone.
         m_type = entry.get("type", "unknown")
         date_str = entry["date"][:10] if isinstance(entry["date"], str) else "no-date"
-        if m_type == "career":
-            date_str = entry.get("payload", {}).get("season", date_str)
-        entry["id"] = f"{m_type}-{date_str}"
-
         payload = dict(entry.get("payload", {}))
         if hasattr(payload.get("date"), "isoformat"):
             payload["date"] = payload["date"].isoformat()
+
+        if m_type == "career":
+            season_key = payload.get("season", date_str)
+            entry["id"] = f"career-{_slug(season_key)}"
+        elif m_type in {"pre-match", "post-match"}:
+            home_key = _slug(payload.get("home_team"))
+            away_key = _slug(payload.get("away_team"))
+            comp_key = _slug(payload.get("competition"))
+            entry["id"] = f"{m_type}-{date_str}-{home_key}-vs-{away_key}-{comp_key}"
+        elif m_type == "injury":
+            entry["id"] = f"injury-{date_str}-{_slug(payload.get('type'))}"
+        elif m_type == "ai-insight":
+            entry["id"] = f"ai-insight-{date_str}-{_slug(payload.get('title') or entry.get('label'))}"
+        else:
+            entry["id"] = f"{m_type}-{date_str}-{_slug(entry.get('label'))}"
 
         # Ensure intelligence metrics are properly typed for JS (Task 3.2)
         if "rating" in payload and payload["rating"] is not None:
@@ -2976,3 +3144,47 @@ def register_career_intelligence_callbacks(app):
             ], className=f"insight-inbox-item {tier_class}"))
 
         return items
+
+    # ── Loading Color System: pre-flight clientside callbacks ────────────────
+    # These fire before the server callbacks (no network round-trip) so the
+    # stage-shell data-loading-type attribute is set while data-dash-is-loading
+    # becomes true, giving the dot the correct color immediately.
+
+    # Milestone/card clicks → data (amber)
+    app.clientside_callback(
+        """function() {
+            var el = document.getElementById('stage-shell');
+            if (el) el.dataset.loadingType = 'data';
+            return window.dash_clientside.no_update;
+        }""",
+        Output("stage-loading-type-sync-dummy", "data"),
+        Input({"type": "timeline-milestone", "index": ALL}, "n_clicks"),
+        Input({"type": "milestone-detail-btn", "index": ALL}, "n_clicks"),
+        Input({"type": "milestone-header", "index": ALL}, "n_clicks"),
+        Input({"type": "action-node", "index": ALL}, "n_clicks"),
+        prevent_initial_call=True,
+    )
+
+    # AI insight card clicks → ai (purple)
+    app.clientside_callback(
+        """function() {
+            var el = document.getElementById('stage-shell');
+            if (el) el.dataset.loadingType = 'ai';
+            return window.dash_clientside.no_update;
+        }""",
+        Output("stage-loading-type-sync-dummy", "data", allow_duplicate=True),
+        Input({"type": "ai-insight-card", "index": ALL}, "n_clicks"),
+        prevent_initial_call=True,
+    )
+
+    # career-dashboard-brief-store update → ai (purple; AI results rendering)
+    app.clientside_callback(
+        """function() {
+            var el = document.getElementById('stage-shell');
+            if (el) el.dataset.loadingType = 'ai';
+            return window.dash_clientside.no_update;
+        }""",
+        Output("stage-loading-type-sync-dummy", "data", allow_duplicate=True),
+        Input("career-dashboard-brief-store", "data"),
+        prevent_initial_call=True,
+    )

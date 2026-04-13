@@ -1,15 +1,17 @@
-import json
 import re
-from pathlib import Path
 
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Optional, Union, Any
 import logging
+from datetime import datetime
 
 from data.aggregators.tactical_analyzer import TacticalAnalyzer
 from utils.efficiency_metrics import EfficiencyMetricsCalculator, PercentileRankingSystem
 from data.validators.advanced_metrics_validator import AdvancedMetricsValidator
+from models.db_models import MatchHistory, Player
+from utils.db_engine import SessionFactory
+from sqlalchemy import select
 
 logger = logging.getLogger(__name__)
 
@@ -1330,10 +1332,6 @@ class HongKongStatsAggregator:
         return self.get_available_entities('players', team_name)
 
 
-# ── Module-level helpers for timeline enrichment ──────────────────────────────
-
-_HISTORICAL_RECORDS_DIR = Path(__file__).parent.parent / "historical_records"
-
 # Wyscout player_id → Transfermarkt numeric ID (mirrors TM_ID_MAP in timeline_aggregator)
 _WYSCOUT_TO_TM: Dict[str, str] = {
     "148891": "160182",  # José Ángel
@@ -1344,7 +1342,7 @@ _WYSCOUT_TO_TM: Dict[str, str] = {
 
 def get_season_summary(player_id: str, season: str) -> Dict:
     """
-    Returns aggregated season stats for a player from local Transfermarkt historical records.
+    Returns aggregated season stats for a player from SQL match_history.
 
     Args:
         player_id: Wyscout or TM player ID.
@@ -1355,50 +1353,66 @@ def get_season_summary(player_id: str, season: str) -> Dict:
         by_competition (list of {competition, pj, goals, assists}).
         Returns empty dict on error.
     """
-    # Resolve TM ID: accept both Wyscout IDs (converted) and direct TM IDs
-    tm_id = _WYSCOUT_TO_TM.get(player_id, player_id)
-    record_path = _HISTORICAL_RECORDS_DIR / f"{tm_id}.json"
-
-    if not record_path.exists():
-        logger.debug(f"Historical records not found for TM ID {tm_id}")
-        return {}
-
     try:
-        data = json.loads(record_path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        logger.warning(f"Failed to read historical records for {tm_id}: {exc}")
+        start_year = int(str(season).split("-")[0])
+        season_start = datetime(start_year, 7, 1)
+        season_end = datetime(start_year + 1, 6, 30, 23, 59, 59)
+    except Exception:
         return {}
 
-    season_data = data.get("seasons", {}).get(season)
-    if not season_data:
-        logger.debug(f"Season {season} not found in records for TM ID {tm_id}")
-        return {}
+    resolved_player_id = player_id
+    tm_id = _WYSCOUT_TO_TM.get(player_id, player_id)
+    with SessionFactory() as session:
+        if not session.get(Player, resolved_player_id):
+            try:
+                player = session.execute(
+                    select(Player).where(Player.tm_id == int(tm_id))
+                ).scalars().first()
+            except Exception:
+                player = None
+            if not player:
+                return {}
+            resolved_player_id = player.id
 
-    matches: List[Dict] = season_data.get("matches", [])
-    summary = season_data.get("summary", {})
+        rows = session.execute(
+            select(MatchHistory)
+            .where(
+                MatchHistory.player_id == resolved_player_id,
+                MatchHistory.date >= season_start,
+                MatchHistory.date <= season_end,
+            )
+        ).scalars().all()
+    if not rows:
+        return {}
 
     # Aggregate by competition
     comp_stats: Dict[str, Dict] = {}
-    for m in matches:
+    total_goals = 0
+    total_assists = 0
+    total_minutes = 0
+    for row in rows:
         # ONLY count as a played match if minutes > 0
-        mins = int(m.get("minutes_played", 0) or 0)
+        mins = int(row.minutes_played or 0)
         if mins <= 0:
             continue
 
-        comp = m.get("competition", "Unknown")
+        comp = row.competition_name or "Unknown"
         if comp not in comp_stats:
             comp_stats[comp] = {"competition": comp, "pj": 0, "goals": 0, "assists": 0}
         
         comp_stats[comp]["pj"] += 1
-        comp_stats[comp]["goals"] += int(m.get("goals", 0) or 0)
-        comp_stats[comp]["assists"] += int(m.get("assists", 0) or 0)
+        comp_stats[comp]["goals"] += int(row.goals or 0)
+        comp_stats[comp]["assists"] += int(row.assists or 0)
+        total_goals += int(row.goals or 0)
+        total_assists += int(row.assists or 0)
+        total_minutes += mins
 
     return {
         "season": season,
         "pj": sum(c["pj"] for c in comp_stats.values()),
-        "goals": summary.get("goals", 0),
-        "assists": summary.get("assists", 0),
-        "minutes": summary.get("minutes_played", 0),
+        "goals": total_goals,
+        "assists": total_assists,
+        "minutes": total_minutes,
         "by_competition": list(comp_stats.values()),
     }
 
@@ -1439,10 +1453,7 @@ def _parse_h2h_match(opponent_field: str, result: str) -> Optional[Dict]:
 
 def get_h2h_record(team_a: str, team_b: str, last_n: Optional[int] = None) -> Dict:
     """
-    Returns head-to-head record for team_a vs team_b from local historical records.
-
-    Scans all files in data/historical_records/ and collects unique matches
-    where both teams appear. Reports W/D/L for team_a.
+    Returns head-to-head record for team_a vs team_b from SQL match_history.
 
     Args:
         team_a: English team name (home team perspective for W/D/L).
@@ -1455,30 +1466,30 @@ def get_h2h_record(team_a: str, team_b: str, last_n: Optional[int] = None) -> Di
     team_a_lower = _normalize_team_name_for_h2h(team_a)
     team_b_lower = _normalize_team_name_for_h2h(team_b)
 
-    # Collect unique matches keyed by (date, opponent_field) to avoid duplicates
+    # Collect unique matches keyed by date/opponent/result to avoid one row per player.
     seen: Dict[str, Dict] = {}
+    with SessionFactory() as session:
+        rows = session.execute(
+            select(MatchHistory.date, MatchHistory.opponent, MatchHistory.result)
+            .where(
+                MatchHistory.opponent.is_not(None),
+                MatchHistory.result.is_not(None),
+            )
+        ).all()
 
-    for record_path in _HISTORICAL_RECORDS_DIR.glob("*.json"):
-        try:
-            data = json.loads(record_path.read_text(encoding="utf-8"))
-        except Exception:
+    for date_value, opponent_field, result in rows:
+        parsed = _parse_h2h_match(opponent_field or "", result or "")
+        if not parsed:
             continue
 
-        for season_data in data.get("seasons", {}).values():
-            for m in season_data.get("matches", []):
-                parsed = _parse_h2h_match(m.get("opponent", ""), m.get("result", ""))
-                if not parsed:
-                    continue
-
-                h_lower = _normalize_team_name_for_h2h(parsed["home_team"])
-                a_lower = _normalize_team_name_for_h2h(parsed["away_team"])
-
-                # Check if both teams are in this match
-                teams_in_match = {h_lower, a_lower}
-                if team_a_lower in teams_in_match and team_b_lower in teams_in_match:
-                    key = f"{m.get('date','')}-{m.get('opponent','')}"
-                    if key not in seen:
-                        seen[key] = {**parsed, "date": m.get("date", "")}
+        h_lower = _normalize_team_name_for_h2h(parsed["home_team"])
+        a_lower = _normalize_team_name_for_h2h(parsed["away_team"])
+        teams_in_match = {h_lower, a_lower}
+        if team_a_lower in teams_in_match and team_b_lower in teams_in_match:
+            date_text = date_value.strftime("%d/%m/%Y") if isinstance(date_value, datetime) else str(date_value or "")
+            key = f"{date_text}-{opponent_field}-{result}"
+            if key not in seen:
+                seen[key] = {**parsed, "date": date_text}
 
     matches = sorted(seen.values(), key=lambda x: x.get("date", ""), reverse=True)
     if last_n is not None:

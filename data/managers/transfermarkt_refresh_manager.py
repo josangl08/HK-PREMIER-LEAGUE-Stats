@@ -17,11 +17,24 @@ from models.db_models import Player, Season
 from utils.common import get_current_season
 from utils.db_engine import SessionFactory
 from utils.proxy_manager import ProxyManager
+from utils.team_logo_api import fetch_team_logo_from_api
 
 
 logger = logging.getLogger(__name__)
 
 MIN_TM_SEASON_START = 2018
+
+
+def _split_opponent_pair(opponent_text: str) -> tuple[str | None, str | None]:
+    text = str(opponent_text or "").strip()
+    if " vs " not in text:
+        return None, None
+    home_raw, away_raw = text.split(" vs ", 1)
+    def _clean(value: str) -> str:
+        cleaned = re.sub(r"\(\d+\.\)", "", value or "").strip()
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned
+    return _clean(home_raw), _clean(away_raw)
 
 
 def _build_extractor(proxy_manager: ProxyManager) -> TransfermarktExtractor:
@@ -147,6 +160,35 @@ class TransfermarktRefreshManager:
                 )
                 break
             if raw_matches:
+                for match in raw_matches:
+                    if match.get("logo_resolution_status") != "pending":
+                        continue
+                    report_url = match.get("match_report_url")
+                    home_team = match.get("home_team")
+                    away_team = match.get("away_team")
+                    if not home_team or not away_team:
+                        parsed_home, parsed_away = _split_opponent_pair(match.get("opponent") or "")
+                        home_team = home_team or parsed_home
+                        away_team = away_team or parsed_away
+                        if home_team:
+                            match["home_team"] = home_team
+                        if away_team:
+                            match["away_team"] = away_team
+
+                    home_logo = fetch_team_logo_from_api(home_team) or match.get("home_logo")
+                    away_logo = fetch_team_logo_from_api(away_team) or match.get("away_logo")
+
+                    if (not home_logo or not away_logo) and report_url and home_team and away_team:
+                        logo_result = self.extractor.resolve_match_report_logos(report_url, home_team, away_team)
+                        home_logo = home_logo or logo_result.get("home_logo")
+                        away_logo = away_logo or logo_result.get("away_logo")
+
+                    if home_logo or away_logo:
+                        match["home_logo"] = home_logo
+                        match["away_logo"] = away_logo
+                        match["logo_resolution_status"] = "resolved"
+                    else:
+                        match["logo_resolution_status"] = "failed"
                 self.tm_manager._upsert_history_to_sql(player_id, raw_matches)
                 any_updated = True
 

@@ -5,12 +5,12 @@ import base64
 from pathlib import Path
 
 import dash_bootstrap_components as dbc
-from dash import html, dcc
+from dash import dcc, html
 from flask_login import current_user
 from sqlalchemy import select
 from sqlalchemy.orm import joinedload
 
-from models.db_models import Player, PlayerPhoto, User, UserPlayerLink
+from models.db_models import Player, User, UserPlayerLink
 from utils.db_engine import Session
 
 
@@ -62,23 +62,19 @@ def _get_user_avatar_src(user_id: str) -> str | None:
         session.close()
 
 
-# Crea la barra de navegación
 def create_navbar(pathname):
-
-    # Definir la estructura de enlaces de navegación
     is_auth = current_user.is_authenticated if current_user else False
-    user_role = getattr(current_user, 'role', 'player') if is_auth else None
-    
-    # Determinar ruta de inicio según rol
+    user_role = getattr(current_user, "role", "player") if is_auth else None
+
     home_href = "/"
-    if user_role == 'player':
+    if user_role == "player":
         home_href = "/player-portal"
-    elif user_role == 'agent':
+    elif user_role == "agent":
         home_href = "/agent-portal"
 
     home_label = "Home"
     home_icon = "bi-house"
-    if user_role == 'player':
+    if user_role == "player":
         home_label = "Player Portal"
         home_icon = "bi-person-circle"
 
@@ -96,7 +92,7 @@ def create_navbar(pathname):
         ),
     ]
 
-    if user_role != 'agent':
+    if user_role != "agent":
         nav_items.append(
             dbc.NavItem(
                 dbc.NavLink(
@@ -111,8 +107,7 @@ def create_navbar(pathname):
             )
         )
 
-    # Portal Agente — visible for admin and agent roles
-    if user_role in ('admin', 'agent'):
+    if user_role in ("admin", "agent"):
         nav_items.append(
             dbc.NavItem(
                 dbc.NavLink(
@@ -127,8 +122,7 @@ def create_navbar(pathname):
             )
         )
 
-    # AI Insights — visible for admin and player roles only (not agent)
-    if user_role in ('admin', 'player'):
+    if user_role in ("admin", "player"):
         nav_items.append(
             dbc.NavItem(
                 dbc.NavLink(
@@ -143,9 +137,8 @@ def create_navbar(pathname):
             )
         )
 
-    # Player Portal — visible for admin only (players already have it as home)
-    if user_role == 'admin':
-         nav_items.append(
+    if user_role == "admin":
+        nav_items.append(
             dbc.NavItem(
                 dbc.NavLink(
                     [
@@ -166,7 +159,6 @@ def create_navbar(pathname):
         else html.I(className="bi bi-person-circle")
     )
 
-    # Agregar información de usuario y botón de logout
     nav_right = dbc.Nav(
         [
             dbc.NavItem(
@@ -207,60 +199,36 @@ def create_navbar(pathname):
                     className="portal-navbar__logout-btn",
                 )
             ),
-            # Location para manejar el logout
             dcc.Location(id="logout-trigger", refresh=True),
         ],
         className="portal-navbar__actions",
         navbar=True,
     )
 
-    # Crear la barra de navegación completa
-    navbar = dbc.Navbar(
+    return dbc.Navbar(
         [
             dbc.Container(
                 [
-                    html.A(
-                        html.Div(
-                            [
-                                html.Div(
-                                    html.Img(
-                                        src="/assets/logo.png",
-                                        alt="HKPL Stats",
-                                        className="portal-navbar__brand-logo",
-                                    ),
-                                    className="portal-navbar__brand-mark",
-                                ),
-                                html.Div(
-                                    [
-                                        html.Span("HKPL Stats", className="portal-navbar__brand-title"),
-                                        html.Span("Player Intelligence", className="portal-navbar__brand-subtitle"),
-                                    ],
-                                    className="portal-navbar__brand-copy",
-                                ),
-                            ],
-                            className="portal-navbar__brand",
-                        ),
-                        href=home_href,
-                        className="portal-navbar__brand-link",
-                    ),
-                    dbc.NavbarToggler(id="navbar-toggler", n_clicks=0, className="portal-navbar__toggler"),
-                    dbc.Collapse(
+                    dbc.NavbarBrand(
                         [
-                            dbc.Nav(nav_items, className="portal-navbar__nav me-auto", navbar=True),
-                            nav_right,
+                            html.Img(src="/assets/logo.png", height="32px", className="me-2"),
+                            html.Span("HK Premier League", className="portal-navbar__brand-text"),
                         ],
-                        id="navbar-collapse",
-                        className="portal-navbar__collapse",
-                        navbar=True,
-                        is_open=False,
+                        href=home_href,
+                        className="portal-navbar__brand",
                     ),
+                    dbc.NavbarToggler(id="navbar-toggler", n_clicks=0),
+                    dbc.Collapse(
+                        dbc.Nav(nav_items, className="me-auto", navbar=True),
+                        id="navbar-collapse",
+                        navbar=True,
+                    ),
+                    nav_right,
                 ],
-                className="portal-navbar__container",
-            ),
+                fluid=True,
+            )
         ],
+        color="dark",
         dark=True,
         className="portal-navbar",
-        expand="lg",
     )
-
-    return navbar

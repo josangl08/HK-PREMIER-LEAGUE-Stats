@@ -12,6 +12,7 @@ from utils.ai_services.evidence_router import normalize_evidence_key
 ALLOWED_CONFIDENCE_LEVELS = ("low", "medium", "high")
 ALLOWED_EMPHASIS_LEVELS = ("neutral", "positive", "warning")
 ALLOWED_CAREER_PHASES = ("development", "building", "peak", "post-peak", "unknown")
+ALLOWED_CAREER_DECISION_PHASES = ("Ambitious", "Keep Pushing", "Maintain Consistency", "Find Consistency")
 ALLOWED_PHASE_ADJUSTMENTS = ("none", "lean_forward", "lean_backward")
 
 
@@ -32,11 +33,16 @@ class InsightPayload:
 class CareerProgressionAssessmentPayload:
     """Guardrailed AI assessment contract for limited progression adjustments."""
 
+    recommended_phase: str
     phase_hypothesis: str
     phase_adjustment: str
     momentum_adjustment: int
     confidence: str
+    context_patterns: tuple[str, ...]
     supporting_factors: tuple[str, ...]
+    blockers: tuple[str, ...]
+    risk_flags: tuple[str, ...]
+    next_condition: str
     contradictions: tuple[str, ...]
     insight_flags: tuple[str, ...]
     rationale: str
@@ -86,6 +92,20 @@ def normalize_career_phase(value: Any, default: str = "unknown") -> str:
     return normalized if normalized in ALLOWED_CAREER_PHASES else default
 
 
+def normalize_career_decision_phase(value: Any, default: str = "Find Consistency") -> str:
+    normalized = str(value or "").strip().lower()
+    for allowed in ALLOWED_CAREER_DECISION_PHASES:
+        if normalized == allowed.lower():
+            return allowed
+    legacy_map = {
+        "push": "Ambitious",
+        "build": "Keep Pushing",
+        "consolidate": "Maintain Consistency",
+        "reposition": "Find Consistency",
+    }
+    return legacy_map.get(normalized, default)
+
+
 def normalize_phase_adjustment(value: Any, default: str = "none") -> str:
     normalized = str(value or "").strip().lower()
     return normalized if normalized in ALLOWED_PHASE_ADJUSTMENTS else default
@@ -110,11 +130,18 @@ def coerce_career_progression_assessment(raw_payload: Any) -> Optional[CareerPro
         return tuple(str(item).strip() for item in raw_items if str(item).strip())
 
     payload = CareerProgressionAssessmentPayload(
+        recommended_phase=normalize_career_decision_phase(
+            raw_payload.get("recommended_phase") or raw_payload.get("label")
+        ),
         phase_hypothesis=normalize_career_phase(raw_payload.get("phase_hypothesis")),
         phase_adjustment=normalize_phase_adjustment(raw_payload.get("phase_adjustment")),
         momentum_adjustment=momentum_adjustment,
         confidence=normalize_confidence(raw_payload.get("confidence", "medium")),
+        context_patterns=_normalize_list("context_patterns"),
         supporting_factors=_normalize_list("supporting_factors"),
+        blockers=_normalize_list("blockers"),
+        risk_flags=_normalize_list("risk_flags"),
+        next_condition=str(raw_payload.get("next_condition") or "").strip(),
         contradictions=_normalize_list("contradictions"),
         insight_flags=_normalize_list("insight_flags"),
         rationale=str(raw_payload.get("rationale") or "").strip(),
@@ -135,7 +162,9 @@ def validate_career_progression_assessment(raw_payload: Any) -> bool:
         return False
     if payload.momentum_adjustment not in (-1, 0, 1):
         return False
-    return bool(payload.rationale)
+    if payload.recommended_phase not in ALLOWED_CAREER_DECISION_PHASES:
+        return False
+    return bool(payload.rationale and payload.next_condition)
 
 
 def build_fallback_evidence_explanation_payload(

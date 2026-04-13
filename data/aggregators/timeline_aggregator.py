@@ -20,6 +20,97 @@ def get_season_from_date(dt: Any) -> str:
     year, month = dt.year, dt.month
     return f"{year}-{str(year+1)[-2:]}" if month >= 8 else f"{year-1}-{str(year)[-2:]}"
 
+
+def _normalize_match_rating(raw_data: dict[str, Any], sofascore_stats: dict[str, Any]) -> float | None:
+    """Return one normalized match rating using the agreed source precedence."""
+    for candidate in (
+        raw_data.get("besoccer_rating"),
+        raw_data.get("rating"),
+        sofascore_stats.get("rating"),
+    ):
+        if candidate in (None, ""):
+            continue
+        try:
+            return float(candidate)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _normalize_score_from_result(result: Any) -> str | None:
+    """Extract a stable score display from historical result strings when possible."""
+    if result in (None, ""):
+        return None
+
+    match = re.search(r"(\d+)\s*[:\-]\s*(\d+)", str(result))
+    if not match:
+        return None
+
+    return f"{match.group(1)}-{match.group(2)}"
+
+
+def _derive_started_status(status: str, minutes_played: int, subbed_in: Any) -> bool | None:
+    """Infer whether the player started while preserving ambiguity when needed."""
+    if status and status != "Jugado":
+        return None
+
+    if subbed_in not in (None, "", 0, "0"):
+        return False
+
+    if minutes_played and int(minutes_played) > 0:
+        return True
+
+    return None
+
+
+def _normalize_competition_key(value: Any) -> str:
+    raw = str(value or "").lower().strip()
+    raw = raw.replace("hong kong", "hk")
+    raw = raw.replace("premier league", "pl")
+    raw = raw.replace("challenge shield", "shield")
+    raw = raw.replace("district", "dist")
+    raw = re.sub(r"[^a-z0-9]+", " ", raw)
+    return " ".join(raw.split())
+
+
+def _normalize_match_text(value: Any) -> str:
+    raw = str(value or "").lower()
+    raw = re.sub(r"\(\d+\.\)", "", raw)
+    raw = raw.replace("north dt.", "north district")
+    raw = raw.replace("eastern dt.", "eastern district")
+    raw = raw.replace(" dist.", " district")
+    raw = raw.replace(" dt.", " district")
+    raw = raw.replace("u23", "u23")
+    raw = re.sub(r"[^a-z0-9]+", " ", raw)
+    return " ".join(raw.split())
+
+
+def _match_history_identity_key(match: MatchHistory) -> tuple:
+    normalized_score = _normalize_score_from_result(match.result) or str(match.result or "").strip()
+    return (
+        match.date.strftime("%Y-%m-%d"),
+        _normalize_match_text(match.opponent),
+        normalized_score,
+        int(match.minutes_played or 0),
+        int(match.goals or 0),
+        int(match.assists or 0),
+        str(match.status or "").strip().lower(),
+    )
+
+
+def _match_history_quality_score(match: MatchHistory) -> tuple:
+    raw = match.raw_data or {}
+    ss_stats = (raw.get("sofascore_intelligence") or {}).get("statistics", {})
+    return (
+        1 if raw else 0,
+        len(raw),
+        1 if ss_stats else 0,
+        len(ss_stats),
+        len(str(match.competition_name or "")),
+        int(match.minutes_played or 0),
+        int(match.goals or 0) + int(match.assists or 0),
+    )
+
 class TimelineAggregator:
     """
     Aggregator for player timeline milestones (Feature G).
@@ -61,18 +152,49 @@ class TimelineAggregator:
             now_utc = datetime.now(timezone.utc)
 
             # ── Deduplicate Match History ───────────────────────────────────
-            # Use (date, opponent) as unique key to prevent UI duplication
+            # Use a normalized match fingerprint instead of raw opponent text,
+            # then collapse impossible same-day multi-match collisions.
             unique_matches = {}
             for m in player.match_history:
                 # Skip future ghost matches (> 1 month ahead)
                 if m.date.replace(tzinfo=timezone.utc) > now_utc + timedelta(days=30):
                     continue
                 
-                key = (m.date.strftime("%Y-%m-%d"), m.opponent)
-                if key not in unique_matches:
+                key = _match_history_identity_key(m)
+                existing = unique_matches.get(key)
+                if existing is None or _match_history_quality_score(m) > _match_history_quality_score(existing):
                     unique_matches[key] = m
-            
+
             deduped_history = list(unique_matches.values())
+
+            by_day: dict[str, list[MatchHistory]] = {}
+            for match in deduped_history:
+                by_day.setdefault(match.date.strftime("%Y-%m-%d"), []).append(match)
+
+            resolved_history: list[MatchHistory] = []
+            for day_key, day_matches in by_day.items():
+                if len(day_matches) == 1:
+                    resolved_history.extend(day_matches)
+                    continue
+
+                best_match = max(
+                    day_matches,
+                    key=lambda item: (
+                        _match_history_quality_score(item),
+                        _normalize_competition_key(item.competition_name),
+                        _normalize_match_text(item.opponent),
+                    ),
+                )
+                logger.warning(
+                    "TimelineAggregator collapsed same-day duplicate history for player %s on %s: kept '%s' and removed %s others",
+                    player_id,
+                    day_key,
+                    best_match.opponent,
+                    len(day_matches) - 1,
+                )
+                resolved_history.append(best_match)
+
+            deduped_history = sorted(resolved_history, key=lambda item: item.date, reverse=True)
 
             # 2. Add Next Fixtures (pre-match, live, or pending)
             if current_team_id:
@@ -88,7 +210,11 @@ class TimelineAggregator:
                     )
                     
                     if is_in_history:
-                        continue # Skip fixtures already confirmed in history
+                        # NEW: Even if in history, keep the pre-match node if a card was generated (Option C)
+                        from utils.stage_helpers import get_cached_image_path
+                        pre_match_id = f"pre-match-{fix_date_str}"
+                        if not get_cached_image_path(pre_match_id):
+                            continue # Skip fixtures already confirmed in history and without cards
 
                     home_team = session.get(Team, fix["home_team"])
                     away_team = session.get(Team, fix["away_team"])
@@ -229,16 +355,41 @@ class TimelineAggregator:
                             "goals":          sum(int(m.get('goals', 0) or 0) for m in season_matches),
                             "assists":        sum(int(m.get('assists', 0) or 0) for m in season_matches),
                             "minutes_played": sum(int(m.get('minutes_played', 0) or 0) for m in season_matches),
+                            "yellow_cards":   sum(int(m.get('yellow_cards', 0) or 0) for m in season_matches),
+                            "red_cards":      sum(int(m.get('red_cards', 0) or 0) for m in season_matches),
                         } if season_matches else {
                             # Fallback: solo HKPL cuando no hay historial de TM scrapeado
                             "matches_played": stat.matches_played if stat else 0,
                             "goals":          stat.goals if stat else 0,
                             "assists":        stat.assists if stat else 0,
                             "minutes_played": stat.minutes_played if stat else 0,
+                            "yellow_cards":   stat.yellow_cards if stat else 0,
+                            "red_cards":      stat.red_cards if stat else 0,
                         }
                     )
                     }
                 })
+
+            recent_ratings_by_match: dict[int, list[float]] = {}
+            sorted_history_for_ratings = sorted(
+                deduped_history,
+                key=lambda item: item.date or now_utc,
+                reverse=True,
+            )
+            for idx, hist_match in enumerate(sorted_history_for_ratings):
+                recent_slice = sorted_history_for_ratings[idx:idx + 5]
+                ratings_window: list[float] = []
+                for recent_match in reversed(recent_slice):
+                    raw_recent = recent_match.raw_data or {}
+                    ss_recent = (raw_recent.get("sofascore_intelligence") or {}).get("statistics", {})
+                    normalized_recent_rating = _normalize_match_rating(raw_recent, ss_recent)
+                    if normalized_recent_rating is None:
+                        continue
+                    try:
+                        ratings_window.append(float(normalized_recent_rating))
+                    except (TypeError, ValueError):
+                        continue
+                recent_ratings_by_match[id(hist_match)] = ratings_window
 
             # 4. Add Match History (post-match)
             for m in deduped_history:
@@ -280,6 +431,9 @@ class TimelineAggregator:
                 # High-fidelity is only True if we have real stats and a non-empty heatmap
                 has_granular = bool(ss_stats.get("accuratePasses") or ss_stats.get("totalPass"))
                 is_high_fidelity = bool(ss_heatmap) and has_granular
+                normalized_rating = _normalize_match_rating(raw, ss_stats)
+                normalized_score = _normalize_score_from_result(m.result)
+                started = _derive_started_status(m.status, m.minutes_played, raw.get("subbed_in"))
 
                 timeline.append({
                     "type": "post-match",
@@ -291,12 +445,13 @@ class TimelineAggregator:
                         "opponent": m.opponent,
                         "home_team": home_tm,
                         "away_team": away_tm,
-                        "home_logo": home_obj.logo_url if home_obj else None,
-                        "away_logo": away_obj.logo_url if away_obj else None,
+                        "home_logo": home_obj.logo_url if home_obj and home_obj.logo_url else raw.get("home_logo"),
+                        "away_logo": away_obj.logo_url if away_obj and away_obj.logo_url else raw.get("away_logo"),
                         "date": m.date.replace(tzinfo=timezone.utc),
                         "competition": m.competition_name,
                         "competition_logo": m.competition_logo,
                         "result": m.result,
+                        "score": normalized_score,
                         "minutes_played": m.minutes_played,
                         "goals": m.goals,
                         "assists": m.assists,
@@ -305,12 +460,14 @@ class TimelineAggregator:
                         "red_cards": m.red_cards,
                         "position": m.position,
                         "status": m.status,
+                        "started": started,
                         "subbed_in": raw.get("subbed_in"),
                         "subbed_out": raw.get("subbed_out"),
                         "absence_reason": m.status if m.status != "Jugado" else None,
                         "confirmation_status": "Confirmed" if m.minutes_played > 0 else "Not played",
                         # Intelligence data injection (Task 3.1)
-                        "rating": raw.get("besoccer_rating") or raw.get("rating") or ss_stats.get("rating"),
+                        "rating": normalized_rating,
+                        "recent_ratings": recent_ratings_by_match.get(id(m), []),
                         "heatmap": ss_heatmap,
                         "match_stats": ss_stats or raw.get("player_stats"),
                         "intelligence_meta": {

@@ -35,8 +35,13 @@ from utils.ai_services.orchestration import parse_structured_json
 from utils.ai_services.prompt_builders import build_career_narrative_prompt
 from utils.ai_helpers import umap_scatter_chart, constellation_chart, _build_knn_edges
 from data.processors.hong_kong_processor import POSITION_FULL_NAMES
-from utils.competition_helpers import get_competition_logo, normalize_competition
+from data.competition_registry import (
+    get_competition_display_name,
+    get_competition_logo,
+    normalize_competition,
+)
 from utils.cache import cache
+from utils.runtime_storage import PLAYER_CARDS_RUNTIME_ROOT, iter_player_cards_roots
 
 # Numba/UMAP is not thread-safe with the default workqueue layer.
 # This lock serializes concurrent calls to fit_umap across Flask threads.
@@ -47,6 +52,8 @@ logger = logging.getLogger(__name__)
 
 _DASHBOARD_DATA_CACHE_VERSION = "v1"
 _DASHBOARD_DATA_CACHE_TTL_SECONDS = 30
+_CAREER_EVIDENCE_PREP_CACHE_VERSION = "v1"
+_CAREER_EVIDENCE_PREP_CACHE_TTL_SECONDS = 60
 
 
 def _build_dashboard_data_cache_key(player_name: str, player_id: str) -> str:
@@ -72,6 +79,67 @@ def _set_cached_dashboard_data(player_name: str, player_id: str, payload: Dict[s
         )
     except Exception:
         pass
+
+
+def _build_career_evidence_prep_cache_key(player_name: str, player_id: str) -> str:
+    return (
+        f"career-evidence-prep:{_CAREER_EVIDENCE_PREP_CACHE_VERSION}:"
+        f"{player_id or 'unknown'}:{player_name or 'unknown'}"
+    )
+
+
+def _get_cached_career_evidence_prep(player_name: str, player_id: str) -> Optional[Dict[str, Any]]:
+    try:
+        cached_payload = cache.get(_build_career_evidence_prep_cache_key(player_name, player_id))
+        if isinstance(cached_payload, dict):
+            return copy.deepcopy(cached_payload)
+    except Exception:
+        pass
+    return None
+
+
+def _set_cached_career_evidence_prep(player_name: str, player_id: str, payload: Dict[str, Any]) -> None:
+    try:
+        cache.set(
+            _build_career_evidence_prep_cache_key(player_name, player_id),
+            copy.deepcopy(payload),
+            timeout=_CAREER_EVIDENCE_PREP_CACHE_TTL_SECONDS,
+        )
+    except Exception:
+        pass
+
+
+def _prepare_career_evidence_bundle(player_name: str, player_id: str) -> Dict[str, Any]:
+    cached_bundle = _get_cached_career_evidence_prep(player_name, player_id)
+    if cached_bundle is not None:
+        return cached_bundle
+
+    from utils.career_intelligence import (
+        get_career_phase_data,
+        get_career_signals,
+        get_development_priorities,
+    )
+    from utils.domain_ai import build_career_intelligence_facts
+
+    data = _fetch_dashboard_data(player_name, player_id)
+    career_phase_data = get_career_phase_data(data, data.get("history_df", pd.DataFrame()))
+    career_signals = get_career_signals(data, data.get("history_df", pd.DataFrame()), career_phase_data or {})
+    development_priorities = get_development_priorities(data.get("percentiles_data") or {})
+    career_facts = build_career_intelligence_facts(
+        data,
+        career_phase_data or {},
+        career_signals,
+        development_priorities,
+    )
+    bundle = {
+        "data": data,
+        "career_phase_data": career_phase_data or {},
+        "career_signals": career_signals,
+        "development_priorities": development_priorities,
+        "career_facts": career_facts,
+    }
+    _set_cached_career_evidence_prep(player_name, player_id, bundle)
+    return copy.deepcopy(bundle)
 
 # In-process cache for Gemini career-insight calls.
 # Key: (player_name, primary_metric) — reused across timeline navigation within the same session.
@@ -246,6 +314,32 @@ def _normalize_team_jersey_key(team_name: str) -> str:
         "southern": "southern",
         "tai po": "taipo",
         "tai po fc": "taipo",
+        "wofoo tai po": "taipo",
+        "wofoo tai po fc": "taipo",
+        "resources capital": "rcfc",
+        "resources capital fc": "rcfc",
+        "rcfc": "rcfc",
+        "r&f": "r_f",
+        "cahn fc": "cahn_fc",
+        "cahn": "cahn_fc",
+        "công an hà nội": "cahn_fc",
+        "cong an ha noi": "cahn_fc",
+        "happy valley": "happy_valley",
+        "happy valley aa": "happy_valley",
+        "sham shui po": "sham_shui_po",
+        "sham shui po aa": "sham_shui_po",
+        "yuen long": "yuen_long",
+        "yuen long fc": "yuen_long",
+        "yueng long": "yuen_long",
+        "taipei hang yuen": "hang_yuan_fc",
+        "hang yuan": "hang_yuan_fc",
+        "hang yuen fc": "hang_yuan_fc",
+        "hang yuen": "hang_yuan_fc",
+        "kaya iloilo": "kaya_fc",
+        "kaya-iloilo": "kaya_fc",
+        "kaya–iloilo": "kaya_fc",
+        "kaya fc-iloilo": "kaya_fc",
+        "kaya fc": "kaya_fc",
     }
     if value in aliases:
         return aliases[value]
@@ -264,6 +358,13 @@ def _canonical_team_display_name(team_name: str) -> str:
         "easterndt": "Eastern",
         "hkfc": "HKFC",
         "taipo": "Tai Po",
+        "rcfc": "RCFC",
+        "cahn_fc": "CAHN FC",
+        "happy_valley": "Happy Valley",
+        "sham_shui_po": "Sham Shui Po",
+        "yuen_long": "Yuen Long",
+        "hang_yuan_fc": "Taipei Hang Yuen",
+        "kaya_fc": "Kaya–Iloilo",
     }
     return display_aliases.get(normalized_key, value)
 
@@ -492,7 +593,7 @@ def _get_current_season() -> str:
         return _CURRENT_SEASON_FALLBACK
 
 
-_PLAYER_CARDS_ROOT = Path("data/player_cards")
+_PLAYER_CARDS_ROOT = PLAYER_CARDS_RUNTIME_ROOT
 
 
 def _resolve_team_logo(team_name: str) -> Optional[str]:
@@ -506,6 +607,10 @@ def _resolve_team_logo(team_name: str) -> Optional[str]:
         "hkfc": ["hong_kong_football_club"],
         "northdt": ["north_district"],
         "easterndt": ["eastern_district"],
+        "rcfc": ["resources_capital"],
+        "cahn_fc": ["cahn_fc"],
+        "southern": ["southern_district"],
+        "taipo": ["tai_po"],
     }
     candidate_keys.extend(asset_aliases.get(normalized_key, []))
     for asset_key in candidate_keys:
@@ -528,6 +633,13 @@ def _resolve_team_logo(team_name: str) -> Optional[str]:
                 "northdt": ["North District", "North Dt."],
                 "southern": ["Southern", "Southern District"],
                 "taipo": ["Tai Po", "Tai Po FC"],
+                "rcfc": ["Resources Capital", "Resources Capital FC", "RCFC"],
+                "cahn_fc": ["CAHN FC", "CAHN", "Công An Hà Nội", "Cong An Ha Noi"],
+                "happy_valley": ["Happy Valley", "Happy Valley AA"],
+                "sham_shui_po": ["Sham Shui Po", "Sham Shui Po AA"],
+                "yuen_long": ["Yuen Long", "Yuen Long FC", "Yueng Long"],
+                "hang_yuan_fc": ["Taipei Hang Yuen", "Hang Yuan", "Hang Yuen FC", "Hang Yuen"],
+                "kaya_fc": ["Kaya–Iloilo", "Kaya-Iloilo", "Kaya FC-Iloilo", "Kaya FC", "Kaya"],
             }.get(normalized_key, [])
             if (not team or not getattr(team, "logo_url", None)) and alias_names:
                 alias_team = session.execute(select(Team).where(Team.name.in_(alias_names))).scalars().first()
@@ -542,32 +654,72 @@ def _resolve_team_logo(team_name: str) -> Optional[str]:
 
 def get_cached_image_path(milestone_id: str, player_id: str = "") -> Optional[str]:
     """
-    Returns the path to a generated card PNG for the given milestone ID.
-    Checks data/player_cards/{player_id}/{milestone_id}/ first (new Card Studio path),
-    then falls back to data/cache/cards/ for backward compatibility.
+    Returns the path to a generated card for the given milestone ID.
+    Prioritizes final_card from metadata.json, then looks for standard filenames.
     """
     if not milestone_id:
         return None
     try:
-        # New path: data/player_cards/{player_id}/{milestone_id}/card_*.png
+        cards_roots = iter_player_cards_roots()
+
+        # 1. Try to find player_id if not provided
+        if not player_id:
+            try:
+                from flask_login import current_user
+                player_id = str(current_user.id) if current_user and current_user.is_authenticated else ""
+            except Exception:
+                player_id = ""
+
         if player_id:
-            new_dir = _PLAYER_CARDS_ROOT / player_id / milestone_id
-            if new_dir.exists():
-                for fmt in ("1_1", "9_16", "16_9"):
-                    candidate = new_dir / f"card_{fmt}.png"
+            for cards_root in cards_roots:
+                # 1. Try exact match
+                milestone_dir = cards_root / player_id / milestone_id
+                
+                # 2. Try prefix match if no exact match (handles long slugified IDs vs simple folder names)
+                if not milestone_dir.exists() and "-" in milestone_id:
+                    # Try matching by date prefix: e.g. "pre-match-2026-04-12"
+                    parts = milestone_id.split("-")
+                    if len(parts) >= 3:
+                        # type-YYYY-MM-DD (e.g. pre-match-2026-04-12)
+                        prefix = "-".join(parts[:5])
+                        parent_dir = cards_root / player_id
+                        if parent_dir.exists():
+                            for folder in parent_dir.glob(f"{prefix}*"):
+                                if folder.is_dir():
+                                    milestone_dir = folder
+                                    break
+
+                meta_path = milestone_dir / "metadata.json"
+                if meta_path.exists():
+                    with open(meta_path, "r") as f:
+                        meta = json.load(f)
+                        final = meta.get("final_card")
+                        if final:
+                            # 1. Check as absolute or relative to project root
+                            p_root = Path(final)
+                            if p_root.exists():
+                                return str(p_root)
+                            # 2. Check as relative to milestone folder
+                            p_rel = milestone_dir / final
+                            if p_rel.exists():
+                                return str(p_rel)
+                for candidate in sorted(milestone_dir.glob("card_*.*")):
                     if candidate.exists():
                         return str(candidate)
-        # Wildcard search across all player dirs for this milestone
-        for candidate in _PLAYER_CARDS_ROOT.glob(f"*/{milestone_id}/card_*.png"):
-            if candidate.exists():
-                return str(candidate)
-        # Legacy fallback: data/cache/cards/{milestone_id}.*
+
+        # 2. Legacy/Global search
+        for cards_root in cards_roots:
+            for candidate in cards_root.glob(f"*/{milestone_id}/card_*.*"):
+                if candidate.exists():
+                    return str(candidate)
+
+        # 3. Cache fallback
         for ext in (".png", ".jpg", ".jpeg", ".webp"):
             candidate = _CARD_CACHE_DIR / f"{milestone_id}{ext}"
             if candidate.exists():
                 return str(candidate)
     except Exception as e:
-        logger.warning(f"get_cached_image_path error for '{milestone_id}': {e}")
+        logger.debug(f"get_cached_image_path error for '{milestone_id}': {e}")
     return None
 
 
@@ -575,25 +727,43 @@ def render_image_gallery(image_path: Optional[str]) -> html.Div:
     """
     Returns a glassmorphic image gallery view for the Stage panel.
     Shows the image if path is valid, otherwise a graceful placeholder.
-    Close button is rendered statically in the layout (gallery-close-btn).
+    Converts disk paths to base64 data URIs for browser display.
     """
     if image_path and os.path.isfile(image_path):
-        content = html.Div(
-            [
-                html.Div(
-                    html.Img(
-                        src=image_path,
-                        className="img-fluid rounded",
-                        style={"maxHeight": "400px", "objectFit": "contain"},
+        try:
+            import base64
+            with open(image_path, "rb") as f:
+                ext = Path(image_path).suffix.lower().replace(".", "")
+                mime = f"image/{ext}" if ext != "jpg" else "image/jpeg"
+                encoded = base64.b64encode(f.read()).decode()
+                src = f"data:{mime};base64,{encoded}"
+            
+            content = html.Div(
+                [
+                    html.Div(
+                        html.Img(
+                            src=src,
+                            className="img-fluid rounded",
+                            style={"maxHeight": "500px", "objectFit": "contain", "boxShadow": "0 20px 40px rgba(0,0,0,0.4)"},
+                        ),
+                        className="text-center",
                     ),
-                    className="text-center",
-                ),
-                html.Small(
-                    os.path.basename(image_path),
-                    className="text-muted d-block text-center mt-2",
-                ),
-            ]
-        )
+                    html.Small(
+                        "Matchday Card Finalized",
+                        className="portal-text-muted d-block text-center mt-3 fw-bold",
+                        style={"letterSpacing": "0.05em"}
+                    ),
+                ]
+            )
+        except Exception as e:
+            logger.error(f"Error encoding image for gallery: {e}")
+            content = html.Div(
+                [
+                    html.I(className="bi bi-exclamation-triangle text-warning", style={"fontSize": "3rem"}),
+                    html.P("Error al cargar la imagen", className="text-muted mt-2 mb-0"),
+                ],
+                className="text-center py-4",
+            )
     else:
         content = html.Div(
             [
@@ -605,7 +775,7 @@ def render_image_gallery(image_path: Optional[str]) -> html.Div:
 
     return html.Div(
         content,
-        className="stage-gallery-view",
+        className="stage-gallery-view p-3",
     )
 
 
@@ -1287,28 +1457,31 @@ def _build_delta_kpis(
     )
 
 
-def _render_rating_sparkline(ratings: List[float]) -> html.Div:
+def _render_rating_sparkline(
+    ratings: List[float],
+    *,
+    width: int = 80,
+    height: int = 24,
+    color: str = HKFATheme.POSITIVE,
+    show_label: bool = True,
+) -> html.Div:
     """Renders a small sparkline of ratings (0-10) using CSS/HTML for maximum speed."""
     if not ratings:
         return html.Div("—", className="text-muted small")
     
-    # Simple line-based visualization
-    max_r = 10.0
-    height = 24
-    width = 80
-    
-    svg_points = " ".join([f"{(i/(len(ratings)-1))*width if len(ratings)>1 else width/2},{height-(r/max_r)*height}" for i, r in enumerate(ratings)])
-    
     return html.Div([
         html.Div([
-            html.Small("Recent Trend", className="postmatch-sparkline-label", title="Rating trend from the last 5 matches"),
-            html.Img(src=f"data:image/svg+xml;base64,{_build_sparkline_svg(ratings)}", className="postmatch-sparkline-img")
+            html.Small("Recent Trend", className="postmatch-sparkline-label", title="Rating trend from the last 5 matches") if show_label else None,
+            html.Img(
+                src=f"data:image/svg+xml;base64,{_build_sparkline_svg(ratings, width=width, height=height, color=color)}",
+                className="postmatch-sparkline-img",
+                style={"width": f"{width}px", "height": f"{height}px", "display": "block"},
+            )
         ])
-    ], className="postmatch-trend-sparkline d-inline-block ms-3")
+    ], className="postmatch-trend-sparkline d-inline-block")
 
-def _build_sparkline_svg(ratings: List[float]) -> str:
+def _build_sparkline_svg(ratings: List[float], *, width: int = 80, height: int = 24, color: str = HKFATheme.POSITIVE) -> str:
     import base64
-    width, height = 80, 24
     max_r = 10.0
     if len(ratings) < 2:
         return ""
@@ -1320,21 +1493,53 @@ def _build_sparkline_svg(ratings: List[float]) -> str:
         points.append(f"{x},{y}")
     
     path = " ".join(points)
-    svg = f'<svg width="{width}" height="{height}" xmlns="http://www.w3.org/2000/svg"><polyline points="{path}" fill="none" stroke="{HKFATheme.POSITIVE}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+    svg = f'<svg width="{width}" height="{height}" xmlns="http://www.w3.org/2000/svg"><polyline points="{path}" fill="none" stroke="{color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>'
     return base64.b64encode(svg.encode('utf-8')).decode('utf-8')
 
-def render_post_match(payload: Dict[str, Any]) -> html.Div:
+def _render_pre_match_cta(pre_match_id: str, pre_match_card_path: Optional[str]) -> Optional[html.Div]:
+    """Renders a call-to-action button to view the pre-game card if it exists."""
+    if not pre_match_card_path:
+        return None
+    return html.Div(
+        [
+            html.Div(
+                [
+                    html.I(className="bi bi-eye me-2", style={"fontSize": "1rem"}),
+                    html.Span("Ver Card de Pre-Partido", style={"fontWeight": "600"}),
+                ],
+                id={"type": "action-node-pill", "index": pre_match_id},
+                className="action-node-pill action-node-pill--prematch",
+                style={
+                    "display": "inline-flex",
+                    "alignItems": "center",
+                    "padding": "8px 16px",
+                    "borderRadius": "30px",
+                    "background": "rgba(0, 212, 255, 0.15)",
+                    "border": "1px solid var(--accent-cyan)",
+                    "color": "var(--accent-cyan)",
+                    "cursor": "pointer",
+                    "marginBottom": "20px",
+                    "transition": "all 0.2s ease-in-out",
+                },
+            )
+        ],
+        className="d-flex justify-content-center w-100"
+    )
+
+def render_post_match(payload: Dict[str, Any], milestone_id: str = "") -> html.Div:
     """
     Renders the Post-Match analysis stage.
     Implements Double Layer logic: High-Fidelity (A) or Fallback (B) layout.
     """
     opponent = payload.get("opponent", "Opponent")
+
     date_str = payload.get("kickoff_display") or str(payload.get("date", ""))[:10]
     home = payload.get("home_team", "")
     away = payload.get("away_team", "")
     result = payload.get("result", "—")
     stadium = payload.get("stadium", "")
     competition = payload.get("competition", "HK Premier League")
+    competition_display = get_competition_display_name(competition, long_form=True)
     competition_logo = payload.get("competition_logo") or get_competition_logo(competition)
     
     home_logo = payload.get("home_logo") or _resolve_team_logo(home)
@@ -1344,9 +1549,42 @@ def render_post_match(payload: Dict[str, Any]) -> html.Div:
     intel_meta = payload.get("intelligence_meta", {})
     is_high_fidelity = intel_meta.get("is_high_fidelity", False)
 
-    # ── Rating-based glass modifier ─────────────────────────────────────────
-    # TASK 4.5: Always use glass-success for the overall Stage container
-    glass_modifier = "glass-success"
+    _MATCH_POSITION_MAP = {
+        "CEN": "CB",
+        "ED": "RW",
+        "EI": "LW",
+        "ID": "RM",
+        "II": "LM",
+        "MCO": "AMF",
+        "CMF": "CM",
+        "DMF": "DM",
+    }
+
+    def _format_trend_label(ratings: List[float]) -> str:
+        if len(ratings) < 2:
+            return "→"
+        delta = ratings[-1] - ratings[0]
+        if delta > 0.15:
+            return "↑"
+        if delta < -0.15:
+            return "↓"
+        return "→"
+
+    def _trend_accent(ratings: List[float]) -> str:
+        trend = _format_trend_label(ratings)
+        if trend == "↑":
+            return HKFATheme.POSITIVE
+        if trend == "↓":
+            return HKFATheme.NEGATIVE
+        return HKFATheme.ACCENT_GOLD
+
+    def _safe_float(value: Any) -> Optional[float]:
+        try:
+            if value in (None, ""):
+                return None
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
     # High-Fidelity rating colors (for internal badges)
     rating = payload.get("rating") or player_stats.get("performance_stats", {}).get("rating")
@@ -1355,26 +1593,58 @@ def render_post_match(payload: Dict[str, Any]) -> html.Div:
     except (ValueError, TypeError):
         rating_val = None
     
+    player_id_logged = _get_logged_in_player_id()
     basic = player_stats.get("basic_info", {})
     player_name = basic.get("name", "Player")
-    position = basic.get("position_primary", basic.get("position", ""))
+    try:
+        dm = get_hong_kong_data_manager()
+        enriched_player_stats = dm.get_player_statistics(player_name) if player_name else {}
+        if isinstance(enriched_player_stats, dict) and not enriched_player_stats.get("error"):
+            merged_player_stats = copy.deepcopy(enriched_player_stats)
+            merged_basic = merged_player_stats.get("basic_info") or {}
+            merged_basic.update(player_stats.get("basic_info") or {})
+            merged_player_stats["basic_info"] = merged_basic
+            for key, value in (player_stats or {}).items():
+                if key == "basic_info":
+                    continue
+                if value:
+                    merged_player_stats[key] = value
+            player_stats = merged_player_stats
+            basic = player_stats.get("basic_info", {})
+    except Exception as exc:
+        logger.debug(f"render_post_match player_stats enrichment error: {exc}")
+
+    raw_position = payload.get("position") or basic.get("position_primary", basic.get("position", ""))
+    normalized_position = _MATCH_POSITION_MAP.get(str(raw_position or "").strip().upper(), str(raw_position or "").strip().upper())
+    position = normalized_position or raw_position
+    position_display = POSITION_FULL_NAMES.get(str(position or "").upper(), str(raw_position or "Unknown"))
+
+    dashboard_data: Dict[str, Any] = {}
+    try:
+        if player_name and player_id_logged:
+            dashboard_data = _fetch_dashboard_data(player_name, player_id_logged)
+    except Exception as exc:
+        logger.debug(f"render_post_match dashboard enrichment error: {exc}")
 
     # ── Sparkline: recent rating trend from raw_data ───────────────────────
     sparkline_el = None
+    contribution_sparkline_el = None
+    recent_ratings: List[float] = list(payload.get("recent_ratings") or [])[:5]
+    recent_contributions: List[float] = []
     try:
         from models.db_models import MatchHistory as _MH
         from utils.db_engine import SessionFactory as _SF
-        player_id_logged = _get_logged_in_player_id()
         if player_id_logged:
             with _SF() as _sess:
                 recent_matches = (
                     _sess.query(_MH)
                     .filter(_MH.player_id == player_id_logged, _MH.raw_data.isnot(None))
                     .order_by(_MH.date.desc())
-                    .limit(10)
+                    .limit(12)
                     .all()
                 )
-            recent_ratings: List[float] = []
+            recent_ratings = []
+            recent_contributions = []
             for _m in recent_matches:
                 _raw = _m.raw_data or {}
                 _r = _raw.get("besoccer_rating") or _raw.get("rating") or _raw.get("sofascore_rating")
@@ -1383,10 +1653,24 @@ def render_post_match(payload: Dict[str, Any]) -> html.Div:
                         recent_ratings.append(float(_r))
                     except (ValueError, TypeError):
                         pass
-                if len(recent_ratings) >= 5:
+                try:
+                    recent_contributions.append(float(_m.goals or 0) + float(_m.assists or 0))
+                except (ValueError, TypeError):
+                    recent_contributions.append(0.0)
+                if len(recent_ratings) >= 5 and len(recent_contributions) >= 5:
                     break
             if recent_ratings:
-                sparkline_el = _render_rating_sparkline(list(reversed(recent_ratings)))
+                recent_ratings = list(reversed(recent_ratings[:5]))
+                sparkline_el = _render_rating_sparkline(recent_ratings, width=136, height=40, color=_trend_accent(recent_ratings), show_label=False)
+            if recent_contributions:
+                recent_contributions = list(reversed(recent_contributions[:5]))
+                contribution_sparkline_el = _render_rating_sparkline(
+                    recent_contributions,
+                    width=136,
+                    height=40,
+                    color=HKFATheme.ACCENT_BLUE,
+                    show_label=False,
+                )
     except Exception:
         pass
 
@@ -1397,23 +1681,23 @@ def render_post_match(payload: Dict[str, Any]) -> html.Div:
     def _team_block_post(name: str, logo: str, align: str, jersey: str = "") -> html.Div:
         justify = "flex-start" if align == "left" else "flex-end"
         crest_block = html.Div([
-            html.Img(src=logo, style={"width": "100px", "height": "100px", "objectFit": "contain"}) if logo else html.Div(
+            html.Img(src=logo, style={"width": "96px", "height": "96px", "objectFit": "contain"}) if logo else html.Div(
                 name[:2].upper(),
                 style={
-                    "width": "100px", "height": "100px", "borderRadius": "50%",
+                    "width": "96px", "height": "96px", "borderRadius": "50%",
                     "display": "flex", "alignItems": "center", "justifyContent": "center",
                     "background": "rgba(255,255,255,0.08)", "color": "#f3f7fb", "fontWeight": "800",
                 },
             ),
-            html.Div(name or "TBC", style={"color": "#f4f8fc", "fontWeight": "700", "fontSize": "1.02rem", "textAlign": "center", "marginTop": "10px", "width": "100px"}),
+            html.Div(name or "TBC", style={"color": "#f4f8fc", "fontWeight": "700", "fontSize": "1.08rem", "textAlign": "center", "letterSpacing": "0.01em", "marginTop": "10px", "width": "96px"}),
         ], style={"display": "flex", "flexDirection": "column", "alignItems": "center", "justifyContent": "center"})
         return html.Div([
             html.Div([
-                html.Img(src=jersey, style={"width": "96px", "height": "96px", "objectFit": "contain", "opacity": "0.98"}) if jersey and align == "right" else None,
+                html.Img(src=jersey, style={"width": "90px", "height": "90px", "objectFit": "contain", "opacity": "0.98"}) if jersey and align == "right" else None,
                 crest_block,
-                html.Img(src=jersey, style={"width": "96px", "height": "96px", "objectFit": "contain", "opacity": "0.98"}) if jersey and align == "left" else None,
-            ], style={"display": "flex", "justifyContent": justify, "alignItems": "center", "gap": "8px"}),
-        ], style={"flex": "1", "textAlign": "center", "display": "flex", "flexDirection": "column", "alignItems": "center"})
+                html.Img(src=jersey, style={"width": "90px", "height": "90px", "objectFit": "contain", "opacity": "0.98"}) if jersey and align == "left" else None,
+            ], style={"display": "flex", "justifyContent": justify, "alignItems": "flex-start", "gap": "16px"}),
+        ], style={"flex": "0 1 240px", "minWidth": "210px", "maxWidth": "250px", "textAlign": "center", "display": "flex", "flexDirection": "column", "alignItems": "center"})
 
     # Extract broadcast metadata from payload (Copied from Pre-Match logic)
     streaming_url = _clean_url(payload.get("streaming_url") or "")
@@ -1443,6 +1727,16 @@ def render_post_match(payload: Dict[str, Any]) -> html.Div:
             return html.A(content, href=href, target="_blank", style=common_style)
         return html.Span(content, style=common_style)
 
+    def _lucide(name: str) -> html.I:
+        return html.I(**{"data-lucide": name, "className": "lucide-inline-icon me-1"})
+
+    def _card_icon(color: str, size: str = "18px", class_name: str = "") -> html.I:
+        return html.I(
+            **{"data-lucide": "rectangle-vertical"},
+            className=class_name,
+            style={"width": size, "height": size, "color": color, "opacity": "0.95", "lineHeight": "1"},
+        )
+
     if has_var:
         broadcast_chips.append(_chip("bi-camera-video-fill", "VAR", HKFATheme.ACCENT_GOLD))
     if is_tv:
@@ -1468,312 +1762,743 @@ def render_post_match(payload: Dict[str, Any]) -> html.Div:
         left, right = [part.strip() for part in raw_kickoff.rsplit(",", 1)]
         date_display = left.replace(",", "").strip()
         time_display = right
-    
-    header = html.Div([
+    elif len(raw_kickoff) >= 16 and raw_kickoff[4] == "-" and raw_kickoff[7] == "-":
+        date_display = raw_kickoff[:10]
+        time_display = raw_kickoff[10:].strip()
+
+    time_display = (
+        str(time_display)
+        .replace(" HKT", "")
+        .replace("hkt", "")
+        .replace(" HkT", "")
+        .strip()
+    )
+
+    def _glass_card(
+        children: Any,
+        extra_style: Optional[Dict[str, Any]] = None,
+        extra_class: str = "",
+        clean_variant: bool = True,
+    ) -> dbc.Card:
+        base_style = {"position": "relative"}
+        if extra_style:
+            base_style.update(extra_style)
+        class_name = "border-0 prematch-float-card"
+        if clean_variant:
+            class_name = f"{class_name} prematch-clean-card"
+        if extra_class:
+            class_name = f"{class_name} {extra_class}"
+        return dbc.Card(children, className=class_name, style=base_style)
+
+    header_right_chips: List[Any] = []
+    started = payload.get("started")
+    if started is True:
+        header_right_chips.append(_chip("bi-play-fill", "Starter", HKFATheme.POSITIVE))
+    elif started is False:
+        header_right_chips.append(_chip("bi-arrow-repeat", "Substitute", HKFATheme.ACCENT_BLUE))
+    if sub_in := payload.get("subbed_in"):
+        header_right_chips.append(_chip("bi-box-arrow-in-right", f"In {sub_in}'", HKFATheme.POSITIVE))
+    if sub_out := payload.get("subbed_out"):
+        header_right_chips.append(_chip("bi-box-arrow-right", f"Out {sub_out}'", HKFATheme.ACCENT_GOLD))
+    if (payload.get("yellow_cards") or 0) > 0:
+        header_right_chips.append(_chip("bi-square-fill", f"{int(payload.get('yellow_cards') or 0)} Yellow", HKFATheme.ACCENT_GOLD))
+    if (payload.get("red_cards") or 0) > 0:
+        header_right_chips.append(_chip("bi-square-fill", f"{int(payload.get('red_cards') or 0)} Red", HKFATheme.NEGATIVE))
+
+    header = _glass_card(dbc.CardBody([
         # Competition row
         html.Div([
-            html.Img(src=competition_logo, style={"width": "60px", "height": "60px", "objectFit": "contain", "marginRight": "15px"}) if competition_logo else None,
-            html.Div(competition, style={"color": "#f6f8fb", "fontWeight": "700", "fontSize": "1.2rem"}),
-        ], style={"display": "flex", "alignItems": "center", "justifyContent": "center", "marginBottom": "24px"}),
+            html.Img(src=competition_logo, style={"width": "54px", "height": "54px", "objectFit": "contain", "marginBottom": "8px"}) if competition_logo else None,
+            html.Div(competition_display, style={"color": "#f6f8fb", "fontWeight": "700", "fontSize": "1.05rem"}),
+        ], style={"display": "flex", "flexDirection": "column", "alignItems": "center", "marginBottom": "24px"}),
         
         # Scorers/Teams row
         html.Div([
             _team_block_post(home, home_logo, "right", home_jersey),
             html.Div([
-                html.Div(result, style={"color": "#f4f8fc", "fontSize": "3rem", "fontWeight": "900", "letterSpacing": "0.05em", "lineHeight": "1"}),
-                html.Div("FINAL", style={"color": HKFATheme.POSITIVE, "fontWeight": "700", "fontSize": "0.75rem", "letterSpacing": "0.15em", "marginTop": "8px"}),
-                html.Div([
-                    html.Div(time_display, style={"color": "#f4f8fc", "fontSize": "0.95rem", "fontWeight": "700", "marginTop": "10px"}),
-                    html.Div(date_display, style={
-                        "color": HKFATheme.ACCENT_GOLD,
+                html.Div(result, style={"color": "#d7dee8", "fontSize": "2rem", "fontWeight": "800", "letterSpacing": "0.06em"}),
+                html.Div("FINAL", style={"color": HKFATheme.POSITIVE, "fontWeight": "700", "fontSize": "0.82rem", "letterSpacing": "0.12em", "marginTop": "10px"}),
+                html.Div(
+                    date_display or raw_kickoff[:10],
+                    style={
+                        "color": _trend_accent(recent_ratings),
                         "fontWeight": "500",
                         "fontSize": "0.8rem",
-                        "marginTop": "4px",
+                        "marginTop": "10px",
                         "letterSpacing": "0.03em",
                         "display": "block",
                         "lineHeight": "1.1",
-                    }) if date_display else None,
-                ], style={"textAlign": "center"}),
-            ], style={"flex": "0 0 160px", "display": "flex", "flexDirection": "column", "alignItems": "center", "justifyContent": "center"}),
+                    },
+                ),
+            ], style={"flex": "0 0 250px", "display": "flex", "flexDirection": "column", "alignItems": "center", "justifyContent": "center", "textAlign": "center", "padding": "0 12px"}),
             _team_block_post(away, away_logo, "left", away_jersey),
-        ], style={"display": "flex", "alignItems": "center", "justifyContent": "center", "gap": "5px"}),
+        ], style={"display": "flex", "alignItems": "center", "justifyContent": "center", "gap": "28px", "flexWrap": "wrap"}),
         
         # Meta footer (Exact copy of Pre-Match footer layout)
         html.Hr(style={"borderColor": "rgba(255,255,255,0.14)", "margin": "20px 0 18px"}),
         html.Div([
-            _chip("bi-geo-alt", stadium or "Stadium TBC", HKFATheme.ACCENT_BLUE),
-            html.Div(broadcast_chips, style={"display": "flex", "gap": "10px", "flexWrap": "wrap", "justifyContent": "flex-end"}),
+            _chip("bi-geo-alt", stadium or "Stadium TBC", HKFATheme.POSITIVE),
+            html.Div(
+                [*broadcast_chips, *header_right_chips],
+                style={"display": "flex", "gap": "10px", "flexWrap": "wrap", "justifyContent": "flex-end"},
+            ),
         ], style={"display": "flex", "justifyContent": "space-between", "alignItems": "center", "gap": "12px", "flexWrap": "wrap"}),
-    ], className="postmatch-header-rich glass-card glass-success p-3 mb-3")
+    ]), extra_class="prematch-fixture-card", clean_variant=False)
 
-    # ── ESCENARIO A: HIGH-FIDELITY (Sofascore/BeSoccer) ──────────────────────
-    if is_high_fidelity:
-        from utils.chart_helpers import create_match_heatmap, create_radar_chart
-        
-        heatmap_data = payload.get("heatmap", [])
-        heatmap_fig = create_match_heatmap(heatmap_data, height=350)
-        
-        # Rating Big Badge
-        rating_badge = html.Div([
-            html.Div([
-                html.Div("RATING", style={"fontSize": "0.6rem", "fontWeight": "700", "opacity": "0.7"}),
-                html.Div(f"{rating:.1f}" if rating else "—", style={"fontSize": "2.2rem", "fontWeight": "800", "lineHeight": "1"}),
+    def _section_title(icon: str, title: str) -> html.Div:
+        return html.Div(
+            [
+                html.I(className=f"bi {icon} me-2", style={"color": HKFATheme.POSITIVE}),
+                html.Span(title, className="postmatch-section-title", style={"color": "#f4f8fc"}),
+            ],
+            className="postmatch-section-header mb-3",
+        )
+
+    def _build_kpi_card(
+        label: str,
+        value: str,
+        accent: str,
+        icon: Any = "bi-dot",
+        secondary_lines: Optional[List[Any]] = None,
+    ) -> dbc.Card:
+        icon_node = (
+            html.I(className=f"bi {icon} me-2", style={"color": accent})
+            if isinstance(icon, str)
+            else icon
+        )
+        return _glass_card(
+            dbc.CardBody([
+                html.Div([
+                    icon_node,
+                    html.Span(label, style={"color": "#c9d2de", "fontSize": "0.8rem", "fontWeight": "400"}),
+                ], className="mb-2"),
+                html.Div(value, style={"color": "#f4f8fc", "fontSize": "1.55rem", "fontWeight": "800", "lineHeight": "1.05"}),
+                html.Div(
+                    secondary_lines or [],
+                    style={"display": "flex", "flexDirection": "column", "gap": "4px", "marginTop": "10px", "minHeight": "42px"},
+                ) if secondary_lines else None,
             ]),
-            sparkline_el
-        ], className="text-center p-3 rounded-3 d-flex align-items-center justify-content-center gap-3", style={
-            "background": "rgba(255,255,255,0.05)",
-            "border": f"1px solid {HKFATheme.POSITIVE if (rating_val or 0) >= 7.0 else (HKFATheme.NEGATIVE if (rating_val or 0) < 6.0 else HKFATheme.WARNING)}",
-            "color": HKFATheme.POSITIVE if (rating_val or 0) >= 7.0 else (HKFATheme.NEGATIVE if (rating_val or 0) < 6.0 else HKFATheme.WARNING),
-            "minWidth": "100px"
-        })
+            extra_style={"height": "100%"},
+        )
 
-        match_stats = payload.get("match_stats", {})
-        # Filter key stats for display (Corrected Sofascore keys)
-        display_stats = {
-            "Total Passes": f"{match_stats.get('totalPass', 0)} ({match_stats.get('accuratePasses', 0)})",
-            "Dribbles": f"{match_stats.get('successfulDribbles', 0)}/{match_stats.get('totalDribbles', 0)}",
-            "Duels Won": f"{match_stats.get('duelWon', 0)}/{match_stats.get('duelTotal', 0)}",
-            "Tackles": str(match_stats.get('tackles', 0)),
-            "Interceptions": str(match_stats.get('interceptions', 0)),
-        }
+    def _build_recent_form_section(ratings: List[float]) -> Optional[html.Div]:
+        if not ratings:
+            return None
+        seq = " -> ".join(f"{r:.1f}" for r in ratings)
+        return html.Div(
+            [
+                _section_title("bi-graph-up-arrow", "Tendencia de Forma"),
+                html.Div("Tus ultimos 5 ratings", className="portal-text-muted small mb-2"),
+                html.Div(
+                    [
+                        sparkline_el if sparkline_el else None,
+                        html.Div(
+                            [
+                                html.Div(seq, style={"color": "#f4f8fc", "fontWeight": "600", "fontSize": "0.9rem"}),
+                                html.Div(f"Tendencia: {_format_trend_label(ratings)}", style={"color": HKFATheme.POSITIVE, "fontSize": "0.8rem", "marginTop": "6px"}),
+                            ],
+                            style={"display": "flex", "flexDirection": "column", "gap": "2px"},
+                        ),
+                    ],
+                    style={"display": "flex", "alignItems": "center", "gap": "14px", "flexWrap": "wrap"},
+                ),
+            ],
+            className="p-4 mt-0",
+        )
 
-        stats_rows = [
-            html.Div([
-                html.Span(k, className="small portal-text-muted"),
-                html.Span(v, className="small fw-bold float-end")
-            ], className="mb-2 border-bottom border-secondary border-opacity-10 pb-1")
-            for k, v in display_stats.items()
-        ]
+    # ── Common match summary block ──────────────────────────────────────────
+    mins = int(payload.get("minutes_played") or 0)
+    goals = int(payload.get("goals") or 0)
+    assists = int(payload.get("assists") or 0)
+    match_stats = payload.get("match_stats", {}) or {}
+    own_goals = int(payload.get("own_goals") or 0)
+    yc = int(payload.get("yellow_cards") or 0)
+    rc = int(payload.get("red_cards") or 0)
+    sub_in = payload.get("subbed_in")
+    sub_out = payload.get("subbed_out")
+    absence_reason = payload.get("absence_reason")
 
-        # ── Match Radar (90') ──
-        def _get_pct(num, den):
-            if not den: return 0
-            return (num/den)*100
-            
-        match_radar_values = [
-            _get_pct(match_stats.get('accuratePasses', 0), match_stats.get('totalPass', 0)),
-            _get_pct(match_stats.get('duelWon', 0), match_stats.get('duelTotal', 0)),
-            _get_pct(match_stats.get('successfulDribbles', 0), match_stats.get('totalDribbles', 0)),
-            min(100, (match_stats.get('tackles', 0) / 4) * 100),
-            min(100, (match_stats.get('interceptions', 0) / 4) * 100),
-        ]
-        match_radar_labels = ["Passes %", "Duels %", "Dribbles %", "Tackles", "Interceptions"]
-        
-        match_radar_fig = glass_figure_layout(create_radar_chart(
-            values=match_radar_values,
-            metrics=match_radar_labels,
-            title="Match Performance Radar (90')",
-            name="This Match",
-            height=300
-        ))
-        match_radar_fig.update_layout(margin=dict(l=20, r=20, t=40, b=20), showlegend=False)
-
-        return html.Div([
-            header,
-            dbc.Row([
-                dbc.Col([
-                    html.Div([
-                        rating_badge,
-                        html.Div(stats_rows, className="mt-4 px-2")
-                    ], className="h-100 glass-card postmatch-stats-col")
-                ], width=12, md=4),
-                dbc.Col([
-                    html.Div([
-                        html.I(className="bi bi-geo-fill me-2 postmatch-accent-icon"),
-                        html.Span("Heatmap", className="postmatch-section-title"),
-                    ], className="postmatch-section-header mb-2 px-3"),
-                    dcc.Graph(figure=heatmap_fig, config={"displayModeBar": False}, className="w-100")
-                ], width=12, md=8, className="glass-card postmatch-heatmap-col")
-            ], className="g-3 mb-3"),
-            
-            dbc.Row([
-                dbc.Col([
-                    html.Div([
-                        html.I(className="bi bi-broadcast me-2 postmatch-accent-icon"),
-                        html.Span("Performance Radar (90')", className="postmatch-section-title"),
-                    ], className="postmatch-section-header mb-2"),
-                    dcc.Graph(figure=match_radar_fig, config={"displayModeBar": False}, className="w-100")
-                ], width=12, className="glass-card postmatch-radar-col")
-            ]),
-
-            html.Div([
-                html.Small([
-                    html.I(className="bi bi-stars me-1 postmatch-accent-icon"),
-                    "Datos de alta fidelidad proporcionados por Sofascore/BeSoccer Intelligence."
-                ], className="portal-text-muted")
-            ], className="mt-3 text-center")
-        ], className=f"stage-view stage-view--postmatch {glass_modifier}".strip())
-
-
-    # ── ESCENARIO B: FALLBACK (Transfermarkt Regular) ───────────────────────
-    # Radar adaptativo por posición (Task 4.3)
-    dm_f = get_hong_kong_data_manager()
-    pos_group = _get_position_group(player_name, dm_f)
-    
-    perf = player_stats.get("performance_stats", {})
-    percentiles = player_stats.get("percentiles", {})
-
-    # Define metrics based on position group for adaptive radar
-    position_radar_map = {
-        "Forward": ["Goals", "xG", "Shots on target, %", "Goal conversion, %"],
-        "Winger": ["Goals", "Assists", "Dribbles per 90", "Successful dribbles, %"],
-        "Midfielder": ["Assists", "xA", "Accurate passes, %", "Key passes per 90"],
-        "Defender": ["Interceptions per 90", "Defensive duels won, %", "Aerial duels won, %", "Shots blocked per 90"],
-        "Goalkeeper": ["Save rate, %", "Clean sheets", "Prevented goals per 90", "xG against per 90"]
-    }
-    
-    radar_metrics = position_radar_map.get(pos_group, ["Goals", "Assists", "Accurate passes, %", "Minutes played"])
-    radar_values = [percentiles.get(m, 50) for m in radar_metrics]
-    radar_labels = [m.split(",")[0].split(" per")[0].strip() for m in radar_metrics]
-
-    from utils.chart_helpers import create_radar_chart
-    radar_fig = glass_figure_layout(create_radar_chart(
-        values=radar_values,
-        metrics=radar_labels,
-        title=f"{player_name} — Position Percentiles",
-        name=player_name,
-    ))
-
-    from utils.chart_helpers import create_percentile_bars
-    percentile_display = {m: percentiles.get(m, 0) for m in radar_metrics}
-
-    # ── KPIs from TM (Task 4.4) ──
-    mins = payload.get("minutes_played") or 0
-    goals = payload.get("goals") or 0
-    assists = payload.get("assists") or 0
-    yc = payload.get("yellow_cards") or 0
-    rc = payload.get("red_cards") or 0
-    
-    kpi_badges = html.Div([
-        dbc.Badge(f"{mins}' Min", color="secondary", className="me-2 p-2"),
-        dbc.Badge(f"{goals} G", color="success", className="me-2 p-2") if goals else None,
-        dbc.Badge(f"{assists} A", color="info", className="me-2 p-2") if assists else None,
-        dbc.Badge("🟨", color="warning", className="me-2 p-2") if yc else None,
-        dbc.Badge("🟥", color="danger", className="me-2 p-2") if rc else None,
-        dbc.Badge(position, color="dark", className="me-2 p-2", style={"opacity": 0.8}) if position else None,
-    ], className="d-flex flex-wrap gap-1 align-items-center")
-
-    # ── Performance badge: how does this match rank vs player's season? ────
     performance_badge = None
-    vs_avg_row = None
+    avg_minutes = None
+    avg_goals = None
+    avg_assists = None
+    badge_text = None
+    badge_color = HKFATheme.ACCENT_GOLD
+    if rating_val is not None:
+        if rating_val >= 8.5:
+            badge_text, badge_color = "Outstanding Performance", HKFATheme.ACCENT_GOLD
+        elif rating_val >= 7.5:
+            badge_text, badge_color = "Strong Performance", HKFATheme.POSITIVE
+        elif rating_val >= 7.0:
+            badge_text, badge_color = "Solid Performance", HKFATheme.ACCENT_BLUE
+        elif rating_val < 6.0:
+            badge_text, badge_color = "Below-Par Performance", HKFATheme.NEGATIVE
+
+    if badge_text:
+        performance_badge = html.Div(
+            [
+                html.I(className="bi bi-activity me-1", style={"fontSize": "0.82rem"}),
+                html.Span(badge_text, style={"fontSize": "0.82rem", "fontWeight": "600"}),
+            ],
+            style={
+                "display": "inline-flex",
+                "alignItems": "center",
+                "padding": "5px 11px",
+                "borderRadius": "20px",
+                "background": f"rgba({_hex_to_rgb(badge_color)}, 0.15)",
+                "border": f"1px solid {badge_color}",
+                "color": badge_color,
+            },
+        )
     try:
         dm = get_hong_kong_data_manager()
         df = dm.processed_data
         if df is not None and player_name in df["Player"].values:
             p_row = df[df["Player"] == player_name].iloc[0]
             matches = float(p_row.get("Matches played") or 1) or 1
+            avg_minutes = float(p_row.get("Minutes played") or 0) / matches
             season_goals = float(p_row.get("Goals") or 0)
             season_assists = float(p_row.get("Assists") or 0)
             avg_goals = season_goals / matches
             avg_assists = season_assists / matches
-
-            match_goals = float(payload.get("goals") or 0)
-            match_assists = float(payload.get("assists") or 0)
-
-            # Determine performance badge from rating vs player's historical context
-            badge_text = None
-            badge_color = HKFATheme.ACCENT_GOLD
-            if rating is not None:
-                if rating >= 8.5:
-                    badge_text, badge_color = "Outstanding Performance", HKFATheme.ACCENT_GOLD
-                elif rating >= 7.5:
-                    badge_text, badge_color = "Strong Performance", HKFATheme.POSITIVE
-                elif rating >= 7.0:
-                    badge_text, badge_color = "Solid Performance", HKFATheme.ACCENT_BLUE
-                elif rating < 6.0:
-                    badge_text, badge_color = "Difficult Game", HKFATheme.NEGATIVE
-
-            if badge_text:
-                performance_badge = html.Div(
-                    [
-                        html.I(className="bi bi-star-fill me-1", style={"fontSize": "0.75rem"}),
-                        html.Span(badge_text, style={"fontSize": "0.8rem", "fontWeight": "600"}),
-                    ],
-                    style={
-                        "display": "inline-flex",
-                        "alignItems": "center",
-                        "padding": "4px 10px",
-                        "borderRadius": "20px",
-                        "background": f"rgba({_hex_to_rgb(badge_color)}, 0.15)",
-                        "border": f"1px solid {badge_color}",
-                        "color": badge_color,
-                        "marginBottom": "10px",
-                    },
-                )
-
-            # vs season average row
-            def _fmt_cmp(match_val: float, avg_val: float, label: str) -> html.Span:
-                """Helper for match value vs season average display."""
-                delta = match_val - avg_val
-                if delta > 0.05:
-                    clr = HKFATheme.POSITIVE
-                    arr = "↑"
-                elif delta < -0.05:
-                    clr = HKFATheme.NEGATIVE
-                    arr = "↓"
-                else:
-                    clr = HKFATheme.TEXT_SECONDARY
-                    arr = "→"
-                return html.Span(
-                    [
-                        html.Span(f"{label}: ", style={"color": HKFATheme.TEXT_SECONDARY, "fontSize": "0.8rem"}),
-                        html.Span(f"{match_val:.0f}", style={"color": HKFATheme.TEXT_PRIMARY, "fontWeight": "600", "fontSize": "0.8rem"}),
-                        html.Span(f" {arr} avg {avg_val:.1f}", style={"color": clr, "fontSize": "0.75rem"}),
-                    ],
-                    className="me-3",
-                )
-
-            vs_avg_row = html.Div(
-                [
-                    html.Small(
-                        [
-                            html.I(className="bi bi-bar-chart-line me-1", style={"color": HKFATheme.ACCENT_BLUE}),
-                            html.Span("vs your season avg: ", style={"color": HKFATheme.TEXT_SECONDARY}),
-                        ],
-                        className="me-2",
-                    ),
-                    _fmt_cmp(match_goals, avg_goals, "Goals"),
-                    _fmt_cmp(match_assists, avg_assists, "Assists"),
-                ],
-                className="mb-3",
-                style={"display": "flex", "flexWrap": "wrap", "alignItems": "center"},
-            )
     except Exception as e:
         logger.debug(f"render_post_match enrichment error: {e}")
 
-    # ── Layout ─────────────────────────────────────────────────────────────
-    return html.Div([
-            header,
-            html.Div([
-                kpi_badges,
-                sparkline_el,
-            ], className="postmatch-player-row mb-3 d-flex justify-content-between align-items-center"),
-            performance_badge,
-            vs_avg_row,
-            dbc.Row([
-                dbc.Col([
-                    html.Div([
-                        html.I(className="bi bi-broadcast me-2 postmatch-accent-icon"),
-                        html.Span("Performance Radar", className="postmatch-section-title"),
-                    ], className="postmatch-section-header mb-2"),
+    summary_children: List[Any] = [_section_title("bi-activity", "Match Performance")]
+    if mins > 0:
+        summary_meta_nodes: List[Any] = []
+        if performance_badge:
+            summary_meta_nodes.append(performance_badge)
+        summary_meta_nodes.append(
+            html.Span(
+                position_display,
+                style={
+                    "display": "inline-flex",
+                    "alignItems": "center",
+                    "padding": "6px 10px",
+                    "borderRadius": "999px",
+                    "background": f"rgba({_hex_to_rgb(HKFATheme.POSITIVE)}, 0.12)",
+                    "border": f"1px solid rgba({_hex_to_rgb(HKFATheme.POSITIVE)}, 0.28)",
+                    "color": "#eef4fa",
+                    "fontSize": "0.78rem",
+                    "fontWeight": "500",
+                },
+            )
+        )
+        summary_children.append(
+            html.Div(
+                summary_meta_nodes,
+                style={"display": "flex", "alignItems": "center", "gap": "14px", "flexWrap": "wrap", "marginBottom": "20px"},
+            )
+        )
+        pass_accuracy = None
+        total_pass = _safe_float(match_stats.get("totalPass"))
+        accurate_pass = _safe_float(match_stats.get("accuratePass"))
+        if accurate_pass is not None and total_pass not in (None, 0):
+            pass_accuracy = (accurate_pass / total_pass) * 100.0
+        possession_lost = _safe_float(match_stats.get("possessionLostCtrl"))
+        duel_won = _safe_float(match_stats.get("duelWon"))
+        duel_lost = _safe_float(match_stats.get("duelLost"))
+        trend_ratings = list(recent_ratings[:5])
+        trend_color = _trend_accent(trend_ratings) if trend_ratings else HKFATheme.TEXT_SECONDARY
+
+        def _vs_avg_line(current: Optional[float], average: Optional[float], suffix: str = "") -> Optional[html.Div]:
+            if current is None or average is None:
+                return None
+            delta = current - average
+            if delta > 0.05:
+                clr = HKFATheme.POSITIVE
+                arr = "↑"
+            elif delta < -0.05:
+                clr = HKFATheme.NEGATIVE
+                arr = "↓"
+            else:
+                clr = HKFATheme.ACCENT_GOLD
+                arr = "→"
+            return html.Div(
+                [
+                    html.Span("Vs Avg. ", style={"color": HKFATheme.TEXT_SECONDARY}),
+                    html.Span(f"{average:.1f}{suffix} {arr}", style={"color": clr}),
+                ],
+                style={"fontSize": "0.82rem", "fontWeight": "600"},
+            )
+
+        kpi_cards = [
+            html.Div(_build_kpi_card("Minutes", f"{mins}'", "#b7c2d1", icon="bi-stopwatch", secondary_lines=[_vs_avg_line(float(mins), avg_minutes)]), style={"flex": "1 1 150px"}),
+            html.Div(_build_kpi_card("Goals", str(goals), HKFATheme.ACCENT_RED, html.Img(src="/assets/icons/soccer-ball.svg", style={"width": "20px", "height": "20px", "objectFit": "contain", "marginRight": "8px"}), secondary_lines=[_vs_avg_line(float(goals), avg_goals)]), style={"flex": "1 1 150px"}),
+            html.Div(_build_kpi_card("Assists", str(assists), HKFATheme.ACCENT_BLUE, html.I(**{"data-lucide": "sport-shoe", "className": "lucide-inline-icon rival-assist-icon me-2", "style": {"color": HKFATheme.ACCENT_BLUE, "width": "20px", "height": "20px"}}), secondary_lines=[_vs_avg_line(float(assists), avg_assists)]), style={"flex": "1 1 150px"}),
+            html.Div(_build_kpi_card("Rating", f"{rating_val:.1f}" if rating_val is not None else "—", HKFATheme.ACCENT_GOLD, "bi-star-fill", secondary_lines=[
+                html.Div(f"Trend {_format_trend_label(trend_ratings)}", style={"color": trend_color, "fontSize": "0.82rem", "fontWeight": "700"}) if trend_ratings else None,
+                html.Div(" / ".join(f"{r:.1f}" for r in trend_ratings), style={"color": HKFATheme.TEXT_SECONDARY, "fontSize": "0.78rem", "fontWeight": "600"}) if trend_ratings else None,
+            ]), style={"flex": "1 1 170px"}),
+        ]
+        if is_high_fidelity:
+            kpi_cards.extend([
+                html.Div(_build_kpi_card("Pass Accuracy", f"{pass_accuracy:.0f}%" if pass_accuracy is not None else "—", HKFATheme.ACCENT_BLUE, "bi-arrow-left-right", secondary_lines=[html.Div(f"Possession Lost {possession_lost:.0f}" if possession_lost is not None else "Possession Lost —", style={"color": HKFATheme.TEXT_SECONDARY, "fontSize": "0.82rem", "fontWeight": "600"})]), style={"flex": "1 1 150px"}),
+                html.Div(_build_kpi_card("Duels Won", f"{duel_won:.0f}" if duel_won is not None else "—", HKFATheme.POSITIVE, "bi-shield-check", secondary_lines=[html.Div(f"Duels Lost {duel_lost:.0f}" if duel_lost is not None else "Duels Lost —", style={"color": HKFATheme.TEXT_SECONDARY, "fontSize": "0.82rem", "fontWeight": "600"})]), style={"flex": "1 1 150px"}),
+            ])
+        if own_goals > 0:
+            kpi_cards.append(
+                html.Div(
+                    _build_kpi_card("Own Goals", str(own_goals), HKFATheme.NEGATIVE, "bi-exclamation-triangle"),
+                    style={"flex": "1 1 150px"},
+                )
+            )
+        summary_children.append(
+            html.Div(
+                kpi_cards,
+                style={"display": "flex", "gap": "12px", "flexWrap": "wrap", "marginBottom": "14px", "marginTop": "8px"},
+            )
+        )
+    else:
+        _absence_labels = {
+            "No convocado": ("secondary", "Not Summoned"),
+            "not_summoned": ("secondary", "Not Summoned"),
+            "Lesionado": ("warning", "Injury"),
+            "injured": ("warning", "Injury"),
+            "Suspendido": ("danger", "Suspension"),
+            "suspended": ("danger", "Suspension"),
+            "Banquillo": ("info", "Bench (Unused)"),
+            "bench": ("info", "Bench (Unused)"),
+            "No jugado": ("danger", "Did Not Play"),
+            "No jugo": ("danger", "Did Not Play"),
+            "Not played": ("danger", "Did Not Play"),
+            "not_played": ("danger", "Did Not Play"),
+        }
+        badge_color, badge_label = _absence_labels.get(absence_reason or "No jugado", ("danger", "Did Not Play"))
+        summary_children.append(
+            html.Div(
+                [
+                    html.I(className="bi bi-person-x me-2", style={"color": "#f4f8fc"}),
+                    dbc.Badge(badge_label, color=badge_color, className="text-white"),
+                ],
+                className="d-flex align-items-center",
+            )
+        )
+    summary_section = html.Div(summary_children, className="mb-3")
+
+    # ── Season profile radar + percentiles (reuse dashboard logic) ──────────
+    dm_f = get_hong_kong_data_manager()
+    pos_group = dashboard_data.get("pos_group") or _get_position_group(player_name, dm_f)
+    percentiles_all = dashboard_data.get("percentiles_data") or {}
+    perf_stats = player_stats.get("performance_stats", {}) or {}
+    if not percentiles_all:
+        fallback_percentiles = {
+            "Goals": {"percentile": 100 if goals >= 2 else 80 if goals == 1 else 35, "group_avg_percentile": 50},
+            "Assists": {"percentile": 100 if assists >= 2 else 80 if assists == 1 else 35, "group_avg_percentile": 50},
+            "Accurate passes, %": {"percentile": float(perf_stats.get("pass_accuracy") or perf_stats.get("accurate_passes_pct") or 50), "group_avg_percentile": 50},
+            "Minutes played": {"percentile": min(100, round((mins / 90) * 100, 1)) if mins else 0, "group_avg_percentile": 50},
+        }
+        percentiles_all = fallback_percentiles
+
+    pos_radar = [m for m in POSITION_METRICS.get(pos_group, []) if m in percentiles_all]
+    supplemental = [m for m in SUPPLEMENTAL_RADAR_METRICS.get(pos_group, []) if m in percentiles_all and m not in pos_radar]
+    radar_metrics = (pos_radar + supplemental)[:5]
+    if len(radar_metrics) < 3:
+        radar_metrics = list(percentiles_all.keys())[:4]
+
+    radar_values = []
+    reference_values = []
+    radar_labels = []
+    percentile_display = {}
+    for metric in radar_metrics:
+        metric_data = percentiles_all.get(metric) or {}
+        if isinstance(metric_data, dict):
+            pct = float(metric_data.get("percentile", 0) or 0)
+            ref = float(metric_data.get("group_avg_percentile", 50) or 50)
+        else:
+            pct = float(metric_data or 0)
+            ref = 50.0
+        radar_values.append(pct)
+        reference_values.append(ref)
+        radar_labels.append(metric.split(",")[0].split(" per")[0].strip())
+        percentile_display[metric] = metric_data
+
+    from utils.chart_helpers import create_radar_chart, create_percentile_bars
+    radar_fig = glass_figure_layout(create_radar_chart(
+        values=radar_values,
+        metrics=radar_labels,
+        title="",
+        name=player_name,
+        reference_values=reference_values if len(reference_values) == len(radar_values) else None,
+        reference_name="Position Avg",
+    ))
+    radar_fig.update_layout(
+        polar=dict(domain=dict(x=[0.03, 0.97], y=[0.08, 0.98])),
+        legend=dict(orientation="h", yanchor="top", y=-0.08, xanchor="center", x=0.5, font=dict(size=9)),
+        margin=dict(l=8, r=8, t=28, b=38),
+    )
+
+    def _format_match_metric(metric_key: str, metric_value: Any) -> Optional[str]:
+        value = _safe_float(metric_value)
+        if value is None:
+            return None
+        if metric_key.endswith("_pct"):
+            return f"{value:.0f}%"
+        if metric_key in {"accurate_passes", "touches", "recoveries", "interceptions", "clearances", "tackles", "aerials_won", "ball_carries", "progressive_distance"}:
+            return f"{value:.0f}"
+        if value.is_integer():
+            return f"{int(value)}"
+        return f"{value:.1f}"
+
+    def _derive_match_insights(stats: Dict[str, Any], group: str) -> List[Dict[str, str]]:
+        accurate_passes = _safe_float(stats.get("accuratePass"))
+        total_passes = _safe_float(stats.get("totalPass"))
+        duel_won = _safe_float(stats.get("duelWon"))
+        duel_lost = _safe_float(stats.get("duelLost"))
+        total_duels = (duel_won or 0) + (duel_lost or 0)
+        pass_pct = ((accurate_passes / total_passes) * 100.0) if accurate_passes is not None and total_passes not in (None, 0) else None
+        duel_pct = ((duel_won / total_duels) * 100.0) if duel_won is not None and total_duels > 0 else None
+
+        derived = {
+            "pass_pct": pass_pct,
+            "duel_pct": duel_pct,
+            "accurate_passes": accurate_passes,
+            "total_passes": total_passes,
+            "duels_won": duel_won,
+            "duels_lost": duel_lost,
+            "touches": stats.get("touches"),
+            "recoveries": stats.get("ballRecovery"),
+            "interceptions": stats.get("interceptionWon"),
+            "clearances": stats.get("totalClearance"),
+            "tackles": stats.get("totalTackle"),
+            "aerials_won": stats.get("aerialWon"),
+            "long_balls": stats.get("accurateLongBalls"),
+            "long_balls_total": stats.get("totalLongBalls"),
+            "ball_carries": stats.get("ballCarriesCount"),
+            "progressive_distance": stats.get("totalProgression"),
+            "shots": stats.get("totalShots"),
+            "fouls": stats.get("fouls"),
+            "outfielder_blocks": stats.get("outfielderBlock"),
+            "own_half_passes": stats.get("accurateOwnHalfPasses"),
+            "opp_half_passes": stats.get("totalOppositionHalfPasses"),
+            "own_half_passes_total": stats.get("totalOwnHalfPasses"),
+            "carry_distance": stats.get("totalBallCarriesDistance"),
+            "best_carry_progression": stats.get("bestBallCarryProgression"),
+            "pass_value": stats.get("passValueNormalized"),
+            "dribble_value": stats.get("dribbleValueNormalized"),
+            "defensive_value": stats.get("defensiveValueNormalized"),
+            "rating": stats.get("rating"),
+            "possession_lost": stats.get("possessionLostCtrl"),
+        }
+        label_map = {
+            "pass_pct": "Pass Accuracy",
+            "duel_pct": "Duels Won %",
+            "accurate_passes": "Accurate Passes",
+            "total_passes": "Total Passes",
+            "duels_won": "Duels Won",
+            "duels_lost": "Duels Lost",
+            "touches": "Touches",
+            "recoveries": "Recoveries",
+            "interceptions": "Interceptions",
+            "clearances": "Clearances",
+            "tackles": "Tackles",
+            "aerials_won": "Aerials Won",
+            "long_balls": "Accurate Long Balls",
+            "long_balls_total": "Total Long Balls",
+            "ball_carries": "Ball Carries",
+            "progressive_distance": "Progressive Distance",
+            "shots": "Shots",
+            "fouls": "Fouls",
+            "outfielder_blocks": "Blocks",
+            "own_half_passes": "Own Half Passes",
+            "opp_half_passes": "Opp. Half Passes",
+            "own_half_passes_total": "Own Half Total Passes",
+            "carry_distance": "Carry Distance",
+            "best_carry_progression": "Best Carry Progression",
+            "pass_value": "Pass Value",
+            "dribble_value": "Dribble Value",
+            "defensive_value": "Defensive Value",
+            "rating": "Rating",
+            "possession_lost": "Possession Lost",
+        }
+        insights: List[Dict[str, str]] = []
+        for key, value in derived.items():
+            formatted = _format_match_metric(key, value)
+            if formatted is None:
+                continue
+            insights.append({"label": label_map.get(key, key.replace("_", " ").title()), "value": formatted})
+        return insights
+
+    match_insights = _derive_match_insights(match_stats, pos_group)
+
+    def _normalize_to_100(value: Optional[float], cap: float) -> Optional[float]:
+        if value is None or cap <= 0:
+            return None
+        return max(0.0, min(100.0, (value / cap) * 100.0))
+
+    def _normalize_signed_value(value: Optional[float]) -> Optional[float]:
+        if value is None:
+            return None
+        return max(0.0, min(100.0, (value + 1.0) * 50.0))
+
+    def _build_advanced_metric_pool(stats: Dict[str, Any], group: str) -> Dict[str, Dict[str, Any]]:
+        accurate_passes = _safe_float(stats.get("accuratePass"))
+        total_passes = _safe_float(stats.get("totalPass"))
+        duel_won = _safe_float(stats.get("duelWon"))
+        duel_lost = _safe_float(stats.get("duelLost"))
+        total_duels = (duel_won or 0) + (duel_lost or 0)
+        pass_pct = ((accurate_passes / total_passes) * 100.0) if accurate_passes is not None and total_passes not in (None, 0) else None
+        duel_pct = ((duel_won / total_duels) * 100.0) if duel_won is not None and total_duels > 0 else None
+
+        raw_pool: Dict[str, Dict[str, Any]] = {
+            "Defensive Value": {"value": _safe_float(stats.get("defensiveValueNormalized")), "normalized": _normalize_signed_value(_safe_float(stats.get("defensiveValueNormalized")))},
+            "Dribble Value": {"value": _safe_float(stats.get("dribbleValueNormalized")), "normalized": _normalize_signed_value(_safe_float(stats.get("dribbleValueNormalized")))},
+            "Pass Value": {"value": _safe_float(stats.get("passValueNormalized")), "normalized": _normalize_signed_value(_safe_float(stats.get("passValueNormalized")))},
+            "Pass Accuracy": {"value": pass_pct, "normalized": pass_pct},
+            "Duels Won %": {"value": duel_pct, "normalized": duel_pct},
+            "Touches": {"value": _safe_float(stats.get("touches")), "normalized": _normalize_to_100(_safe_float(stats.get("touches")), 120)},
+            "Recoveries": {"value": _safe_float(stats.get("ballRecovery")), "normalized": _normalize_to_100(_safe_float(stats.get("ballRecovery")), 16)},
+            "Interceptions": {"value": _safe_float(stats.get("interceptionWon")), "normalized": _normalize_to_100(_safe_float(stats.get("interceptionWon")), 8)},
+            "Clearances": {"value": _safe_float(stats.get("totalClearance")), "normalized": _normalize_to_100(_safe_float(stats.get("totalClearance")), 14)},
+            "Tackles": {"value": _safe_float(stats.get("totalTackle")), "normalized": _normalize_to_100(_safe_float(stats.get("totalTackle")), 8)},
+            "Aerials Won": {"value": _safe_float(stats.get("aerialWon")), "normalized": _normalize_to_100(_safe_float(stats.get("aerialWon")), 12)},
+            "Accurate Long Balls": {"value": _safe_float(stats.get("accurateLongBalls")), "normalized": _normalize_to_100(_safe_float(stats.get("accurateLongBalls")), 14)},
+            "Ball Carries": {"value": _safe_float(stats.get("ballCarriesCount")), "normalized": _normalize_to_100(_safe_float(stats.get("ballCarriesCount")), 20)},
+            "Progressive Distance": {"value": _safe_float(stats.get("totalProgression")), "normalized": _normalize_to_100(_safe_float(stats.get("totalProgression")), 500)},
+            "Shots": {"value": _safe_float(stats.get("totalShots")), "normalized": _normalize_to_100(_safe_float(stats.get("totalShots")), 8)},
+            "Possession Lost": {"value": _safe_float(stats.get("possessionLostCtrl")), "normalized": _normalize_to_100(_safe_float(stats.get("possessionLostCtrl")), 30)},
+            "Accurate Passes": {"value": accurate_passes, "normalized": _normalize_to_100(accurate_passes, 90)},
+            "Total Passes": {"value": total_passes, "normalized": _normalize_to_100(total_passes, 110)},
+            "Duels Won": {"value": duel_won, "normalized": _normalize_to_100(duel_won, 16)},
+            "Duels Lost": {"value": duel_lost, "normalized": _normalize_to_100(duel_lost, 16)},
+            "Total Long Balls": {"value": _safe_float(stats.get("totalLongBalls")), "normalized": _normalize_to_100(_safe_float(stats.get("totalLongBalls")), 18)},
+            "Carry Distance": {"value": _safe_float(stats.get("totalBallCarriesDistance")), "normalized": _normalize_to_100(_safe_float(stats.get("totalBallCarriesDistance")), 900)},
+            "Best Carry Progression": {"value": _safe_float(stats.get("bestBallCarryProgression")), "normalized": _normalize_to_100(_safe_float(stats.get("bestBallCarryProgression")), 120)},
+            "Blocks": {"value": _safe_float(stats.get("outfielderBlock")), "normalized": _normalize_to_100(_safe_float(stats.get("outfielderBlock")), 6)},
+            "Own Half Passes": {"value": _safe_float(stats.get("accurateOwnHalfPasses")), "normalized": _normalize_to_100(_safe_float(stats.get("accurateOwnHalfPasses")), 60)},
+            "Opp. Half Passes": {"value": _safe_float(stats.get("totalOppositionHalfPasses")), "normalized": _normalize_to_100(_safe_float(stats.get("totalOppositionHalfPasses")), 45)},
+            "Rating": {"value": _safe_float(stats.get("rating")), "normalized": _normalize_to_100(_safe_float(stats.get("rating")), 10)},
+        }
+        radar_pref = {
+            "Defender": ["Defensive Value", "Dribble Value", "Pass Value", "Interceptions", "Clearances", "Tackles"],
+            "Midfielder": ["Defensive Value", "Dribble Value", "Pass Value", "Touches", "Recoveries", "Progressive Distance"],
+            "Winger": ["Defensive Value", "Dribble Value", "Pass Value", "Ball Carries", "Progressive Distance", "Shots"],
+            "Forward": ["Defensive Value", "Dribble Value", "Pass Value", "Shots", "Ball Carries", "Aerials Won"],
+        }
+        bar_pref = {
+            "Defender": ["Accurate Passes", "Total Passes", "Duels Won", "Duels Lost", "Aerials Won", "Accurate Long Balls", "Total Long Balls", "Blocks"],
+            "Midfielder": ["Accurate Passes", "Total Passes", "Duels Won", "Duels Lost", "Accurate Long Balls", "Touches", "Recoveries", "Ball Carries"],
+            "Winger": ["Accurate Passes", "Duels Won", "Duels Lost", "Touches", "Recoveries", "Ball Carries", "Shots", "Blocks"],
+            "Forward": ["Accurate Passes", "Touches", "Duels Won", "Duels Lost", "Shots", "Ball Carries", "Aerials Won", "Blocks"],
+        }
+        return {
+            "pool": raw_pool,
+            "radar_labels": [label for label in radar_pref.get(group, radar_pref["Midfielder"]) if raw_pool.get(label, {}).get("normalized") is not None][:6],
+            "bar_labels": [label for label in bar_pref.get(group, bar_pref["Midfielder"]) if raw_pool.get(label, {}).get("normalized") is not None],
+        }
+
+    advanced_metric_bundle = _build_advanced_metric_pool(match_stats, pos_group) if is_high_fidelity else {"pool": {}, "radar_labels": [], "bar_labels": []}
+    advanced_pool = advanced_metric_bundle.get("pool", {})
+
+    def _build_match_insights_card(insights: List[Dict[str, str]], heatmap_fig: Optional[go.Figure] = None) -> dbc.Card:
+        if not insights:
+            content: Any = html.Div("Advanced match stats not available.", style={"color": HKFATheme.TEXT_SECONDARY, "fontSize": "0.92rem"})
+            arrow_row = None
+        else:
+            def _tile(item: Dict[str, str]) -> html.Div:
+                return html.Div(
+                    [
+                        html.Span(item["label"], style={"color": HKFATheme.TEXT_SECONDARY, "fontSize": "0.76rem", "fontWeight": "600", "textTransform": "uppercase", "letterSpacing": "0.04em"}),
+                        html.Span(item["value"], style={"color": "#f4f8fc", "fontSize": "1.08rem", "fontWeight": "800", "lineHeight": "1"}),
+                    ],
+                    style={
+                        "display": "flex",
+                        "flexDirection": "column",
+                        "justifyContent": "space-between",
+                        "alignItems": "flex-start",
+                        "padding": "12px 12px 10px",
+                        "border": "1px solid rgba(255,255,255,0.10)",
+                        "borderRadius": "14px",
+                        "background": "linear-gradient(180deg, rgba(110,212,126,0.10), rgba(255,255,255,0.03))",
+                        "minHeight": "80px",
+                        "gap": "8px",
+                    },
+                )
+
+            arrow_row = html.Div(
+                [
+                    html.Div(
+                        "→",
+                        style={
+                            "fontSize": "34px",
+                            "fontWeight": "700",
+                            "lineHeight": "1",
+                            "color": "rgba(24, 33, 37, 0.95)",
+                            "textAlign": "center",
+                            "marginBottom": "6px",
+                            "gridColumn": "span 2",
+                        },
+                        className="match-heatmap-arrow",
+                    )
+                ],
+                style={"display": "grid", "gridTemplateColumns": "repeat(4, minmax(0, 1fr))", "gap": "14px"},
+            )
+            heatmap_panel = html.Div(
+                [
                     dcc.Graph(
-                        figure=radar_fig,
+                        figure=heatmap_fig,
                         config={"displayModeBar": False, "responsive": True},
                         className="w-100",
                         responsive=True,
-                        style={"width": "100%", "minWidth": "0"},
-                    ),
-                ], width=12, md=7, className="glass-card postmatch-radar-col"),
-                dbc.Col([
-                    html.Div([
-                        html.I(className="bi bi-bar-chart-steps me-2 postmatch-accent-icon"),
-                        html.Span("Percentiles", className="postmatch-section-title"),
-                    ], className="postmatch-section-header mb-3"),
-                    create_percentile_bars(percentile_display),
-                ], width=12, md=5, className="glass-card postmatch-percentile-col"),
-            ], className="g-3"),
+                        style={"width": "100%", "height": "230px"},
+                    ) if heatmap_fig is not None else None,
+                ],
+                style={"gridColumn": "span 2", "gridRow": "span 2", "paddingTop": "0"},
+            )
+
+            content = html.Div(
+                [heatmap_panel, *[_tile(item) for item in insights]],
+                style={"display": "grid", "gridTemplateColumns": "repeat(4, minmax(0, 1fr))", "gap": "14px", "alignItems": "start", "paddingTop": "0"},
+            )
+        return _glass_card(
+            dbc.CardBody([
+                _section_title("bi-activity", "Match Heatmap & Insights"),
+                arrow_row,
+                content,
+            ], className="p-4"),
+            extra_style={"height": "100%", "width": "100%", "minHeight": "520px"},
+        )
+    recent_ratings = payload.get("recent_ratings") or []
+    if not recent_ratings:
+        recent_ratings = []
+        try:
+            from models.db_models import MatchHistory as _MH
+            from utils.db_engine import SessionFactory as _SF
+            player_id_logged = _get_logged_in_player_id()
+            if player_id_logged:
+                with _SF() as _sess:
+                    recent_matches = (
+                        _sess.query(_MH)
+                        .filter(_MH.player_id == player_id_logged, _MH.raw_data.isnot(None))
+                        .order_by(_MH.date.desc())
+                        .limit(5)
+                        .all()
+                    )
+                for _m in reversed(recent_matches):
+                    _raw = _m.raw_data or {}
+                    _r = _raw.get("besoccer_rating") or _raw.get("rating") or _raw.get("sofascore_rating")
+                    if _r is not None:
+                        try:
+                            recent_ratings.append(float(_r))
+                        except (ValueError, TypeError):
+                            pass
+        except Exception:
+            recent_ratings = []
+
+    analysis_cols: List[Any] = []
+    if is_high_fidelity:
+        from utils.chart_helpers import create_match_heatmap
+
+        heatmap_data = payload.get("heatmap", [])
+        heatmap_fig = create_match_heatmap(heatmap_data, height=240)
+        advanced_radar_labels = advanced_metric_bundle.get("radar_labels", [])
+        advanced_radar_values = [advanced_pool[label]["normalized"] for label in advanced_radar_labels if advanced_pool.get(label)]
+        advanced_radar_raw = [advanced_pool[label]["value"] for label in advanced_radar_labels if advanced_pool.get(label)]
+        radar_fig = glass_figure_layout(create_radar_chart(
+            values=advanced_radar_values,
+            metrics=advanced_radar_labels,
+            title="",
+            name="Match",
+        ))
+        radar_fig.update_layout(
+            polar=dict(domain=dict(x=[0.03, 0.97], y=[0.08, 0.98])),
+            legend=dict(orientation="h", yanchor="top", y=-0.08, xanchor="center", x=0.5, font=dict(size=9)),
+            margin=dict(l=8, r=8, t=28, b=38),
+        )
+
+        kpi_labels = {"Minutes", "Goals", "Assists", "Pass Accuracy", "Duels Won", "Rating", "Duels Lost", "Possession Lost"}
+        bar_dict: Dict[str, Any] = {}
+        used_labels = set(advanced_radar_labels)
+        for label in advanced_metric_bundle.get("bar_labels", []):
+            if label in kpi_labels or label in used_labels:
+                continue
+            metric_entry = advanced_pool.get(label) or {}
+            norm_val = metric_entry.get("normalized")
+            raw_val = metric_entry.get("value")
+            if norm_val is None or raw_val is None:
+                continue
+            bar_dict[label] = {"percentile": norm_val, "group_avg_percentile": 50}
+            used_labels.add(label)
+
+        remaining_insights = [item for item in match_insights if item["label"] not in used_labels and item["label"] not in kpi_labels]
+
+        upper_analysis_cols = [
+            dbc.Col(
+                _glass_card(
+                    dbc.CardBody([
+                        _section_title("bi-broadcast", "Match Profile"),
+                        dcc.Graph(figure=radar_fig, config={"displayModeBar": False, "responsive": True}, className="w-100", responsive=True, style={"width": "100%", "height": "340px"}),
+                    ], className="p-4"),
+                    extra_style={"height": "100%", "minHeight": "430px", "width": "100%"},
+                ),
+                width=12,
+                md=6,
+                className="d-flex",
+            ),
+            dbc.Col(
+                _glass_card(
+                    dbc.CardBody([
+                        _section_title("bi-bar-chart-steps", "Match Metrics"),
+                        create_percentile_bars(bar_dict),
+                    ], className="p-4"),
+                    extra_style={"height": "100%", "minHeight": "430px", "width": "100%"},
+                ),
+                width=12,
+                md=6,
+                className="d-flex",
+            ),
+        ]
+        lower_analysis_cols = [
+            dbc.Col(
+                _build_match_insights_card(remaining_insights, heatmap_fig),
+                width=12,
+                className="d-flex",
+            ),
+        ]
+    else:
+        upper_analysis_cols = [
+            dbc.Col(
+                _glass_card(
+                    dbc.CardBody([
+                        _section_title("bi-broadcast", "Season Profile"),
+                        dcc.Graph(
+                            figure=radar_fig,
+                            config={"displayModeBar": False, "responsive": True},
+                            className="w-100",
+                            responsive=True,
+                            style={"width": "100%", "minWidth": "0", "height": "340px"},
+                        ),
+                    ], className="p-4"),
+                    extra_style={"height": "100%", "minHeight": "430px", "width": "100%"},
+                ),
+                width=12,
+                md=6,
+                className="d-flex",
+            ),
+            dbc.Col(
+                _glass_card(
+                    dbc.CardBody([
+                        _section_title("bi-bar-chart-steps", "Season Percentiles"),
+                        create_percentile_bars(percentile_display),
+                    ], className="p-4"),
+                    extra_style={"height": "100%", "minHeight": "430px", "width": "100%"},
+                ),
+                width=12,
+                md=6,
+                className="d-flex",
+            ),
+        ]
+        lower_analysis_cols = []
+
+    return html.Div(
+        [
+            header,
+            summary_section,
+            dbc.Row(upper_analysis_cols, className="g-3 align-items-stretch"),
+            dbc.Row(lower_analysis_cols, className="g-3 align-items-stretch mt-0") if lower_analysis_cols else None,
         ],
-        className=f"stage-view stage-view--postmatch {glass_modifier}".strip(),
+        className="stage-view stage-view--postmatch",
     )
 
 
@@ -4130,9 +4855,19 @@ def _get_career_surface_meta(item: Any, section_label: str) -> Dict[str, str]:
     evidence_key = str(getattr(item, "evidence_key", "") or "")
     emphasis = str(getattr(item, "emphasis", "neutral") or "neutral")
 
-    if evidence_key in {"minutes_trend", "career_arc", "career_trend", "career_value_summary", "recent_form"}:
+    if evidence_key in {
+        "minutes_trend",
+        "career_arc",
+        "career_trend",
+        "career_value_summary",
+        "recent_form",
+        "top_tier_gap",
+        "consistency_profile",
+        "team_context",
+        "career_timing_context",
+    }:
         icon_class = "bi bi-graph-up-arrow"
-    elif evidence_key == "career_phase_resolution":
+    elif evidence_key in {"career_phase_resolution", "team_positional_rank", "team_global_rank", "league_positional_standing", "league_global_standing"}:
         icon_class = "bi bi-signpost-split"
     elif evidence_key == "projection_outlook":
         icon_class = "bi bi-compass"
@@ -4610,8 +5345,6 @@ def _build_career_progression_rating_chart(data: Dict[str, Any]) -> Optional[htm
     if plot_df is None or plot_df.empty:
         return None
 
-    rating_min = max(0.0, float(plot_df["Rating"].min()) - 0.12)
-    rating_max = min(10.0, float(plot_df["Rating"].max()) + 0.08)
     latest_rating = float(plot_df["Rating"].iloc[-1])
     best_rating = float(plot_df["Rating"].max())
     best_season = str(plot_df.loc[plot_df["Rating"].idxmax(), "Season"])
@@ -4649,7 +5382,7 @@ def _build_career_progression_rating_chart(data: Dict[str, Any]) -> Optional[htm
         ),
     )
     fig.update_xaxes(title=None, ticklabelstandoff=8)
-    fig.update_yaxes(title="Rating", range=[rating_min, rating_max], tickformat=".1f")
+    fig.update_yaxes(title="Rating", range=[0, 10], tick0=0, dtick=1, tickformat=".1f")
 
     return html.Div(
         [
@@ -5136,6 +5869,11 @@ def _build_career_phase_resolution_evidence(
 
     evidence = ((career_facts or {}).get("evidence_facts") or {}).get("career_phase_resolution") or {}
     resolution = dict(evidence.get("progression_resolution") or career_phase_data.get("progression_resolution") or {})
+    recommended_phase = str(
+        career_phase_data.get("recommended_phase")
+        or resolution.get("recommended_phase")
+        or "Find Consistency"
+    )
     peak_range = evidence.get("peak_range") or career_phase_data.get("peak_range") or []
     age = int(evidence.get("age") or career_phase_data.get("age") or data.get("age") or 0)
     phase_key = str(career_phase_data.get("career_phase") or "unknown")
@@ -5148,51 +5886,34 @@ def _build_career_phase_resolution_evidence(
     peak_start = int(peak_range[0]) if len(peak_range) == 2 else 0
     peak_end = int(peak_range[1]) if len(peak_range) == 2 else 0
 
-    if phase_key == "peak" and peak_end and age > peak_end:
-        current_read = "Peak, but under late-cycle pressure"
-        summary_title = "This still looks competitive, but it no longer reads like a clean growth phase."
-        summary_body = (
-            f"At {age}, you are beyond the typical peak window ({peak_start}-{peak_end}). "
-            "That means the priority is to protect level and stability before pushing for something bigger."
-        )
-    elif phase_key == "post-peak" and momentum >= 3:
-        current_read = "Post-peak, but still holding value"
-        summary_title = "The profile still has competitive weight, even if the cycle is no longer at its highest point."
-        summary_body = (
-            "The next step is less about acceleration and more about holding level, role, and repeatability."
-        )
-    elif phase_key == "building" and momentum >= 4:
-        current_read = "Building with force"
-        summary_title = "The player is still in a growth window and the current signs are pushing upward."
-        summary_body = (
-            "This is the kind of phase where stronger minutes and cleaner output can quickly change the next-step conversation."
-        )
-    elif phase_key == "peak":
-        current_read = "Peak, with value to protect"
-        summary_title = "The player is in a strong phase, but the next task is to keep that level stable."
-        summary_body = (
-            "The key is not just producing now, but showing that the same level can hold across the next stretch."
-        )
+    if recommended_phase == "Ambitious":
+        current_read = "Ambitious"
+        summary_title = "The comparative case is strong enough to justify aiming higher."
+        summary_body = "This read usually means the player is already competitive in the right groups and the remaining gap to top tier is manageable."
+    elif recommended_phase == "Keep Pushing":
+        current_read = "Keep Pushing"
+        summary_title = "The trend is moving the right way, but the case still needs more proof."
+        summary_body = "The level is promising enough to keep pressing forward, even if the strongest benchmark has not been fully reached yet."
+    elif recommended_phase == "Maintain Consistency":
+        current_read = "Maintain Consistency"
+        summary_title = "The level is credible now, so the main task is proving it holds."
+        summary_body = "This read is less about chasing a bigger jump immediately and more about making the same level repeatable."
     else:
-        current_read = resolved_phase
-        summary_title = "This phase read combines age, momentum, and role signals into one career checkpoint."
-        summary_body = "The next stretch will decide whether this phase strengthens, holds, or starts to soften."
+        current_read = "Find Consistency"
+        summary_title = "The next step still depends on making the level feel more reliable."
+        summary_body = "This read means the player has useful signals, but too much of the case still depends on unstable role, form, or context."
 
     if resolution.get("adjustment_applied") and base_phase and base_phase != resolved_phase:
         current_read = f"{current_read} ({base_phase} -> {resolved_phase})"
 
-    watch_next = "Watch whether minutes and consistency hold across the next run."
-    if transfer_quality == "BAJA":
-        watch_next = "Watch whether stability improves before trying to force a bigger move."
-    elif transfer_quality == "ÓPTIMA":
-        watch_next = "Watch whether the current level stays stable enough to justify a stronger push."
+    watch_next = str(resolution.get("next_condition") or "Watch whether minutes and consistency hold across the next run.")
 
     kpis = html.Div(
         [
-            html.Div([html.Div(phase, className="career-command-kpi__value"), html.Div("phase", className="career-command-kpi__label")], className="career-command-kpi"),
+            html.Div([html.Div(recommended_phase, className="career-command-kpi__value"), html.Div("recommendation", className="career-command-kpi__label")], className="career-command-kpi"),
             html.Div([html.Div(f"{momentum}/5", className="career-command-kpi__value"), html.Div("momentum", className="career-command-kpi__label")], className="career-command-kpi"),
             html.Div([html.Div(f"{age}" if age else "—", className="career-command-kpi__value"), html.Div("age", className="career-command-kpi__label")], className="career-command-kpi"),
-            html.Div([html.Div(transfer_quality, className="career-command-kpi__value"), html.Div("window", className="career-command-kpi__label")], className="career-command-kpi"),
+            html.Div([html.Div(str(resolution.get("validation_status") or "accept").replace("_", " ").title(), className="career-command-kpi__value"), html.Div("validator", className="career-command-kpi__label")], className="career-command-kpi"),
         ],
         className="career-command-kpis",
     )
@@ -5223,6 +5944,274 @@ def _build_career_phase_resolution_evidence(
     )
 
     return html.Div([header, kpis, summary, html.Div(body, className="career-outlook-card")])
+
+
+def _build_comparative_dimension_evidence(title: str, evidence: Dict[str, Any], *, icon_class: str = "bi bi-bar-chart-line") -> html.Div:
+    header = html.H6([
+        html.I(className=f"{icon_class} me-2"),
+        html.Span(title, className="animate-glass-draw"),
+    ], className="mb-3 fw-semibold", style={"color": "var(--accent-cyan, #00d4ff)"})
+    dimension = evidence.get("dimension") or {}
+    if not dimension:
+        return html.Div([header, html.P("Comparison data is not available for this view yet.", className="text-muted small")])
+
+    percentile = float(dimension.get("percentile") or 0.0)
+    average_gap = float(dimension.get("average_gap") or 0.0)
+    top_gap = float(dimension.get("top_tier_gap") or 0.0)
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=["Player", "Average", "Top Tier"],
+        y=[
+            float(dimension.get("player_value") or 0.0),
+            float(dimension.get("average_value") or 0.0),
+            float(dimension.get("top_tier_value") or 0.0),
+        ],
+        marker_color=["#00d4ff", "rgba(255,255,255,0.45)", "#f5b942"],
+    ))
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=24, r=12, t=10, b=36),
+        height=280,
+        showlegend=False,
+    )
+    fig = glass_figure_layout(fig)
+    kpis = html.Div(
+        [
+            html.Div([html.Div(f"{percentile:.1f}", className="career-command-kpi__value"), html.Div("percentile", className="career-command-kpi__label")], className="career-command-kpi"),
+            html.Div([html.Div(f"{average_gap:+.1f}", className="career-command-kpi__value"), html.Div("vs avg", className="career-command-kpi__label")], className="career-command-kpi"),
+            html.Div([html.Div(f"{top_gap:+.1f}", className="career-command-kpi__value"), html.Div("vs top tier", className="career-command-kpi__label")], className="career-command-kpi"),
+        ],
+        className="career-command-kpis",
+    )
+    return html.Div([header, kpis, dcc.Graph(figure=fig, config={"displayModeBar": False})])
+
+
+def _build_score_shell_evidence(title: str, evidence: Dict[str, Any], metric_key: str, label_key: str) -> html.Div:
+    header = html.H6([
+        html.I(className="bi bi-graph-up-arrow me-2"),
+        html.Span(title, className="animate-glass-draw"),
+    ], className="mb-3 fw-semibold", style={"color": "var(--accent-cyan, #00d4ff)"})
+    score_value = float(evidence.get(metric_key) or 0.0)
+    label_value = str(evidence.get(label_key) or "unavailable").replace("_", " ")
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=score_value,
+        gauge={"axis": {"range": [0, 100]}, "bar": {"color": "#00d4ff"}},
+    ))
+    fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", margin=dict(l=12, r=12, t=12, b=12), height=260)
+    return html.Div([
+        header,
+        html.Div(
+            [
+                html.Div([html.Div(f"{score_value:.1f}", className="career-command-kpi__value"), html.Div("score", className="career-command-kpi__label")], className="career-command-kpi"),
+                html.Div([html.Div(label_value.title(), className="career-command-kpi__value"), html.Div("read", className="career-command-kpi__label")], className="career-command-kpi"),
+            ],
+            className="career-command-kpis",
+        ),
+        dcc.Graph(figure=fig, config={"displayModeBar": False}),
+    ])
+
+
+def _format_context_read_label(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    mapping = {
+        "driving_team_context": "Driving Team Context",
+        "outperforming_team": "Outperforming Team",
+        "balanced": "Balanced",
+        "carried_by_team": "Not Yet Driving Context",
+        "prime_window": "Prime Window",
+        "late_prime": "Late Prime",
+        "early_window": "Early Window",
+        "late_cycle": "Late Cycle",
+        "high": "High",
+        "moderate": "Moderate",
+        "low": "Low",
+    }
+    if normalized in mapping:
+        return mapping[normalized]
+    return str(value or "").replace("_", " ").title()
+
+
+def _build_team_context_evidence(evidence: Dict[str, Any]) -> html.Div:
+    header = html.H6([
+        html.I(className="bi bi-diagram-3 me-2"),
+        html.Span("Team Context", className="animate-glass-draw"),
+    ], className="mb-3 fw-semibold", style={"color": "var(--accent-cyan, #00d4ff)"})
+
+    score_value = float(evidence.get("team_context_score") or 0.0)
+    label_value = _format_context_read_label(str(evidence.get("team_context_label") or "balanced"))
+    benchmark_metric = str(evidence.get("benchmark_metric") or "current benchmark")
+    comparison_rows = [
+        row for row in (evidence.get("comparison_rows") or [])
+        if isinstance(row, dict) and row.get("available", True)
+    ]
+    context_scores = [row for row in (evidence.get("context_scores") or []) if isinstance(row, dict)]
+
+    top_kpis = html.Div(
+        [
+            html.Div([html.Div(f"{score_value:.1f}", className="career-command-kpi__value"), html.Div("score", className="career-command-kpi__label")], className="career-command-kpi"),
+            html.Div([html.Div(label_value, className="career-command-kpi__value"), html.Div("read", className="career-command-kpi__label")], className="career-command-kpi"),
+            html.Div([html.Div(benchmark_metric.title(), className="career-command-kpi__value"), html.Div("benchmark metric", className="career-command-kpi__label")], className="career-command-kpi"),
+        ],
+        className="career-command-kpis",
+    )
+
+    comparison_block: html.Div
+    if comparison_rows:
+        legend = html.Div(
+            [
+                html.Div([
+                    html.Div(style={"width": "10px", "height": "10px", "borderRadius": "999px", "backgroundColor": "#00d4ff", "marginRight": "6px"}),
+                    html.Span("Player", style={"fontSize": "0.72rem", "color": HKFATheme.TEXT_SECONDARY}),
+                ], style={"display": "flex", "alignItems": "center", "marginRight": "14px"}),
+                html.Div([
+                    html.Div(style={"width": "3px", "height": "18px", "backgroundColor": "#FFFFFF", "boxShadow": "0 0 8px rgba(255,255,255,0.9)", "marginRight": "6px"}),
+                    html.Span("Average", style={"fontSize": "0.72rem", "color": HKFATheme.TEXT_SECONDARY}),
+                ], style={"display": "flex", "alignItems": "center", "marginRight": "14px"}),
+                html.Div([
+                    html.Div(style={"width": "3px", "height": "18px", "backgroundColor": "#f5b942", "boxShadow": "0 0 8px rgba(245,184,66,0.9)", "marginRight": "6px"}),
+                    html.Span("Top Tier", style={"fontSize": "0.72rem", "color": HKFATheme.TEXT_SECONDARY}),
+                ], style={"display": "flex", "alignItems": "center"}),
+            ],
+            style={"display": "flex", "justifyContent": "flex-end", "marginBottom": "10px", "flexWrap": "wrap", "gap": "8px"},
+        )
+
+        comparison_rows_ui = []
+        for row in comparison_rows:
+            label = str(row.get("label") or "")
+            player_value = float(row.get("player_value") or 0.0)
+            average_value = float(row.get("average_value") or 0.0)
+            top_tier_value = float(row.get("top_tier_value") or 0.0)
+            percentile = float(row.get("percentile") or 0.0)
+            average_gap = float(row.get("average_gap") or 0.0)
+            top_gap = float(row.get("top_tier_gap") or 0.0)
+            scale_max = max(player_value, average_value, top_tier_value, 1.0)
+            player_width = max(2.0, min(100.0, (player_value / scale_max) * 100.0))
+            average_marker = max(0.5, min(99.5, (average_value / scale_max) * 100.0))
+            top_tier_marker = max(0.5, min(99.5, (top_tier_value / scale_max) * 100.0))
+
+            comparison_rows_ui.append(
+                html.Div(
+                    [
+                        html.Div(
+                            [
+                                html.Span(label, style={"color": HKFATheme.TEXT_SECONDARY, "fontSize": "0.86rem"}),
+                                html.Div(
+                                    [
+                                        html.Span(f"P{percentile:.1f}", style={"color": HKFATheme.TEXT_PRIMARY, "fontSize": "0.82rem", "fontWeight": "600"}),
+                                        html.Span(
+                                            f"vs avg {average_gap:+.1f} · vs top tier {top_gap:+.1f}",
+                                            style={"color": HKFATheme.TEXT_SECONDARY, "fontSize": "0.72rem", "marginLeft": "8px"},
+                                        ),
+                                    ],
+                                    style={"display": "flex", "alignItems": "center", "flexWrap": "wrap", "justifyContent": "flex-end"},
+                                ),
+                            ],
+                            style={"display": "flex", "justifyContent": "space-between", "alignItems": "center", "gap": "12px"},
+                        ),
+                        html.Div(
+                            style={"position": "relative", "marginTop": "6px", "marginBottom": "14px"},
+                            children=[
+                                html.Div(
+                                    style={
+                                        "height": "10px",
+                                        "borderRadius": "999px",
+                                        "background": "rgba(255,255,255,0.06)",
+                                        "overflow": "hidden",
+                                    },
+                                    children=[
+                                        html.Div(
+                                            style={
+                                                "width": f"{player_width:.2f}%",
+                                                "height": "100%",
+                                                "background": "linear-gradient(90deg, rgba(0,212,255,0.72), #00d4ff)",
+                                                "borderRadius": "999px",
+                                                "boxShadow": "0 0 16px rgba(0,212,255,0.28)",
+                                            }
+                                        )
+                                    ],
+                                ),
+                                html.Div(style={
+                                    "position": "absolute",
+                                    "left": f"{average_marker:.2f}%",
+                                    "top": "-6px",
+                                    "height": "22px",
+                                    "width": "3px",
+                                    "backgroundColor": "#FFFFFF",
+                                    "boxShadow": "0 0 8px rgba(255,255,255,0.9)",
+                                    "zIndex": "21",
+                                }),
+                                html.Div(style={
+                                    "position": "absolute",
+                                    "left": f"{top_tier_marker:.2f}%",
+                                    "top": "-4px",
+                                    "height": "18px",
+                                    "width": "3px",
+                                    "backgroundColor": "#f5b942",
+                                    "boxShadow": "0 0 8px rgba(245,184,66,0.9)",
+                                    "zIndex": "22",
+                                }),
+                            ],
+                        ),
+                    ]
+                )
+            )
+
+        comparison_block = html.Div(
+            [
+                html.Div("Comparative Standing", className="career-dashboard-card__eyebrow"),
+                html.P(
+                    f"These comparisons show where your current {benchmark_metric.lower()} level sits against team and league reference groups.",
+                    className="career-dashboard-card__body",
+                ),
+                legend,
+                html.Div(comparison_rows_ui),
+            ]
+        )
+    else:
+        comparison_block = html.Div(
+            html.P("Comparison data is not available for this view yet.", className="text-muted small")
+        )
+
+    context_scores_block: html.Div
+    if context_scores:
+        context_fig = go.Figure(go.Bar(
+            x=[float(row.get("score") or 0.0) for row in context_scores],
+            y=[str(row.get("label") or "") for row in context_scores],
+            orientation="h",
+            marker_color=["#00d4ff", "#7dd3fc", "#f5b942", "#f97316"],
+            text=[_format_context_read_label(str(row.get("read") or "")) for row in context_scores],
+            textposition="outside",
+        ))
+        context_fig.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            margin=dict(l=36, r=36, t=12, b=24),
+            height=280,
+            xaxis=dict(range=[0, 100]),
+            showlegend=False,
+        )
+        context_fig = glass_figure_layout(context_fig)
+        context_scores_block = html.Div(
+            [
+                html.Div("Decision Inputs", className="career-dashboard-card__eyebrow"),
+                html.P(
+                    "These support scores explain why the recommendation is cautious, balanced, or aggressive.",
+                    className="career-dashboard-card__body",
+                ),
+                dcc.Graph(figure=context_fig, config={"displayModeBar": False}),
+            ]
+        )
+    else:
+        context_scores_block = html.Div()
+
+    return html.Div([
+        header,
+        top_kpis,
+        html.Div([comparison_block], className="career-outlook-card"),
+        html.Div([context_scores_block], className="career-outlook-card mt-3"),
+    ])
 
 
 def _build_career_value_summary_evidence(data: Dict[str, Any], career_facts: Optional[Dict[str, Any]] = None) -> html.Div:
@@ -5453,23 +6442,13 @@ def render_career_evidence_view(
     focus_metric: str = "",
 ) -> Dict[str, Any]:
     """Returns modal metadata + content for a career evidence destination."""
-    from utils.career_intelligence import (
-        get_career_phase_data,
-        get_career_signals,
-        get_development_priorities,
-    )
-    from utils.domain_ai import build_career_intelligence_facts, build_evidence_explanation
+    from utils.domain_ai import build_evidence_explanation
 
-    data = _fetch_dashboard_data(player_name, player_id)
-    career_phase_data = get_career_phase_data(data, data.get("history_df", pd.DataFrame()))
-    career_signals = get_career_signals(data, data.get("history_df", pd.DataFrame()), career_phase_data or {})
-    development_priorities = get_development_priorities(data.get("percentiles_data") or {})
-    career_facts = build_career_intelligence_facts(
-        data,
-        career_phase_data or {},
-        career_signals,
-        development_priorities,
-    )
+    evidence_bundle = _prepare_career_evidence_bundle(player_name, player_id)
+    data = evidence_bundle.get("data") or {}
+    career_phase_data = evidence_bundle.get("career_phase_data") or {}
+    career_signals = evidence_bundle.get("career_signals") or {}
+    career_facts = evidence_bundle.get("career_facts") or {}
     resolved_key = resolve_career_surface_evidence_key(evidence_key)
     meta = get_evidence_destination_meta(resolved_key)
     key = meta["key"]
@@ -5482,6 +6461,22 @@ def render_career_evidence_view(
         content = _build_career_trend_evidence(data, career_facts)
     elif key == "career_phase_resolution":
         content = _build_career_phase_resolution_evidence(data, career_phase_data or {}, career_signals, career_facts)
+    elif key == "team_positional_rank":
+        content = _build_comparative_dimension_evidence("Team Positional Rank", (career_facts.get("evidence_facts") or {}).get("team_positional_rank") or {}, icon_class="bi bi-person-badge")
+    elif key == "team_global_rank":
+        content = _build_comparative_dimension_evidence("Team Overall Rank", (career_facts.get("evidence_facts") or {}).get("team_global_rank") or {}, icon_class="bi bi-people")
+    elif key == "league_positional_standing":
+        content = _build_comparative_dimension_evidence("League Positional Standing", (career_facts.get("evidence_facts") or {}).get("league_positional_standing") or {}, icon_class="bi bi-trophy")
+    elif key == "league_global_standing":
+        content = _build_comparative_dimension_evidence("League Overall Standing", (career_facts.get("evidence_facts") or {}).get("league_global_standing") or {}, icon_class="bi bi-diagram-3")
+    elif key == "top_tier_gap":
+        content = _build_score_shell_evidence("Top-Tier Gap", (career_facts.get("evidence_facts") or {}).get("top_tier_gap") or {}, "top_tier_gap_score", "headline_fact")
+    elif key == "consistency_profile":
+        content = _build_score_shell_evidence("Consistency Profile", (career_facts.get("evidence_facts") or {}).get("consistency_profile") or {}, "consistency_score", "consistency_label")
+    elif key == "team_context":
+        content = _build_team_context_evidence((career_facts.get("evidence_facts") or {}).get("team_context") or {})
+    elif key == "career_timing_context":
+        content = _build_score_shell_evidence("Career Timing Context", (career_facts.get("evidence_facts") or {}).get("career_timing_context") or {}, "career_timing_score", "career_timing_label")
     elif key == "career_value_summary":
         content = _build_career_value_summary_evidence(data, career_facts)
     elif key == "career_arc":
@@ -5544,6 +6539,7 @@ def render_player_dashboard(
     player_id: str,
     user_role: str = "player",
     ai_payload: Optional[Dict[str, Any]] = None,
+    synthesize_with_ai: bool = True,
 ) -> html.Div:
     """
     Orchestrates the 6-section player dashboard for Estado A (no card open).
@@ -5555,8 +6551,10 @@ def render_player_dashboard(
         get_development_priorities,
         build_career_dashboard_brief,
     )
+    from utils.domain_ai.career_dashboard_ai import normalize_career_dashboard_brief_payload
 
     data = _fetch_dashboard_data(player_name, player_id)
+    normalized_ai_payload = normalize_career_dashboard_brief_payload(ai_payload)
 
     # Compute career phase inline (pure function, no I/O)
     career_phase_data: Optional[Dict] = None
@@ -5582,7 +6580,8 @@ def render_player_dashboard(
         career_phase_data or {},
         career_signals,
         development_priorities,
-        ai_payload=ai_payload if isinstance(ai_payload, dict) else {},
+        ai_payload=normalized_ai_payload,
+        synthesize_with_ai=synthesize_with_ai,
     )
 
     def _safe_build(builder_fn, *args, **kwargs) -> html.Div:
@@ -5632,6 +6631,7 @@ def render_pre_match(
     stadium = payload.get("stadium", "")
     streaming_url = _clean_url(payload.get("streaming_url") or "")
     competition = payload.get("competition", "HK Premier League")
+    competition_display = get_competition_display_name(competition, long_form=True)
     competition_logo = payload.get("competition_logo") or get_competition_logo(competition)
     home_logo = (
         payload.get("home_logo")
@@ -5852,7 +6852,7 @@ def render_pre_match(
         dbc.CardBody([
             html.Div([
                 html.Img(src=competition_logo, style={"width": "54px", "height": "54px", "objectFit": "contain", "marginBottom": "8px"}) if competition_logo else None,
-                html.Div(competition, style={"color": "#f6f8fb", "fontWeight": "700", "fontSize": "1.05rem"}),
+                html.Div(competition_display, style={"color": "#f6f8fb", "fontWeight": "700", "fontSize": "1.05rem"}),
             ], style={"display": "flex", "flexDirection": "column", "alignItems": "center", "marginBottom": "24px"}),
             html.Div([
                 _team_block(home, home_logo, "right", home_jersey),

@@ -11,6 +11,14 @@ EVIDENCE_DESTINATIONS: Dict[str, Dict[str, str]] = {
     "career_trend": {"title": "Career Trend", "group": "trajectory"},
     "career_phase_resolution": {"title": "Career Phase", "group": "trajectory"},
     "career_value_summary": {"title": "Career Value", "group": "trajectory"},
+    "team_positional_rank": {"title": "Team Positional Rank", "group": "comparison"},
+    "team_global_rank": {"title": "Team Overall Rank", "group": "comparison"},
+    "league_positional_standing": {"title": "League Positional Standing", "group": "comparison"},
+    "league_global_standing": {"title": "League Overall Standing", "group": "comparison"},
+    "top_tier_gap": {"title": "Top-Tier Gap", "group": "comparison"},
+    "consistency_profile": {"title": "Consistency Profile", "group": "comparison"},
+    "team_context": {"title": "Team Context", "group": "comparison"},
+    "career_timing_context": {"title": "Career Timing Context", "group": "comparison"},
     "minutes_trend": {"title": "Minutes Trend", "group": "trajectory"},
     "recent_form": {"title": "Recent Form", "group": "trajectory"},
     "percentile_profile": {"title": "Percentile Profile", "group": "profile"},
@@ -32,7 +40,15 @@ def resolve_career_surface_evidence_key(evidence_key: str, *, label: str = "") -
     """Migrates legacy career_arc links for known career surfaces without breaking old payloads."""
     normalized = normalize_evidence_key(evidence_key)
     normalized_label = str(label or "").strip().lower()
-    if normalized == "career_arc" and normalized_label in {"reposition", "build", "consolidate"}:
+    if normalized == "career_arc" and normalized_label in {
+        "reposition",
+        "build",
+        "consolidate",
+        "ambitious",
+        "keep pushing",
+        "maintain consistency",
+        "find consistency",
+    }:
         return "career_phase_resolution"
     return normalized
 

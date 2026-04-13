@@ -271,7 +271,9 @@ app.layout = dbc.Container([
     dcc.Store(id='app-theme', storage_type='local', data='light'),
 
     # Componente para downloads
-    html.Div(id='download-components')
+    html.Div(id='download-components', children=[
+        dcc.Download(id="card-download")
+    ])
 
 ], fluid=True, className="p-0")
 

@@ -132,38 +132,15 @@ class BeSoccerExtractor:
             return {}
 
         season_ratings = {}
-        # Buscamos las filas de temporada (parent_row suele ser la fila principal del equipo/temporada)
-        rows = soup.select("tr.row-body.parent_row")
+        rows = soup.select("tr.row-body.parent_row, tr.parent_row")
         
         for row in rows:
             try:
-                # 1. Extraer Temporada (ej: "2025/26")
-                season_el = row.select_one(".ta-l a.arrow-box")
-                if not season_el: continue
-                season_text = season_el.get_text(strip=True).replace(" ", "")
-                season_text = re.sub(r"[^\d/]", "", season_text)
-                if not re.match(r"^\d{4}/\d{2}$", season_text): continue
+                season_text = self._extract_season_text(row)
+                if not season_text:
+                    continue
 
-                # 2. Extraer Rating (celda con data-content-tab="tcdc1" es el rating promedio)
-                # Según el HTML provisto por el usuario:
-                # <td data-content-tab="tcdc1">5.6</td>
-                rating_val = None
-                rating_cells = row.select('td[data-content-tab="tcdc1"]')
-                for cell in rating_cells:
-                    text = cell.get_text(strip=True).replace(',', '.')
-                    # El rating suele ser un float X.X
-                    if re.match(r"^\d\.\d$", text):
-                        rating_val = float(text)
-                        break
-                
-                if rating_val is None:
-                    # Fallback: buscar cualquier celda que contenga un rating (X.X)
-                    tds = row.select("td")
-                    for td in tds:
-                        val = td.get_text(strip=True).replace(',', '.')
-                        if re.match(r"^\d\.\d$", val):
-                            rating_val = float(val)
-                            break
+                rating_val = self._extract_season_rating_value(row)
 
                 if rating_val is not None:
                     season_ratings[season_text] = rating_val
@@ -174,6 +151,47 @@ class BeSoccerExtractor:
                 continue
         
         return season_ratings
+
+    def _extract_season_text(self, row) -> Optional[str]:
+        season_el = row.select_one(".ta-l a.arrow-box")
+        candidates = []
+        if season_el:
+            candidates.append(season_el.get_text(strip=True))
+        candidates.append(row.get_text(" ", strip=True))
+        for candidate in candidates:
+            normalized = candidate.replace(" ", "")
+            match = re.search(r"(\d{4}/\d{2})", normalized)
+            if match:
+                return match.group(1)
+        return None
+
+    def _extract_season_rating_value(self, row) -> Optional[float]:
+        preferred_cells = row.select('td[data-content-tab^="tcdc"]')
+        fallback_cells = row.select("td")
+
+        def _candidate_values(cells) -> List[float]:
+            values: List[float] = []
+            for cell in cells:
+                text = cell.get_text(" ", strip=True).replace(",", ".")
+                if not text:
+                    continue
+                for match in re.findall(r"\b\d(?:\.\d{1,2})?\b", text):
+                    try:
+                        value = float(match)
+                    except ValueError:
+                        continue
+                    if 3.0 <= value <= 10.0:
+                        values.append(value)
+            return values
+
+        preferred = _candidate_values(preferred_cells)
+        if preferred:
+            return preferred[0]
+
+        fallback = _candidate_values(fallback_cells)
+        if fallback:
+            return fallback[-1]
+        return None
 
     def search_player(self, name: str, team_name: Optional[str] = None) -> Optional[str]:
         """
@@ -256,15 +274,6 @@ class BeSoccerExtractor:
             'Jul': '07', 'Ago': '08', 'Sep': '09', 'Oct': '10', 'Nov': '11', 'Dic': '12'
         }
         
-        # Caso "04 Apr"
-        m = re.search(r"(\d{1,2})\s+([a-zA-Z]{3})", text)
-        if m:
-            d, mon = m.groups()
-            mon_num = months.get(mon.capitalize()[:3], "01")
-            # Nota: Esta lógica es simplificada; en un entorno real se ajustaría el año 
-            # basándose en si la fecha es futura respecto al "current_run"
-            return f"{default_year}-{mon_num}-{d.zfill(2)}"
-
         # Caso "12 Oct 23"
         m = re.search(r"(\d{1,2})\s+([a-zA-Z]{3})\s+(\d{2,4})", text)
         if m:
@@ -272,5 +281,14 @@ class BeSoccerExtractor:
             mon_num = months.get(mon.capitalize()[:3], "01")
             if len(y) == 2: y = "20" + y
             return f"{y}-{mon_num}-{d.zfill(2)}"
+
+        # Caso "04 Apr"
+        m = re.search(r"(\d{1,2})\s+([a-zA-Z]{3})", text)
+        if m:
+            d, mon = m.groups()
+            mon_num = months.get(mon.capitalize()[:3], "01")
+            # Nota: Esta lógica es simplificada; en un entorno real se ajustaría el año
+            # basándose en si la fecha es futura respecto al "current_run"
+            return f"{default_year}-{mon_num}-{d.zfill(2)}"
 
         return None

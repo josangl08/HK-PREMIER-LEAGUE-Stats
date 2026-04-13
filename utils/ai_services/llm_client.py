@@ -5,11 +5,15 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from threading import Lock
 from typing import Any, Optional
 
 from utils.ai_config import AI_DEFAULTS, GOOGLE_API_KEY
 
 logger = logging.getLogger(__name__)
+_GEMINI_CLIENT: Optional[Any] = None
+_GEMINI_CLIENT_INIT_ATTEMPTED = False
+_GEMINI_CLIENT_LOCK = Lock()
 
 
 @dataclass(frozen=True)
@@ -30,26 +34,17 @@ def get_default_gemini_model() -> str:
 
 
 def get_dashboard_brief_model_candidates() -> list[str]:
-    """Returns the ordered Gemini model list for stable career dashboard brief synthesis."""
+    """Returns the single preferred model for low-latency dashboard synthesis."""
     return [
-        "gemini-2.5-flash",
         "gemini-3.1-flash-lite-preview",
     ]
 
 
 def get_career_dashboard_model_candidates() -> list[str]:
-    """Returns the ordered model list for the main career dashboard command-center synthesis."""
-    candidates = [
-        "gemini-3.1-pro-preview",
-        AI_DEFAULTS["gemini"]["model"],
-        "gemini-2.5-flash",
+    """Returns the preferred model list for the main career dashboard command-center synthesis."""
+    return [
         "gemini-3.1-flash-lite-preview",
     ]
-    deduped: list[str] = []
-    for candidate in candidates:
-        if candidate and candidate not in deduped:
-            deduped.append(candidate)
-    return deduped
 
 
 def gemini_is_available() -> bool:
@@ -59,19 +54,36 @@ def gemini_is_available() -> bool:
 
 def get_gemini_client() -> Optional[Any]:
     """Builds a shared Gemini client when credentials are available."""
-    if not GOOGLE_API_KEY:
-        return None
-    try:
-        from google import genai  # type: ignore
-        from google.genai import types  # type: ignore
+    global _GEMINI_CLIENT
+    global _GEMINI_CLIENT_INIT_ATTEMPTED
 
-        return genai.Client(
-            api_key=GOOGLE_API_KEY,
-            http_options=types.HttpOptions(api_version="v1beta"),
-        )
-    except Exception as exc:
-        logger.debug("get_gemini_client error: %s", exc)
+    if _GEMINI_CLIENT is not None:
+        return _GEMINI_CLIENT
+    if _GEMINI_CLIENT_INIT_ATTEMPTED and not GOOGLE_API_KEY:
         return None
+    if not GOOGLE_API_KEY:
+        _GEMINI_CLIENT_INIT_ATTEMPTED = True
+        return None
+
+    with _GEMINI_CLIENT_LOCK:
+        if _GEMINI_CLIENT is not None:
+            return _GEMINI_CLIENT
+        if _GEMINI_CLIENT_INIT_ATTEMPTED:
+            return None
+        _GEMINI_CLIENT_INIT_ATTEMPTED = True
+        try:
+            from google import genai  # type: ignore
+            from google.genai import types  # type: ignore
+
+            _GEMINI_CLIENT = genai.Client(
+                api_key=GOOGLE_API_KEY,
+                http_options=types.HttpOptions(api_version="v1beta"),
+            )
+            return _GEMINI_CLIENT
+        except Exception as exc:
+            logger.debug("get_gemini_client error: %s", exc)
+            _GEMINI_CLIENT = None
+            return None
 
 
 def generate_gemini_content(

@@ -526,47 +526,60 @@ def create_match_heatmap(
         try:
             df = pd.DataFrame(heatmap_points)
             if not df.empty and 'x' in df.columns and 'y' in df.columns:
-                # Sofascore uses a coordinate system where (0,0) is top-left usually.
-                # But for Plotly density, we want a grid.
+                x_values = (df['x'] * 105.0) / 100.0
+                # Sofascore event heatmaps already use a top-origin pitch frame for this feed.
+                # Reversing again pushes activity into the wrong band.
+                y_values = (df['y'] * 68.0) / 100.0
+                heatmap_scale = [
+                    [0.00, "rgba(0,0,0,0)"],
+                    [0.08, "rgba(201, 60, 39, 0.38)"],
+                    [0.24, "rgba(232, 104, 35, 0.60)"],
+                    [0.50, "rgba(247, 171, 43, 0.82)"],
+                    [0.78, "rgba(255, 226, 84, 0.96)"],
+                    [1.00, "rgba(255, 247, 214, 1.00)"],
+                ]
                 fig.add_trace(go.Histogram2dContour(
-                    x=df['x'],
-                    y=df['y'],
+                    x=x_values,
+                    y=y_values,
                     z=df.get('value', [1]*len(df)),
                     histfunc="sum",
-                    colorscale='Hot',
-                    ncontours=20,
+                    colorscale=heatmap_scale,
+                    ncontours=22,
+                    contours=dict(coloring="heatmap", showlines=False),
                     line=dict(width=0),
-                    opacity=0.8,
+                    opacity=1.0,
                     showscale=False,
-                    hoverinfo='skip'
+                    hoverinfo='skip',
+                    xbins=dict(start=0, end=105, size=4.2),
+                    ybins=dict(start=0, end=68, size=3.2),
                 ))
         except Exception as e:
             logger.warning(f"Error drawing heatmap contour: {e}")
 
     # Draw Pitch Markings (White, subtle)
-    # Pitch dimensions: 100x100 for simplicity in mapping
-    line_style = dict(color="rgba(255,255,255,0.4)", width=2)
+    line_style = dict(color="rgba(255,255,255,0.42)", width=2)
     
     # Outer boundary
-    fig.add_shape(type="rect", x0=0, y0=0, x1=100, y1=100, line=line_style)
+    fig.add_shape(type="rect", x0=0, y0=0, x1=105, y1=68, line=line_style, fillcolor="rgba(88, 128, 86, 0.42)", layer="below")
     # Half-way line
-    fig.add_shape(type="line", x0=50, y0=0, x1=50, y1=100, line=line_style)
+    fig.add_shape(type="line", x0=52.5, y0=0, x1=52.5, y1=68, line=line_style)
     # Center circle
-    fig.add_shape(type="circle", x0=40, y0=40, x1=60, y1=60, line=line_style)
-    # Penalty areas (Home)
-    fig.add_shape(type="rect", x0=0, y0=20, x1=16, y1=80, line=line_style)
-    # Penalty areas (Away)
-    fig.add_shape(type="rect", x0=84, y0=20, x1=100, y1=80, line=line_style)
-    # Goals
-    fig.add_shape(type="rect", x0=-2, y0=42, x1=0, y1=58, line=line_style, fillcolor="rgba(255,255,255,0.1)")
-    fig.add_shape(type="rect", x0=100, y0=42, x1=102, y1=58, line=line_style, fillcolor="rgba(255,255,255,0.1)")
-
+    fig.add_shape(type="circle", x0=43.35, y0=24.85, x1=61.65, y1=43.15, line=line_style)
+    # Penalty areas
+    fig.add_shape(type="rect", x0=0, y0=13.84, x1=16.5, y1=54.16, line=line_style)
+    fig.add_shape(type="rect", x0=88.5, y0=13.84, x1=105, y1=54.16, line=line_style)
+    # Six-yard boxes
+    fig.add_shape(type="rect", x0=0, y0=24.84, x1=5.5, y1=43.16, line=line_style)
+    fig.add_shape(type="rect", x0=99.5, y0=24.84, x1=105, y1=43.16, line=line_style)
+    # Penalty spots
+    fig.add_shape(type="circle", x0=10.3, y0=33.4, x1=11.7, y1=34.6, line=dict(color="rgba(255,255,255,0.55)", width=2), fillcolor="rgba(255,255,255,0.55)")
+    fig.add_shape(type="circle", x0=93.3, y0=33.4, x1=94.7, y1=34.6, line=dict(color="rgba(255,255,255,0.55)", width=2), fillcolor="rgba(255,255,255,0.55)")
     fig.update_layout(
         title=title,
         height=height,
-        xaxis=dict(range=[-5, 105], showgrid=False, zeroline=False, showticklabels=False),
-        yaxis=dict(range=[-5, 105], showgrid=False, zeroline=False, showticklabels=False, scaleanchor="x", scaleratio=1),
-        margin=dict(l=10, r=10, t=40, b=10),
+        xaxis=dict(range=[-1, 106], showgrid=False, zeroline=False, showticklabels=False),
+        yaxis=dict(range=[68.5, -0.5], showgrid=False, zeroline=False, showticklabels=False, scaleanchor="x", scaleratio=1),
+        margin=dict(l=2, r=2, t=2, b=2),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         hovermode=False

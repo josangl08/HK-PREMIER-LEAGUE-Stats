@@ -1,5 +1,5 @@
 # ABOUTME: Player Portal layout implementing Phase 3 interactive global header and scroll-sync.
-# ABOUTME: Full-width title header, year nav inside timeline column, sliding panels on mobile.
+# ABOUTME: Features sliding panels, scroll-synced timeline, and non-disruptive card-viewer-modal for generated assets.
 
 from dash import html, dcc
 import dash_bootstrap_components as dbc
@@ -136,13 +136,15 @@ def create_player_portal_layout(user_role: str = "player") -> html.Div:
             # Triggers post-generation gallery refresh or download
             dcc.Store(id="card-generation-trigger"),
             dcc.Store(id="career-dashboard-brief-store", storage_type="memory"),
+            # Loading color system: pre-flight store for stage dot type (ui/data/ai)
+            dcc.Store(id="stage-loading-type-sync-dummy"),
             # Career Intelligence overlay stores
             dcc.Store(id="insight-session-state", storage_type="local"),
             dcc.Store(id="t2-overlay-queue", storage_type="session"),
             dcc.Store(id="t1-signal-store", storage_type="session"),
             # Polls sync status for newly registered players (stops after data is ready)
             dcc.Interval(id="sync-poll-interval", interval=8000, n_intervals=0, max_intervals=30, disabled=True),
-
+            # AI Card Studio polling interval moved to card_editor.py for portability
             _build_sync_status_banner(),
 
             # Portal Viewport — no horizontal padding on container
@@ -196,6 +198,7 @@ def create_player_portal_layout(user_role: str = "player") -> html.Div:
                 size="xl",
                 scrollable=True,
                 className="career-evidence-modal",
+                fade=False,
             ),
             dbc.Modal(
                 [
@@ -208,6 +211,7 @@ def create_player_portal_layout(user_role: str = "player") -> html.Div:
                 size="xl",
                 scrollable=True,
                 className="career-evidence-modal",
+                fade=False,
             ),
             # Insight Inbox Offcanvas (Notification Center)
             dbc.Offcanvas(
@@ -218,6 +222,31 @@ def create_player_portal_layout(user_role: str = "player") -> html.Div:
                 children=[
                     html.Div(id="insight-inbox-body"),
                 ],
+            ),
+            # CARD VIEWER MODAL (NON-DISRUPTIVE)
+            dbc.Modal(
+                [
+                    dbc.ModalHeader(
+                        html.Div([
+                            html.I(**{"data-lucide": "image", "className": "me-2"}),
+                            "Matchday Card"
+                        ], className="d-flex align-items-center"),
+                        close_button=True, 
+                        className="border-0 text-white bg-transparent pt-4 px-4"
+                    ),
+                    dbc.ModalBody(
+                        id="card-viewer-modal-content",
+                        className="d-flex align-items-center justify-content-center pb-5 px-4 overflow-auto"
+                    ),
+                ],
+                id="card-viewer-modal",
+                size="xl",
+                centered=True,
+                scrollable=True,
+                is_open=False,
+                # Glass effect configuration - fixed argument name
+                content_class_name="glass-card border-0 shadow-none",
+                backdrop_class_name="modal-backdrop-blur"
             ),
         ],
     )

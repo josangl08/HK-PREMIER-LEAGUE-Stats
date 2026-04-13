@@ -14,6 +14,7 @@ from models.db_models import Player, Team, Season, PlayerSeasonStat, SystemSyncL
 from utils.db_engine import SessionFactory
 from utils.common import get_current_season
 from utils.player_index import get_player_index
+from utils.team_logo_api import fetch_team_logo_from_api
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +109,11 @@ class HKPLSyncManager:
                     team = Team(id=team_slug, name=team_name)
                     session.add(team)
                     session.flush()
+                if not getattr(team, "logo_url", None):
+                    try:
+                        team.logo_url = fetch_team_logo_from_api(team_name) or team.logo_url
+                    except Exception as exc:
+                        logger.debug("HKPLSyncManager: logo API fetch failed for %s: %s", team_name, exc)
 
                 # 2. Player (Upsert)
                 player_name = str(row.get('Player'))

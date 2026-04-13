@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict, is_dataclass
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -390,39 +391,44 @@ def _build_lever_facts(
 
 
 def _build_outlook_facts(career_phase_data: Dict[str, Any], career_signals: Dict[str, Any]) -> List[Dict[str, Any]]:
-    transfer_window = (career_signals or {}).get("transfer_window") or {}
-    coach_conf = (career_signals or {}).get("coach_confidence") or {}
-    consistency = (career_signals or {}).get("consistency_score") or {}
-
-    transfer_quality = str(transfer_window.get("quality") or "MODERADA")
-    direction = str(coach_conf.get("direction") or "stable")
-    consistency_level = str(consistency.get("level") or "MODERADA")
-
-    if transfer_quality == "ÓPTIMA":
-        mode = "Push"
-        plain_fact = "This looks like a good time to push the next step."
-        why_now = "The bigger signs are lining up in your favor."
-    elif direction == "up" and consistency_level == "ALTA":
-        mode = "Consolidate"
-        plain_fact = "The next step should come from holding this level, not rushing ahead."
-        why_now = "Your signs are good, but they will carry more weight if they stay steady."
-    elif direction == "down":
-        mode = "Reposition"
-        plain_fact = "Focus on getting your level and minutes steady again before thinking about something bigger."
-        why_now = "Your role trend has softened, so the priority is to steady your level first. If the next run is strong again, you can think bigger after that."
+    resolution = dict(career_phase_data.get("progression_resolution") or {})
+    mode = str(
+        career_phase_data.get("recommended_phase")
+        or resolution.get("recommended_phase")
+        or "Find Consistency"
+    )
+    why_now = str(
+        resolution.get("next_condition")
+        or "The next stretch will decide whether this recommendation strengthens."
+    )
+    if mode == "Ambitious":
+        plain_fact = "Your comparative level says it is reasonable to aim higher now."
+        risk_condition = "If consistency drops or the gap to top-tier level widens, the push needs rechecking."
+        evidence_key = "top_tier_gap"
+    elif mode == "Keep Pushing":
+        plain_fact = "The signs are moving the right way, but the case still needs more weight."
+        risk_condition = "If role security softens again, the next step becomes harder to force."
+        evidence_key = "league_positional_standing"
+    elif mode == "Maintain Consistency":
+        plain_fact = "The level is credible now, and the priority is proving it holds."
+        risk_condition = "If the level swings too much, the recommendation will soften."
+        evidence_key = "consistency_profile"
     else:
-        mode = "Build"
-        plain_fact = "The next stretch should focus on getting stronger step by step."
-        why_now = "There is still room to make the profile more solid before forcing a bigger move."
+        plain_fact = "The next priority is making your level and role feel more reliable."
+        risk_condition = "If the same instability continues, the bigger move conversation stays on hold."
+        evidence_key = "team_context"
+
+    if not str(why_now or "").strip() and mode == "Find Consistency":
+        why_now = "Steadier minutes and more stable end-product are the clearest triggers for a stronger recommendation."
 
     return [
         {
             "mode": mode,
             "plain_fact": plain_fact,
             "why_now": why_now,
-            "upgrade_condition": "If the next stretch stays strong, you can push harder.",
-            "risk_condition": "If the signs flatten out, progress may slow down.",
-            "evidence_key": "projection_outlook" if transfer_quality in {"ÓPTIMA", "BUENA"} else "career_arc",
+            "upgrade_condition": why_now,
+            "risk_condition": risk_condition,
+            "evidence_key": evidence_key,
         }
     ]
 
@@ -440,6 +446,7 @@ def _build_evidence_facts(
     comparison = (recent_windows.get("comparisons") or {}).get("last5_vs_previous5") or {}
     coach_conf = (career_signals or {}).get("coach_confidence") or {}
     features = career_phase_data.get("progression_features")
+    scorecard = career_phase_data.get("comparative_scorecard")
 
     season_minutes: List[int] = []
     history_df = data.get("history_df", pd.DataFrame())
@@ -450,6 +457,69 @@ def _build_evidence_facts(
 
     latest_metric_label = str(getattr(features, "recent_metric_label", "") or "") if features is not None else ""
     latest_metric_delta_pct = _safe_float(getattr(features, "recent_metric_delta_pct", 0.0)) if features is not None else 0.0
+    team_positional = getattr(scorecard, "team_positional", None)
+    team_overall = getattr(scorecard, "team_overall", None)
+    league_positional = getattr(scorecard, "league_positional", None)
+    league_overall = getattr(scorecard, "league_overall", None)
+
+    def _serialize_dimension(value: Any) -> Dict[str, Any]:
+        if value is None:
+            return {}
+        return asdict(value) if is_dataclass(value) else dict(value)
+
+    def _context_row(key: str, label: str, dimension: Any) -> Dict[str, Any]:
+        payload = _serialize_dimension(dimension)
+        if not payload:
+            return {"key": key, "label": label, "available": False}
+        return {
+            "key": key,
+            "label": label,
+            "available": bool(payload.get("available", True)),
+            "sample_size": _safe_int(payload.get("sample_size")),
+            "player_value": round(_safe_float(payload.get("player_value")), 2),
+            "average_value": round(_safe_float(payload.get("average_value")), 2),
+            "top_tier_value": round(_safe_float(payload.get("top_tier_value")), 2),
+            "percentile": round(_safe_float(payload.get("percentile")), 1),
+            "average_gap": round(_safe_float(payload.get("average_gap")), 2),
+            "top_tier_gap": round(_safe_float(payload.get("top_tier_gap")), 2),
+            "status": str(payload.get("status") or ""),
+        }
+
+    comparison_rows = [
+        _context_row("team_positional_rank", "Team Role Group", team_positional),
+        _context_row("team_global_rank", "Team Overall", team_overall),
+        _context_row("league_positional_standing", "League Role Group", league_positional),
+        _context_row("league_global_standing", "League Overall", league_overall),
+    ]
+    context_scores = [
+        {
+            "key": "role_security",
+            "label": "Role Security",
+            "score": round(float(getattr(scorecard, "role_security", 0.0) or 0.0), 1),
+            "read": str(coach_conf.get("label") or "Role context"),
+        },
+        {
+            "key": "consistency_score",
+            "label": "Consistency",
+            "score": round(float(getattr(scorecard, "consistency_score", 0.0) or 0.0), 1),
+            "read": str(getattr(scorecard, "consistency_label", "") or ""),
+        },
+        {
+            "key": "career_timing_score",
+            "label": "Career Timing",
+            "score": round(float(getattr(scorecard, "career_timing_score", 0.0) or 0.0), 1),
+            "read": str(getattr(scorecard, "career_timing_label", "") or ""),
+        },
+        {
+            "key": "top_tier_gap_score",
+            "label": "Top-Tier Gap",
+            "score": round(float(getattr(scorecard, "top_tier_gap_score", 0.0) or 0.0), 1),
+            "read": "closer is stronger",
+        },
+    ]
+    benchmark_metric = humanize_metric_name(
+        str(getattr(features, "primary_metric", "") or data.get("position_main") or "current benchmark")
+    )
 
     return {
         "minutes_trend": {
@@ -514,6 +584,47 @@ def _build_evidence_facts(
             "momentum_score": _safe_int(career_phase_data.get("momentum_score")),
             "transfer_window_quality": str(((career_signals or {}).get("transfer_window") or {}).get("quality") or ""),
         },
+        "team_positional_rank": {
+            "headline_fact": "This shows where you sit against teammates in your role.",
+            "dimension": _serialize_dimension(team_positional),
+        },
+        "team_global_rank": {
+            "headline_fact": "This shows where you sit in the wider squad picture.",
+            "dimension": _serialize_dimension(team_overall),
+        },
+        "league_positional_standing": {
+            "headline_fact": "This shows your level against league peers in your role.",
+            "dimension": _serialize_dimension(league_positional),
+        },
+        "league_global_standing": {
+            "headline_fact": "This shows your level against the full league population.",
+            "dimension": _serialize_dimension(league_overall),
+        },
+        "top_tier_gap": {
+            "headline_fact": "This shows how far the profile still is from top-tier level.",
+            "top_tier_gap_score": round(float(getattr(scorecard, "top_tier_gap_score", 0.0) or 0.0), 1),
+        },
+        "consistency_profile": {
+            "headline_fact": "This shows whether your level is holding or still swinging.",
+            "consistency_score": round(float(getattr(scorecard, "consistency_score", 0.0) or 0.0), 1),
+            "consistency_label": str(getattr(scorecard, "consistency_label", "") or ""),
+        },
+        "team_context": {
+            "headline_fact": "This read combines comparative standing with role security and consistency.",
+            "team_context_score": round(float(getattr(scorecard, "team_context_score", 0.0) or 0.0), 1),
+            "team_context_label": str(getattr(scorecard, "team_context_label", "") or ""),
+            "role_security": round(float(getattr(scorecard, "role_security", 0.0) or 0.0), 1),
+            "benchmark_metric": benchmark_metric,
+            "comparison_rows": comparison_rows,
+            "context_scores": context_scores,
+        },
+        "career_timing_context": {
+            "headline_fact": "This shows where the current age and momentum sit in the career cycle.",
+            "career_timing_score": round(float(getattr(scorecard, "career_timing_score", 0.0) or 0.0), 1),
+            "career_timing_label": str(getattr(scorecard, "career_timing_label", "") or ""),
+            "peak_range": list(career_phase_data.get("peak_range") or []),
+            "age": _safe_int(career_phase_data.get("age") or data.get("age")),
+        },
         "similarity_profiles": {
             "headline_fact": "The closest profiles show where you already fit and where you still need more weight.",
             "similar_players": (data.get("similar_players_meta") or {}).get("similar_players") or [],
@@ -554,6 +665,7 @@ def build_career_intelligence_facts(
         },
         "career_summary": {
             "career_phase": str(career_phase_data.get("career_phase") or "unknown"),
+            "recommended_phase": str(career_phase_data.get("recommended_phase") or "Find Consistency"),
             "momentum_score": _safe_int(career_phase_data.get("momentum_score")),
             "overall_direction": str(((career_signals or {}).get("coach_confidence") or {}).get("direction") or "stable"),
             "career_weight": "solid" if _safe_int(data.get("minutes_played")) >= 4000 else "building",
@@ -564,6 +676,7 @@ def build_career_intelligence_facts(
             "primary_metric_trend_pct": round(_safe_float(getattr(career_phase_data.get("progression_features"), "primary_metric_trend_pct", 0.0)), 2) if career_phase_data.get("progression_features") is not None else 0.0,
             "consistency_level": str(((career_signals or {}).get("consistency_score") or {}).get("level") or "MODERADA"),
             "transfer_window_quality": str(((career_signals or {}).get("transfer_window") or {}).get("quality") or "MODERADA"),
+            "top_tier_gap_score": round(float(getattr(career_phase_data.get("comparative_scorecard"), "top_tier_gap_score", 0.0) or 0.0), 1),
         },
         "role_facts": role_facts,
         "pattern_facts": pattern_facts,

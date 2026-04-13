@@ -11,6 +11,7 @@ sys.path.append(os.getcwd())
 
 from utils.card_renderer import compose_card
 from utils.image_processing import get_team_assets
+from utils.runtime_storage import ensure_player_cards_dir
 
 def verify_system():
     player_id = "manuelbleda"
@@ -18,8 +19,7 @@ def verify_system():
     tmpl_id = "template_verification_run"
     
     # 1. Setup mock template directory
-    tmpl_dir = Path(f"data/player_cards/{player_id}/templates")
-    tmpl_dir.mkdir(parents=True, exist_ok=True)
+    tmpl_dir = ensure_player_cards_dir(player_id, "templates")
     
     # 2. Mock Design Brief (simulating Option 1 / "Epic" concept)
     mock_brief = {

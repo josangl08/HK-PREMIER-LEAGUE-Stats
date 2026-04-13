@@ -22,7 +22,7 @@ from models.db_models import (
 )
 from utils.db_engine import SessionFactory, init_db
 from data.extractors.ics_extractor import ICSExtractor
-from utils.competition_helpers import normalize_competition, get_competition_logo
+from data.competition_registry import normalize_competition, get_competition_logo
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 # Rutas de origen
 DATA_DIR = Path("data")
 CACHE_DIR = DATA_DIR / "cache"
-HISTORICAL_DIR = DATA_DIR / "historical_records"
+HISTORICAL_DIR = DATA_DIR / "archive" / "historical_records"
 TEMPLATES_DIR = Path("assets/templates")
 MODELS_REGISTRY = Path("models/registry.json")
 USERS_FILE = DATA_DIR / "users.json"

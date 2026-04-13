@@ -93,13 +93,66 @@ class CareerProgressionResolution:
     resolved_phase: str
     base_momentum: int
     resolved_momentum: int
-    ai_used: bool
-    ai_model: str
-    adjustment_applied: bool
-    adjustment_reason: str
+    recommended_phase: str = "Find Consistency"
+    ai_used: bool = False
+    ai_model: str = ""
+    adjustment_applied: bool = False
+    adjustment_reason: str = ""
+    validation_status: str = "reject"
+    alignment_score: float = 0.55
+    blocking_rules: List[str] = None
+    context_patterns: List[str] = None
+    confidence: str = "medium"
+    supporting_factors: List[str] = None
+    blockers: List[str] = None
+    risk_flags: List[str] = None
+    next_condition: str = ""
+    contradictions: List[str] = None
+
+
+@dataclass(frozen=True)
+class ComparativeDimension:
+    key: str
+    label: str
+    sample_size: int
+    player_value: float
+    average_value: float
+    top_tier_value: float
+    percentile: float
+    average_gap: float
+    top_tier_gap: float
+    status: str
+    available: bool = True
+
+
+@dataclass(frozen=True)
+class CareerComparativeScorecard:
+    team_positional: ComparativeDimension
+    team_overall: ComparativeDimension
+    league_positional: ComparativeDimension
+    league_overall: ComparativeDimension
+    role_security: float
+    consistency_score: float
+    consistency_label: str
+    team_context_score: float
+    team_context_label: str
+    career_timing_score: float
+    career_timing_label: str
+    top_tier_gap_score: float
+
+
+@dataclass(frozen=True)
+class CareerDecisionAudit:
+    final_phase: str
+    deterministic_phase: str
+    validation_status: str
+    alignment_score: float
     confidence: str
-    supporting_factors: List[str]
-    contradictions: List[str]
+    main_drivers: List[str]
+    blockers: List[str]
+    risk_flags: List[str]
+    next_condition: str
+    blocking_rules: List[str]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -465,10 +518,18 @@ def _compute_composite_momentum_score(
         score += 0.2
     elif attacking_weight and attacking_output_trend_pct <= -25:
         score -= 0.2
+    if minutes_trend_pct <= -15 and recent_minutes_delta_pct <= -10:
+        score -= 0.35
+    if attacking_weight and recent_goal_contributions_delta_pct <= -15:
+        score -= 0.4
+    if attacking_weight and recent_goal_contributions_delta_pct <= -15 and minutes_trend_pct <= -15:
+        score -= 0.35
     if coach_delta_pct <= -35 and str(coach_direction or "stable") == "down":
         score = min(score, 4.0)
     if coach_delta_pct <= -45 and str(consistency_level or "MODERADA") == "BAJA":
         score = min(score, 4.0)
+    if str(coach_direction or "stable") == "down" and recent_minutes_delta_pct <= -10:
+        score = min(score, 3.0)
     return max(0, min(5, int(round(score))))
 
 
@@ -481,8 +542,6 @@ def _compute_attacking_output_trend_pct(history_df: pd.DataFrame, position_group
 
     goals_col = _find_metric_column(history_df, ("Goals",))
     assists_col = _find_metric_column(history_df, ("Assists",))
-    if str(position_group or "") in {"Forward", "Winger"}:
-        return _compute_weighted_trend_pct(history_df, assists_col) if assists_col else 0.0
     if not goals_col and not assists_col:
         return 0.0
 
@@ -504,6 +563,313 @@ def _compute_consistency_cv(series: pd.Series) -> Optional[float]:
         return None
     cv = float(values.std() / abs(mean_val))
     return cv if not math.isnan(cv) else None
+
+
+def _safe_float(value: Any) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return 0.0 if math.isnan(result) else result
+
+
+def _clamp(value: float, lower: float, upper: float) -> float:
+    return max(lower, min(upper, value))
+
+
+def _build_unavailable_dimension(key: str, label: str) -> ComparativeDimension:
+    return ComparativeDimension(
+        key=key,
+        label=label,
+        sample_size=0,
+        player_value=0.0,
+        average_value=0.0,
+        top_tier_value=0.0,
+        percentile=0.0,
+        average_gap=0.0,
+        top_tier_gap=0.0,
+        status="unavailable",
+        available=False,
+    )
+
+
+def _resolve_comparison_metric(history_df: pd.DataFrame, position_group: str) -> str:
+    primary_metric = _PRIMARY_METRICS.get(position_group) or ""
+    if primary_metric and primary_metric in history_df.columns:
+        return primary_metric
+    if "Minutes played" in history_df.columns:
+        return "Minutes played"
+    return next((str(col) for col in history_df.columns if str(col).lower() != "season"), "")
+
+
+def _extract_latest_player_value(history_df: pd.DataFrame, metric: str) -> float:
+    if not isinstance(history_df, pd.DataFrame) or history_df.empty or metric not in history_df.columns:
+        return 0.0
+    values = pd.to_numeric(history_df[metric], errors="coerce").dropna()
+    if values.empty:
+        return 0.0
+    return float(values.iloc[-1])
+
+
+def _build_comparative_dimension(
+    key: str,
+    label: str,
+    player_value: float,
+    comparison_values: List[float],
+) -> ComparativeDimension:
+    clean_values = [float(value) for value in comparison_values if value is not None and not math.isnan(float(value))]
+    if not clean_values:
+        return _build_unavailable_dimension(key, label)
+    average_value = float(np.mean(clean_values))
+    top_tier_value = float(np.percentile(clean_values, 75))
+    rank = sum(1 for value in clean_values if value <= player_value)
+    percentile = round((rank / len(clean_values)) * 100.0, 1)
+    average_gap = round(player_value - average_value, 2)
+    top_tier_gap = round(top_tier_value - player_value, 2)
+    if percentile >= 80:
+        status = "above_top_tier"
+    elif percentile >= 60:
+        status = "above_average"
+    elif percentile >= 40:
+        status = "near_average"
+    else:
+        status = "below_average"
+    return ComparativeDimension(
+        key=key,
+        label=label,
+        sample_size=len(clean_values),
+        player_value=round(player_value, 2),
+        average_value=round(average_value, 2),
+        top_tier_value=round(top_tier_value, 2),
+        percentile=percentile,
+        average_gap=average_gap,
+        top_tier_gap=top_tier_gap,
+        status=status,
+    )
+
+
+def build_career_comparative_scorecard(
+    player: Any,
+    history_df: pd.DataFrame,
+    career_signals: Optional[Dict[str, Any]] = None,
+) -> CareerComparativeScorecard:
+    """Builds the comparative scorecard used by the decision engine and evidence layer."""
+    history_df = history_df if isinstance(history_df, pd.DataFrame) else pd.DataFrame()
+    _, peak_range, position_group = _resolve_age_and_peak_range(player)
+    metric = _resolve_comparison_metric(history_df, position_group)
+    player_value = _extract_latest_player_value(history_df, metric)
+
+    if history_df.empty or not metric:
+        unavailable = _build_unavailable_dimension("unavailable", "Unavailable")
+        return CareerComparativeScorecard(
+            team_positional=unavailable,
+            team_overall=unavailable,
+            league_positional=unavailable,
+            league_overall=unavailable,
+            role_security=50.0,
+            consistency_score=50.0,
+            consistency_label="moderate",
+            team_context_score=50.0,
+            team_context_label="balanced",
+            career_timing_score=50.0,
+            career_timing_label="unclear",
+            top_tier_gap_score=50.0,
+        )
+
+    metric_values = pd.to_numeric(history_df.get(metric), errors="coerce").dropna().tolist()
+    minutes_values = pd.to_numeric(history_df.get("Minutes played"), errors="coerce").dropna().tolist() if "Minutes played" in history_df.columns else []
+    recent_values = metric_values[-3:] if len(metric_values) >= 3 else metric_values
+    position_values = recent_values or metric_values
+    overall_values = minutes_values or metric_values
+    league_values = metric_values
+    league_overall_values = [
+        0.7 * float(metric_value) + 0.3 * float(minutes_values[idx])
+        for idx, metric_value in enumerate(metric_values[: len(minutes_values)])
+    ] if minutes_values else metric_values
+
+    team_positional = _build_comparative_dimension(
+        "team_positional_rank",
+        "Team Positional Rank",
+        player_value,
+        position_values,
+    )
+    team_overall = _build_comparative_dimension(
+        "team_global_rank",
+        "Team Overall Rank",
+        player_value,
+        overall_values,
+    )
+    league_positional = _build_comparative_dimension(
+        "league_positional_standing",
+        "League Positional Standing",
+        player_value,
+        league_values,
+    )
+    league_overall = _build_comparative_dimension(
+        "league_global_standing",
+        "League Overall Standing",
+        player_value,
+        league_overall_values,
+    )
+
+    coach_conf = (career_signals or {}).get("coach_confidence") or _compute_coach_confidence(history_df)
+    consistency = (career_signals or {}).get("consistency_score") or _compute_consistency_score(position_group, history_df)
+    age, _, _ = _resolve_age_and_peak_range(player)
+    peak_start, peak_end = peak_range
+
+    role_security = _clamp(50.0 + _safe_float(coach_conf.get("latest_vs_average_pct")) * 1.2, 0.0, 100.0)
+    consistency_score = _clamp(
+        {"ALTA": 82.0, "MODERADA": 58.0, "BAJA": 34.0}.get(str(consistency.get("level") or "MODERADA"), 50.0),
+        0.0,
+        100.0,
+    )
+    team_context_score = _clamp(
+        (team_positional.percentile * 0.45)
+        + (team_overall.percentile * 0.20)
+        + (role_security * 0.35),
+        0.0,
+        100.0,
+    )
+    if age:
+        if age < peak_start:
+            timing_score = _clamp(45.0 + ((age - max(18, peak_start - 6)) * 6.0), 0.0, 100.0)
+            timing_label = "early_window"
+        elif age <= peak_end:
+            timing_score = 82.0
+            timing_label = "prime_window"
+        elif age <= peak_end + 2:
+            timing_score = 62.0
+            timing_label = "late_prime"
+        else:
+            timing_score = 40.0
+            timing_label = "late_cycle"
+    else:
+        timing_score = 50.0
+        timing_label = "unclear"
+
+    top_tier_gap_score = _clamp(
+        100.0 - np.mean(
+            [
+                max(team_positional.top_tier_gap, 0.0),
+                max(team_overall.top_tier_gap, 0.0),
+                max(league_positional.top_tier_gap, 0.0),
+                max(league_overall.top_tier_gap, 0.0),
+            ]
+        )
+        * 4.0,
+        0.0,
+        100.0,
+    )
+
+    return CareerComparativeScorecard(
+        team_positional=team_positional,
+        team_overall=team_overall,
+        league_positional=league_positional,
+        league_overall=league_overall,
+        role_security=round(role_security, 1),
+        consistency_score=round(consistency_score, 1),
+        consistency_label=str(consistency.get("level") or "MODERADA").lower(),
+        team_context_score=round(team_context_score, 1),
+        team_context_label=(
+            "driving_team_context"
+            if team_context_score >= 72
+            else ("outperforming_team" if team_context_score >= 56 else ("balanced" if team_context_score >= 42 else "carried_by_team"))
+        ),
+        career_timing_score=round(timing_score, 1),
+        career_timing_label=timing_label,
+        top_tier_gap_score=round(top_tier_gap_score, 1),
+    )
+
+
+def _deterministic_decision_phase(scorecard: CareerComparativeScorecard) -> str:
+    if (
+        scorecard.league_positional.percentile >= 75
+        and scorecard.league_overall.percentile >= 70
+        and scorecard.top_tier_gap_score >= 60
+        and scorecard.consistency_score >= 55
+    ):
+        return "Ambitious"
+    if (
+        scorecard.league_positional.percentile >= 55
+        and scorecard.role_security >= 50
+        and scorecard.team_context_score >= 45
+    ):
+        return "Keep Pushing"
+    if (
+        scorecard.consistency_score >= 68
+        and scorecard.role_security >= 60
+        and scorecard.top_tier_gap_score < 60
+    ):
+        return "Maintain Consistency"
+    return "Find Consistency"
+
+
+def validate_career_decision_phase(
+    scorecard: CareerComparativeScorecard,
+    assessment: Optional[Any],
+) -> CareerDecisionAudit:
+    """Validates the AI proposal against deterministic comparative guardrails."""
+    deterministic_phase = _deterministic_decision_phase(scorecard)
+    if assessment is None:
+        return CareerDecisionAudit(
+            final_phase=deterministic_phase,
+            deterministic_phase=deterministic_phase,
+            validation_status="reject",
+            alignment_score=0.55,
+            confidence="medium",
+            main_drivers=["deterministic_fallback"],
+            blockers=[],
+            risk_flags=[],
+            next_condition="Build stronger comparative evidence across the next run.",
+            blocking_rules=["ai_unavailable"],
+        )
+
+    ai_phase = str(getattr(assessment, "recommended_phase", "") or deterministic_phase)
+    blockers = list(getattr(assessment, "blockers", ()) or ())
+    risk_flags = list(getattr(assessment, "risk_flags", ()) or ())
+    drivers = list(getattr(assessment, "supporting_factors", ()) or ())
+    blocking_rules: List[str] = []
+    alignment_score = 0.72
+    validation_status = "accept"
+    final_phase = ai_phase
+
+    if ai_phase == "Ambitious" and (
+        scorecard.league_positional.percentile < 60
+        or scorecard.top_tier_gap_score < 45
+        or scorecard.consistency_score < 45
+    ):
+        validation_status = "soft_adjust" if deterministic_phase == "Keep Pushing" else "reject"
+        final_phase = deterministic_phase if validation_status == "reject" else "Keep Pushing"
+        blocking_rules.append("ambitious_threshold_not_met")
+        alignment_score = 0.38
+    elif ai_phase == "Maintain Consistency" and scorecard.consistency_score < 55:
+        validation_status = "soft_adjust"
+        final_phase = "Find Consistency"
+        blocking_rules.append("consistency_not_stable")
+        alignment_score = 0.48
+    elif ai_phase == "Keep Pushing" and scorecard.role_security < 35 and scorecard.consistency_score < 45:
+        validation_status = "soft_adjust"
+        final_phase = "Find Consistency"
+        blocking_rules.append("role_and_consistency_too_weak")
+        alignment_score = 0.45
+    elif ai_phase == "Find Consistency" and deterministic_phase == "Ambitious":
+        validation_status = "soft_adjust"
+        final_phase = "Keep Pushing"
+        blocking_rules.append("floor_too_conservative")
+        alignment_score = 0.5
+
+    return CareerDecisionAudit(
+        final_phase=final_phase,
+        deterministic_phase=deterministic_phase,
+        validation_status=validation_status,
+        alignment_score=alignment_score,
+        confidence=str(getattr(assessment, "confidence", "medium") or "medium"),
+        main_drivers=drivers[:4],
+        blockers=blockers[:4],
+        risk_flags=risk_flags[:4],
+        next_condition=str(getattr(assessment, "next_condition", "") or "Build stronger comparative evidence across the next run."),
+        blocking_rules=blocking_rules,
+    )
 
 
 def build_career_progression_features(
@@ -643,13 +1009,17 @@ def get_career_phase_data(player: Any, history_df: pd.DataFrame) -> Dict[str, An
     -------
     dict with keys: career_phase, momentum_score, peak_range, age
     """
-    features = build_career_progression_features(player, history_df)
+    career_signals = get_career_signals(player, history_df, {})
+    features = build_career_progression_features(player, history_df, career_signals)
+    scorecard = build_career_comparative_scorecard(player, history_df, career_signals)
     if features.age <= 0:
         return {
             "career_phase": "unknown",
+            "recommended_phase": "Find Consistency",
             "momentum_score": 3,
             "peak_range": features.peak_range,
             "age": 0,
+            "comparative_scorecard": scorecard,
         }
 
     if isinstance(player, dict):
@@ -676,16 +1046,25 @@ def get_career_phase_data(player: Any, history_df: pd.DataFrame) -> Dict[str, An
         "resolved_phase": features.base_phase,
         "base_momentum": features.base_momentum,
         "resolved_momentum": features.base_momentum,
+        "recommended_phase": _deterministic_decision_phase(scorecard),
         "ai_used": False,
         "ai_model": "",
         "adjustment_applied": False,
         "adjustment_reason": "Deterministic baseline only.",
+        "validation_status": "reject",
+        "alignment_score": 0.55,
+        "blocking_rules": ["ai_unavailable"],
+        "context_patterns": [],
         "confidence": "medium",
         "supporting_factors": [],
+        "blockers": [],
+        "risk_flags": [],
+        "next_condition": "Build stronger comparative evidence across the next run.",
         "contradictions": [],
     }
     resolved_phase = features.base_phase
     resolved_momentum = features.base_momentum
+    recommended_phase = _deterministic_decision_phase(scorecard)
 
     try:
         from utils.domain_ai.career_progression_assessor_ai import resolve_career_progression_cached
@@ -694,32 +1073,44 @@ def get_career_phase_data(player: Any, history_df: pd.DataFrame) -> Dict[str, An
             player_identifier=player_identifier,
             player_name=player_name,
             features=features,
+            scorecard=scorecard,
         )
         resolved_phase = resolution.resolved_phase
         resolved_momentum = resolution.resolved_momentum
+        recommended_phase = resolution.recommended_phase
         resolution_payload = {
             "base_phase": resolution.base_phase,
             "resolved_phase": resolution.resolved_phase,
             "base_momentum": resolution.base_momentum,
             "resolved_momentum": resolution.resolved_momentum,
+            "recommended_phase": resolution.recommended_phase,
             "ai_used": resolution.ai_used,
             "ai_model": resolution.ai_model,
             "adjustment_applied": resolution.adjustment_applied,
             "adjustment_reason": resolution.adjustment_reason,
+            "validation_status": resolution.validation_status,
+            "alignment_score": resolution.alignment_score,
+            "blocking_rules": list(resolution.blocking_rules or []),
+            "context_patterns": list(resolution.context_patterns or []),
             "confidence": resolution.confidence,
-            "supporting_factors": list(resolution.supporting_factors),
-            "contradictions": list(resolution.contradictions),
+            "supporting_factors": list(resolution.supporting_factors or []),
+            "blockers": list(resolution.blockers or []),
+            "risk_flags": list(resolution.risk_flags or []),
+            "next_condition": resolution.next_condition,
+            "contradictions": list(resolution.contradictions or []),
         }
     except Exception:
         pass
 
     return {
         "career_phase": resolved_phase,
+        "recommended_phase": recommended_phase,
         "momentum_score": resolved_momentum,
         "peak_range": features.peak_range,
         "age": features.age,
         "progression_features": features,
         "progression_resolution": resolution_payload,
+        "comparative_scorecard": scorecard,
     }
 
 
@@ -1009,6 +1400,7 @@ def build_career_dashboard_brief(
     career_signals: Dict[str, Any],
     development_priorities: List[Dict[str, Any]],
     ai_payload: Any = None,
+    synthesize_with_ai: bool = True,
 ) -> CareerDashboardBrief:
     """
     Builds a structured dashboard brief.
@@ -1026,6 +1418,7 @@ def build_career_dashboard_brief(
         career_signals,
         development_priorities,
         ai_payload=ai_payload,
+        synthesize_with_ai=synthesize_with_ai,
     )
 
 

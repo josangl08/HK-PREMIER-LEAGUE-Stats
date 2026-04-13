@@ -423,13 +423,22 @@ class TransfermarktDataManager:
     # ── Helpers ──────────────────────────────────────────────────────────────────
 
     def _parse_date(self, date_val) -> Optional[datetime]:
-        if pd.isna(date_val) or not date_val:
+        if not date_val:
+            return None
+        if isinstance(date_val, float) and pd.isna(date_val):
             return None
         if isinstance(date_val, datetime):
             return date_val
+        s = str(date_val).strip()
+        # Primary: all Transfermarkt dates are DD/MM/YYYY
         try:
-            return pd.to_datetime(date_val, dayfirst=True).to_pydatetime()
-        except:
+            return datetime.strptime(s, "%d/%m/%Y")
+        except ValueError:
+            pass
+        # Fallback: ISO or other unambiguous formats
+        try:
+            return datetime.fromisoformat(s)
+        except ValueError:
             return None
 
     def _update_sync_log(self, task: str):
@@ -446,11 +455,31 @@ class TransfermarktDataManager:
         finally:
             session.close()
 
+    def _is_national_team_competition(self, competition_name: str | None) -> bool:
+        text = str(competition_name or "").lower()
+        national_tokens = [
+            "asian cup",
+            "world cup",
+            "qualification",
+            "qualifier",
+            "nations cup",
+            "friendly international",
+            "u17",
+            "u20",
+            "u23",
+            "u-17",
+            "u-20",
+            "u-23",
+        ]
+        return any(token in text for token in national_tokens)
+
     def _upsert_history_to_sql(self, player_id: str, raw_matches: List[Dict]):
         """Helper to upsert match history data."""
         session = SessionFactory()
         try:
             for m in raw_matches:
+                if self._is_national_team_competition(m.get("competition")):
+                    continue
                 dt = self._parse_date(m.get('date'))
                 if not dt: continue
                 
@@ -461,6 +490,8 @@ class TransfermarktDataManager:
                         MatchHistory.opponent == m.get('opponent')
                     )
                 ).scalar_one_or_none()
+                merged_raw = dict(existing.raw_data or {}) if existing and existing.raw_data else {}
+                merged_raw.update(m)
                 
                 if not existing:
                     history = MatchHistory(
@@ -476,9 +507,22 @@ class TransfermarktDataManager:
                         yellow_cards=m.get('yellow_cards', 0),
                         red_cards=m.get('red_cards', 0),
                         position=m.get('position'),
-                        status=m.get('status', 'Jugado')
+                        status=m.get('status', 'Jugado'),
+                        raw_data=merged_raw,
                     )
                     session.add(history)
+                else:
+                    existing.competition_name = m.get('competition') or existing.competition_name
+                    existing.competition_logo = m.get('competition_logo') or existing.competition_logo
+                    existing.result = m.get('result') or existing.result
+                    existing.minutes_played = m.get('minutes_played', existing.minutes_played or 0)
+                    existing.goals = m.get('goals', existing.goals or 0)
+                    existing.assists = m.get('assists', existing.assists or 0)
+                    existing.yellow_cards = m.get('yellow_cards', existing.yellow_cards or 0)
+                    existing.red_cards = m.get('red_cards', existing.red_cards or 0)
+                    existing.position = m.get('position') or existing.position
+                    existing.status = m.get('status') or existing.status
+                    existing.raw_data = merged_raw
             session.commit()
         except Exception as e:
             session.rollback()
