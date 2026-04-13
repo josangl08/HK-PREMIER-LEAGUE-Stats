@@ -9,6 +9,10 @@ import dash_bootstrap_components as dbc
 from dash import dcc, html
 
 from data.competition_registry import get_competition_display_name, get_competition_logo
+from layouts.components.shared import (
+    create_stage_metric_card,
+    create_stage_section_title,
+)
 from utils.chart_helpers import HKFATheme
 from utils.season_stage.season_figures import (
     build_season_comparison_figure,
@@ -40,42 +44,6 @@ COMPARISON_METRIC_COLORS = [
     "#b794f4",
 ]
 
-
-def _section_title(icon: str, title: str, subtitle: str = "", class_name: str = "mb-3") -> html.Div:
-    return html.Div(
-        [
-            html.Div(
-                [
-                    html.I(className=f"bi {icon} me-2", style={"color": HKFATheme.ACCENT_GOLD}),
-                    html.Span(title, style={"fontWeight": "700", "fontSize": "1.02rem", "color": HKFATheme.TEXT_PRIMARY}),
-                ],
-                className="d-flex align-items-center mb-1",
-            ),
-            html.Div(subtitle, className="season-stage-section-subtitle") if subtitle else None,
-        ],
-        className=class_name,
-    )
-
-
-def _pulse_card(label: str, value: Any, icon: str, modifier: str = "") -> html.Div:
-    class_name = "season-stage-kpi"
-    if modifier:
-        class_name = f"{class_name} {modifier}"
-    return html.Div(
-        [
-            html.Div(
-                [
-                    html.I(className=f"bi {icon} me-2", style={"fontSize": "1rem", "color": HKFATheme.ACCENT_GOLD}),
-                    html.Span(label, className="season-stage-kpi__label season-stage-kpi__label--full"),
-                ],
-                className="season-stage-kpi__top",
-            ),
-            html.Div(str(value), className="season-stage-kpi__value"),
-        ],
-        className=class_name,
-    )
-
-
 def _format_delta_value(current: float, previous: float) -> tuple[str, str]:
     delta = current - previous
     direction = "up" if delta > 0 else "down" if delta < 0 else "flat"
@@ -87,8 +55,7 @@ def _format_delta_value(current: float, previous: float) -> tuple[str, str]:
         return f"{symbol} {delta:+.0f}", direction
     return f"{symbol} {delta:+.2f}", direction
 
-
-def _delta_card(label: str, value: Any, delta_text: str, icon: str, accent: str) -> html.Div:
+def _build_delta_metric_card(label: str, value: Any, delta_text: str, icon: str, accent: str) -> html.Div:
     delta_color = "#d6dde6"
     if str(delta_text).startswith("↑"):
         delta_color = "#52dc8e"
@@ -108,47 +75,15 @@ def _delta_card(label: str, value: Any, delta_text: str, icon: str, accent: str)
             className=f"bi {icon}",
             style={"color": accent, "fontSize": "1rem", "marginRight": "8px"},
         )
-
-    return dbc.Card(
-        dbc.CardBody(
-            [
-                html.Div(
-                    [
-                        icon_node,
-                        html.Span(
-                            label,
-                            style={"color": "rgb(201, 210, 222)", "fontSize": "0.8rem", "fontWeight": "400"},
-                        ),
-                    ],
-                    className="mb-2",
-                ),
-                html.Div(
-                    str(value),
-                    style={"color": "rgb(244, 248, 252)", "fontSize": "1.55rem", "fontWeight": "800", "lineHeight": "1.05"},
-                ),
-                html.Div(
-                    delta_text,
-                    style={"color": delta_color, "fontSize": "0.86rem", "fontWeight": "400", "marginTop": "8px"},
-                ),
-            ]
-            ,
-            style={"padding": "14px 14px 12px"}
-        ),
-        className="border-0 prematch-float-card prematch-clean-card prematch-stat-card",
-        style={
-            "position": "relative",
-            "width": "150px",
-            "minWidth": "150px",
-            "maxWidth": "150px",
-            "height": "100%",
-            "minHeight": "150px",
-            "maxHeight": "150px",
-            "marginBottom": "0",
-            "padding": "0",
-            "boxSizing": "border-box",
-            "overflow": "hidden",
-            "display": "block",
-        },
+    return create_stage_metric_card(
+        label=label,
+        value=str(value),
+        subtext=delta_text,
+        icon=icon_node,
+        accent=accent,
+        subtext_color=delta_color,
+        class_name="pp-stage-metric-card--delta",
+        size="170px",
     )
 
 
@@ -210,11 +145,22 @@ def _season_performance_metric_specs(pos_group: str) -> List[tuple[str, str, str
     return base + by_pos.get(pos_group, by_pos["Midfielder"])
 
 
+import math
+
 def _build_season_performance_metrics(context: Dict[str, Any]) -> List[Dict[str, Any]]:
     current_row = context.get("season_row")
     prev_row = (context.get("previous_season") or {}).get("row")
     if current_row is None:
         return []
+
+    # Use a global logarithmic scale to ensure absolute value mapping across ALL metrics.
+    # log10(val + 1) preserves order: 1800 > 30 > 10 > 3 > 0.55
+    # and ensures that small values are visible while large values don't dwarf them completely.
+    def global_log_scale(val: float) -> float:
+        v = abs(float(val or 0.0))
+        # log10(2501) approx 3.4. We use 2500 as the global reference ceiling (full bar).
+        ceiling_log = 3.398  # math.log10(2500 + 1)
+        return min(1.0, math.log10(v + 1) / ceiling_log)
 
     metrics: List[Dict[str, Any]] = []
     for idx, (label, key, icon) in enumerate(_season_performance_metric_specs(context.get("pos_group", "Midfielder"))):
@@ -222,7 +168,7 @@ def _build_season_performance_metrics(context: Dict[str, Any]) -> List[Dict[str,
             continue
         current_value = float(current_row.get(key) or 0)
         previous_value = float(prev_row.get(key) or 0) if prev_row is not None and key in prev_row.index else 0.0
-        max_value = max(abs(current_value), abs(previous_value), 1e-6)
+        
         delta_text, direction = _format_delta_value(current_value, previous_value)
         metrics.append(
             {
@@ -235,8 +181,8 @@ def _build_season_performance_metrics(context: Dict[str, Any]) -> List[Dict[str,
                 "previous_display": _format_metric_display(previous_value),
                 "delta_text": delta_text,
                 "direction": direction,
-                "current_scaled": current_value / max_value,
-                "previous_scaled": previous_value / max_value,
+                "current_scaled": global_log_scale(current_value),
+                "previous_scaled": global_log_scale(previous_value),
                 "color": COMPARISON_METRIC_COLORS[idx % len(COMPARISON_METRIC_COLORS)],
             }
         )
@@ -302,7 +248,7 @@ def render_season_performance(context: Dict[str, Any]) -> html.Div:
     if current_row is None or prev_row is None:
         return html.Div(
             [
-                _section_title("bi-speedometer2", "Season Performance", "Selected season metrics with previous-season comparison."),
+                create_stage_section_title("Season Performance", "Selected season metrics with previous-season comparison.", icon="bi-speedometer2"),
                 html.Div("Previous-season comparison is not available for this player yet.", className="text-muted small"),
             ]
         )
@@ -310,42 +256,27 @@ def render_season_performance(context: Dict[str, Any]) -> html.Div:
     if not metrics:
         return html.Div(
             [
-                _section_title("bi-speedometer2", "Season Performance", "Selected season metrics with previous-season comparison."),
+                create_stage_section_title("Season Performance", "Selected season metrics with previous-season comparison.", icon="bi-speedometer2"),
                 html.Div("Season performance metrics are not available.", className="text-muted small"),
             ]
         )
     return html.Div(
         [
-            _section_title("bi-speedometer2", "Season Performance", "Selected season metrics with previous-season comparison."),
+            create_stage_section_title("Season Performance", "Selected season metrics with previous-season comparison.", icon="bi-speedometer2"),
             html.Div(
                 [
                     html.Div(
                         [
-                            html.Div(
-                                _delta_card(
-                                    metric["label"],
-                                    metric["current_display"],
-                                    metric["delta_text"],
-                                    metric["icon"],
-                                    metric["color"],
-                                ),
-                                className="season-stage-performance-card-shell",
-                                style={
-                                    "flex": "1 1 150px",
-                                    "minWidth": "150px",
-                                    "maxWidth": "150px",
-                                    "height": "150px",
-                                },
+                            _build_delta_metric_card(
+                                metric["label"],
+                                metric["current_display"],
+                                metric["delta_text"],
+                                metric["icon"],
+                                metric["color"],
                             )
                             for metric in metrics
                         ],
                         className="season-stage-kpi-grid season-stage-kpi-grid--performance",
-                        style={
-                            "display": "flex",
-                            "gap": "12px",
-                            "flexWrap": "wrap",
-                            "alignItems": "stretch",
-                        },
                     ),
                     html.Div(
                         dcc.Graph(
@@ -355,12 +286,12 @@ def render_season_performance(context: Dict[str, Any]) -> html.Div:
                                 context.get("season") or "Selected",
                             ),
                             config={"displayModeBar": False, "responsive": True},
-                            className="w-100 season-comparison-panel",
+                            className="w-100",
                             responsive=True,
                             style={"width": "100%", "minWidth": "0", "marginBottom": "0", "display": "block"},
                         ),
-                        className="season-stage-panel season-stage-panel--performance-chart",
-                    ),
+                        className="season-stage-performance-chart-wrap",
+                    )
                 ],
                 className="season-stage-grid season-stage-grid--performance",
             ),
@@ -375,23 +306,28 @@ def render_season_role_profile(profile_context: Dict[str, Any]) -> html.Div:
     return html.Div(
         className="season-role-profile-section",
         children=[
-            _section_title(
-                "bi-diagram-3",
+            create_stage_section_title(
                 "Role Profile in the League",
                 "How this season's role sits inside the league cohort.",
+                icon="bi-diagram-3",
                 class_name="season-role-profile__title",
             ),
             html.Div(
                 [
+                    html.Div(
+                        [
+                            html.Div(profile_context.get("archetype_label", "Season Profile"), className="season-role-badge season-role-badge--large"),
+                            html.Div(clarity.get("copy", ""), className="season-role-copy"),
+                        ],
+                        className="season-role-profile__meta",
+                    ),
                     dcc.Graph(
                         figure=build_season_quadrant_figure(profile_context),
                         config={"displayModeBar": False, "responsive": True},
-                        className="w-100 season-quadrant-panel",
+                        className="w-100 season-role-profile__graph",
                         responsive=True,
-                        style={"width": "100%", "minWidth": "0"},
+                        style={"width": "100%", "minWidth": "0", "marginBottom": "0", "display": "block"},
                     ),
-                    html.Div(profile_context.get("archetype_label", "Season Profile"), className="season-role-badge season-role-badge--large"),
-                    html.Div(clarity.get("copy", ""), className="season-role-copy"),
                     html.Div(
                         [
                             html.Div(clarity.get("label", "Profile read"), className="season-profile-clarity"),
@@ -400,7 +336,7 @@ def render_season_role_profile(profile_context: Dict[str, Any]) -> html.Div:
                         className="season-role-profile__summary",
                     ),
                 ],
-                className="season-role-profile-card",
+                className="season-role-profile-content",
             ),
             dbc.Button(
                 "View Full Profile Map",
@@ -415,7 +351,7 @@ def render_season_role_profile(profile_context: Dict[str, Any]) -> html.Div:
 
 
 def render_season_competition_split(split_rows: List[Dict[str, Any]], is_current_season: bool = False) -> html.Div:
-    body: List[Any] = [_section_title("bi-trophy", "Competition Split")]
+    body: List[Any] = [create_stage_section_title("Competition Split", icon="bi-trophy")]
     if not split_rows:
         body.append(html.Div("Competition breakdown is not available yet.", className="text-muted small"))
         return html.Div(body)
@@ -508,9 +444,23 @@ def render_season_competition_split(split_rows: List[Dict[str, Any]], is_current
 def render_season_umap_modal(profile_context: Dict[str, Any]) -> dbc.Modal:
     explainer = html.Div(
         [
+            html.Div(
+                [
+                    html.Span("Stage role:", className="season-umap-label-pair__key"),
+                    html.Span(profile_context.get("archetype_label", "Season Profile"), className="season-umap-label-pair__value"),
+                ],
+                className="season-umap-label-pair",
+            ),
+            html.Div(
+                [
+                    html.Span("Cluster role:", className="season-umap-label-pair__key"),
+                    html.Span(profile_context.get("cluster_archetype_label", profile_context.get("archetype_label", "Season Profile")), className="season-umap-label-pair__value"),
+                ],
+                className="season-umap-label-pair",
+            ),
             html.Div("Nearby points suggest similar statistical profiles for this season.", className="season-umap-explainer"),
             html.Div("Cluster colors indicate broader role families rather than exact football positions.", className="season-umap-explainer"),
-            html.Div("The highlighted point marks the selected season profile and the same archetype used in the badge and quadrant block.", className="season-umap-explainer"),
+            html.Div("The highlighted point marks the selected season profile. The stage role comes from the semantic quadrant, while the cluster role comes from KMeans grouping.", className="season-umap-explainer"),
         ],
         className="mb-3",
     )

@@ -290,11 +290,14 @@ def _build_preview_layout(editor_state: dict, photos_store: dict, milestones_dat
                     pass
             
             if not bg_style:
+                # Use a more high-end gradient as default instead of just dark blue
                 base_color = layers.get("base_color")
-                c1 = base_color[0] if (isinstance(base_color, list) and base_color) else "#0a1a2f"
+                c1 = base_color[0] if (isinstance(base_color, list) and base_color) else "#0f172a"
+                c2 = "#05050a"
                 bg_style = {
-                    "background": f"linear-gradient(180deg, {c1} 0%, #05050a 100%)",
-                    "position": "relative"
+                    "background": f"radial-gradient(circle at 50% 30%, {c1} 0%, {c2} 100%)",
+                    "position": "relative",
+                    "border": "1px solid rgba(255,255,255,0.05)"
                 }
 
         aspect_style = {"1:1": "100%", "9:16": "177.77%", "4:5": "125%", "16:9": "56.25%"}.get(fmt, "100%")
@@ -440,7 +443,7 @@ def register_card_editor_callbacks(app):
         Input({"type": "card-history-thumb", "index": ALL}, "n_clicks"),
         Input("card-stats-selection", "value"),
         State("card-editor-state", "data"),
-        prevent_initial_call='initial_duplicate',
+        prevent_initial_call=True,
     )
     def update_card_studio_state(n_repropose, n_generate, format_tab,
                                  photo_clicks, history_clicks, manual_stats, current_state):
@@ -690,7 +693,7 @@ def register_card_editor_callbacks(app):
         active_ratio = aspect_ratios.get(fmt, "9/16")
         
         container_style = {
-            "background": "#05050a",
+            "background": "transparent",
             "borderRadius": "20px",
             "border": "1px solid rgba(255,255,255,0.1)",
             "height": "100%", 

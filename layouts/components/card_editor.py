@@ -141,7 +141,7 @@ def _create_card_studio_layout(milestone_id, match_context, album, studio_type="
             html.H5("AI Design Studio", className="text-white fw-bold mb-1"),
             html.P("Preparando lienzo...", className="text-white-50 small mb-0"),
         ], className="d-flex flex-column align-items-center justify-content-center h-100",
-           style={"position": "absolute", "inset": "0", "background": "#0a1a2f"})
+           style={"position": "absolute", "inset": "0", "background": "transparent"})
 
     return html.Div([
         dbc.Row([
@@ -174,7 +174,7 @@ def _create_card_studio_layout(milestone_id, match_context, album, studio_type="
                                         "position": "relative",
                                         "overflow": "hidden",
                                         "boxShadow": "0 20px 40px rgba(0,0,0,0.5)",
-                                        "background": "#05050a",
+                                        "background": "transparent",
                                         "height": "100%",
                                         "width": "auto",
                                         "aspectRatio": "9/16",
@@ -206,7 +206,7 @@ def _create_card_studio_layout(milestone_id, match_context, album, studio_type="
                         "flex": "1",
                         "minHeight": "0",
                         # Concrete height so height:100% resolves for the portrait card child
-                        "height": "calc(var(--portal-desktop-height) - 80px)",
+                        "height": "calc(var(--portal-desktop-height) - 130px)",
                         "position": "relative",
                         "display": "flex",
                         "alignItems": "center",

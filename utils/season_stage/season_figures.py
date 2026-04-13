@@ -23,22 +23,11 @@ def build_season_comparison_figure(metrics: list[dict], previous_season_label: s
     labels = [metric["label"] for metric in metrics]
     colors = [metric.get("color", "#f5b942") for metric in metrics]
 
-    # Proportion normalization using raw values: prev / (prev + curr) and curr / (prev + curr).
-    # For each metric both bars share the same denominator, so they are directly comparable
-    # (the longer bar is the better season). Bar lengths always vary on both sides because
-    # the ratio prev:curr differs per metric, even when one season dominates overall.
-    prev_values: list[float] = []
-    curr_values: list[float] = []
-    for metric in metrics:
-        p = abs(float(metric.get("previous_value", 0.0) or 0.0))
-        c = abs(float(metric.get("current_value", 0.0) or 0.0))
-        total = p + c
-        if total < 1e-9:
-            prev_values.append(0.5)
-            curr_values.append(0.5)
-        else:
-            prev_values.append(p / total)
-            curr_values.append(c / total)
+    # Use pre-scaled values (0.0 to 1.0) calculated in season_components.py
+    # This prevents the "minutes" bar or other high-value metrics from having
+    # a different visual weight than others while maintaining comparability.
+    prev_values = [metric.get("previous_scaled", 0.0) for metric in metrics]
+    curr_values = [metric.get("current_scaled", 0.0) for metric in metrics]
 
     # Two-column subplot with shared Y axis so metric labels sit at the center divider.
     # Left column: previous season with reversed X axis (bars grow right-to-left).
@@ -52,9 +41,10 @@ def build_season_comparison_figure(metrics: list[dict], previous_season_label: s
             orientation="h",
             marker=dict(color=colors, line=dict(color=colors, width=1)),
             text=[f"<b>{metric.get('previous_display', '0')}</b>" for metric in metrics],
-            textposition="inside",
+            textposition="auto",
             insidetextanchor="end",
             textfont=dict(size=10, color="rgba(244,248,252,0.88)"),
+            cliponaxis=False,
             customdata=[[metric.get("previous_display", "0")] for metric in metrics],
             hovertemplate=f"{previous_season_label or 'Previous'}<br>%{{y}}: %{{customdata[0]}}<extra></extra>",
             name=previous_season_label or "Previous",
@@ -69,9 +59,10 @@ def build_season_comparison_figure(metrics: list[dict], previous_season_label: s
             orientation="h",
             marker=dict(color=colors, line=dict(color=colors, width=1)),
             text=[f"<b>{metric.get('current_display', '0')}</b>" for metric in metrics],
-            textposition="inside",
+            textposition="auto",
             insidetextanchor="end",
             textfont=dict(size=10, color="rgba(244,248,252,0.88)"),
+            cliponaxis=False,
             customdata=[[metric.get("current_display", "0")] for metric in metrics],
             hovertemplate=f"{current_season_label or 'Selected'}<br>%{{y}}: %{{customdata[0]}}<extra></extra>",
             name=current_season_label or "Selected",
@@ -84,9 +75,9 @@ def build_season_comparison_figure(metrics: list[dict], previous_season_label: s
         bargap=0.42,
         showlegend=False,
         height=max(300, 46 + (len(metrics) * 44)),
-        margin=dict(l=10, r=10, t=46, b=0),
-        xaxis=dict(autorange="reversed", tickvals=[], showgrid=False, zeroline=False),
-        xaxis2=dict(tickvals=[], showgrid=False, zeroline=False),
+        margin=dict(l=10, r=2, t=46, b=0),
+        xaxis=dict(autorange="reversed", range=[0, 1.25], tickvals=[], showgrid=False, zeroline=False),
+        xaxis2=dict(range=[0, 1.12], tickvals=[], showgrid=False, zeroline=False),
         yaxis=dict(
             autorange="reversed",
             showgrid=False,
@@ -215,6 +206,7 @@ def build_season_quadrant_figure(profile_context: Dict[str, Any]) -> go.Figure:
 
     fig.update_layout(
         title=None,
+        height=560,
         showlegend=False,
         margin=dict(l=40, r=24, t=4, b=48),
         xaxis_title=profile_context["axis_labels"]["x"],
