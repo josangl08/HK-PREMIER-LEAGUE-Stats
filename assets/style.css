@@ -524,9 +524,31 @@ a:hover, .link:hover {
 }
 
 .auth-card {
-    border-radius: 1rem;
+    border-radius: 1.25rem;
     overflow: hidden;
     border: 1px solid var(--border-color);
+}
+
+.auth-glass-card {
+    background: rgba(255, 255, 255, 0.03) !important;
+    backdrop-filter: blur(20px) !important;
+    -webkit-backdrop-filter: blur(20px) !important;
+    border: 1px solid rgba(255, 255, 255, 0.12) !important;
+    border-radius: 1.5rem !important;
+    box-shadow: 
+        0 25px 50px -12px rgba(0, 0, 0, 0.5),
+        inset 0 1px 1px rgba(255, 255, 255, 0.1) !important;
+    transition: var(--transition);
+}
+
+.auth-glass-card:hover {
+    transform: none; /* No queremos que la tarjeta de login flote en hover como las pequeñas */
+    border-color: rgba(255, 255, 255, 0.2) !important;
+}
+
+.auth-header-gradient {
+    background: linear-gradient(135deg, rgba(147, 49, 42, 0.8) 0%, rgba(24, 24, 26, 0.4) 100%);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 .bg-secondary-custom {

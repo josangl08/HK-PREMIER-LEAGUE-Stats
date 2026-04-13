@@ -9,11 +9,6 @@ import logging
 from pathlib import Path
 from typing import Optional, Dict
 
-# Safeguard for Numba threading layer on macOS (Silicon)
-if "NUMBA_THREADING_LAYER" not in os.environ:
-    os.environ["NUMBA_THREADING_LAYER"] = "workqueue"
-
-from rembg import remove
 from PIL import Image
 
 logger = logging.getLogger(__name__)
@@ -76,8 +71,13 @@ def remove_background(image_bytes: bytes) -> bytes:
     Removes background from image bytes using rembg (U2-Net).
     Returns RGBA PNG bytes.
     Handles potential onnxruntime/OpenMP crashes gracefully by falling back to original.
+    rembg/numba/scipy are lazy-loaded here to avoid blocking app startup.
     """
     try:
+        # Lazy import: only loaded on first photo upload, not at app startup
+        if "NUMBA_THREADING_LAYER" not in os.environ:
+            os.environ["NUMBA_THREADING_LAYER"] = "workqueue"
+        from rembg import remove
         output_bytes = remove(image_bytes)
         return output_bytes
     except Exception as exc:

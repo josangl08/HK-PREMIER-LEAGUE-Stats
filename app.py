@@ -252,11 +252,14 @@ app.layout = dbc.Container([
         dbc.Container([
             dbc.Row([
                 dbc.Col([
-                    html.Div(id='auth-form-content', className="auth-card")
+                    html.Div(id='auth-form-content')
                 ], width=12, sm=9, md=7, lg=5, className="mx-auto mt-4 mb-5")
             ])
         ], fluid=True, className="min-vh-100 py-5",
-           style={"backgroundColor": "#18181A"})
+           style={
+               "background": "radial-gradient(circle at 50% 50%, #3a1a2a 0%, #18181A 100%)",
+               "backgroundAttachment": "fixed"
+           })
     ]),
 
     # Contenido principal para rutas no-auth

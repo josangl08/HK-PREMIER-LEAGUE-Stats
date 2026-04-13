@@ -53,6 +53,30 @@ class BeSoccerExtractor:
             logger.error(f"Error en BeSoccer request {url}: {e}")
             return None
 
+    def _generate_name_variants(self, name: str) -> List[str]:
+        """
+        Genera variantes del nombre de un jugador para mejorar la búsqueda.
+        Útil para nombres chinos que aparecen en distinto orden en BeSoccer.
+        Ej: 'Chan Siu Kwan' → ['Chan Siu Kwan', 'Siu Kwan Chan', 'Siu Kwan', 'Chan Kwan', 'C. Siu Kwan']
+        """
+        parts = name.strip().split()
+        variants = [name]
+
+        if len(parts) >= 2:
+            # Orden invertido: "Chan Siu Kwan" → "Siu Kwan Chan"
+            variants.append(" ".join(parts[1:] + [parts[0]]))
+            # Solo las últimas dos partes: "Siu Kwan"
+            if len(parts) > 2:
+                variants.append(" ".join(parts[-2:]))
+            # Primera y última parte: "Chan Kwan"
+            if parts[0] != parts[-1]:
+                variants.append(f"{parts[0]} {parts[-1]}")
+            # Inicial + resto: "C. Siu Kwan"
+            variants.append(f"{parts[0][0]}. {' '.join(parts[1:])}")
+
+        seen = set()
+        return [v for v in variants if not (v in seen or seen.add(v))]
+
     def get_player_ratings(self, besoccer_id: str) -> Dict[str, float]:
         """
         Extrae los ratings de los partidos de un jugador.
@@ -196,56 +220,63 @@ class BeSoccerExtractor:
     def search_player(self, name: str, team_name: Optional[str] = None) -> Optional[str]:
         """
         Busca un jugador y devuelve su ID (slug).
-        Intenta varias rutas de búsqueda si la principal falla, incluyendo Google fallback.
+        Intenta múltiples variantes del nombre (útil para nombres chinos con distinto orden)
+        y varias rutas de búsqueda antes del Google fallback.
         """
-        query = urllib.parse.quote(name)
-        # BeSoccer search often redirects or uses specific endpoints
-        search_paths = [
-            f"https://www.besoccer.com/search-matches?q={query}",
-            f"https://es.besoccer.com/buscar?q={query}",
-            f"{self.base_url}/buscar?q={query}",
-        ]
+        for variant in self._generate_name_variants(name):
+            query = urllib.parse.quote(variant)
+            search_paths = [
+                f"https://www.besoccer.com/search-matches?q={query}",
+                f"https://es.besoccer.com/buscar?q={query}",
+                f"{self.base_url}/buscar?q={query}",
+            ]
 
-        for url in search_paths:
-            soup = self._make_request(url)
-            if not soup: continue
-            
-            results = soup.select(".search-item, .item-search, a[href*='/player/']")
-            for res in results:
-                href = res.get("href") if 'href' in res.attrs else None
-                if not href:
-                    link = res.select_one("a[href*='/player/']")
-                    if link: href = link.get("href")
-                
-                if not href: continue
-                
-                match = re.search(r"/player/([^/?]+)", href)
-                if match:
-                    slug = match.group(1)
-                    if team_name and team_name.lower() not in res.get_text().lower():
-                        continue
-                    return slug
-            
-            first_player = soup.select_one("a[href*='/player/']")
-            if first_player:
-                href = first_player.get("href")
-                match = re.search(r"/player/([^/?]+)", href)
-                if match: return match.group(1)
+            for url in search_paths:
+                soup = self._make_request(url)
+                if not soup: continue
 
-        # FINAL FALLBACK: Google Search
-        logger.info(f"BeSoccer Internal Search failed for {name}. Trying Google fallback...")
-        try:
-            from googlesearch import search
-            google_query = f"site:besoccer.com player {name}"
-            if team_name: google_query += f" {team_name}"
-            
-            for url in search(google_query, num_results=3):
-                if "/player/" in url:
-                    match = re.search(r"/player/([^/?]+)", url)
+                results = soup.select(".search-item, .item-search, a[href*='/player/']")
+                for res in results:
+                    href = res.get("href") if 'href' in res.attrs else None
+                    if not href:
+                        link = res.select_one("a[href*='/player/']")
+                        if link: href = link.get("href")
+
+                    if not href: continue
+
+                    match = re.search(r"/player/([^/?]+)", href)
                     if match:
                         slug = match.group(1)
-                        logger.info(f"✓ BeSoccer slug found via Google: {slug}")
+                        if team_name and team_name.lower() not in res.get_text().lower():
+                            continue
+                        logger.info(f"✓ BeSoccer found via variant '{variant}': {slug}")
                         return slug
+
+                first_player = soup.select_one("a[href*='/player/']")
+                if first_player:
+                    href = first_player.get("href")
+                    match = re.search(r"/player/([^/?]+)", href)
+                    if match:
+                        slug = match.group(1)
+                        logger.info(f"✓ BeSoccer found via variant '{variant}' (first result): {slug}")
+                        return match.group(1)
+
+        # FINAL FALLBACK: Google Search (prueba el nombre original y el invertido)
+        logger.info(f"BeSoccer Internal Search failed for {name}. Trying Google fallback...")
+        variants = self._generate_name_variants(name)
+        try:
+            from googlesearch import search
+            for variant in variants[:2]:  # original + reversed order
+                google_query = f"site:besoccer.com player {variant}"
+                if team_name: google_query += f" {team_name}"
+
+                for url in search(google_query, num_results=3):
+                    if "/player/" in url:
+                        match = re.search(r"/player/([^/?]+)", url)
+                        if match:
+                            slug = match.group(1)
+                            logger.info(f"✓ BeSoccer slug found via Google (variant '{variant}'): {slug}")
+                            return slug
         except Exception as e:
             logger.warning(f"Google fallback search failed: {e}")
 

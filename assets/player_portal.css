@@ -550,7 +550,7 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
     width: 100%;
 }
 
-/* Timeline: always data calculation → amber */
+/* Timeline: data refresh (polling / pagination) → amber */
 #timeline-milestones[data-dash-is-loading="true"]::after {
     content: "";
     position: absolute;
@@ -564,6 +564,51 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
     animation: loading-pulse-data 1.1s ease-in-out infinite;
     pointer-events: none;
     z-index: 2;
+}
+
+/* Timeline: first load / interface building → blue (ui) */
+#timeline-milestones[data-timeline-loading-type="ui"][data-dash-is-loading="true"]::after {
+    background: var(--accent-cyan, #00d4ff);
+    box-shadow: 0 0 0 0 rgba(0, 212, 255, 0.55);
+    animation: loading-pulse-ui 1.1s ease-in-out infinite;
+}
+
+/* ─── Dashboard Skeleton (Phase 1 loading shimmer) ──────────────────────── */
+@keyframes skeleton-shimmer {
+    0%   { background-position: -400px 0; }
+    100% { background-position: 400px 0; }
+}
+
+.skeleton-card {
+    min-height: 80px;
+    overflow: hidden;
+}
+
+.skeleton-line {
+    height: 12px;
+    border-radius: 6px;
+    background: linear-gradient(
+        90deg,
+        var(--background-secondary, rgba(255,255,255,0.06)) 25%,
+        var(--background-tertiary,  rgba(255,255,255,0.12)) 50%,
+        var(--background-secondary, rgba(255,255,255,0.06)) 75%
+    );
+    background-size: 800px 100%;
+    animation: skeleton-shimmer 1.4s ease-in-out infinite;
+}
+
+.skeleton-line--title {
+    height: 16px;
+    width: 55%;
+    border-radius: 8px;
+}
+
+.skeleton-line--text {
+    width: 90%;
+}
+
+.skeleton-line--short {
+    width: 60%;
 }
 
 /* 1.3 Year Navigator Pills */
@@ -1090,6 +1135,355 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
 .season-card:hover {
     transform: translateY(-2px);
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15) !important;
+}
+
+.stage-view--season {
+    padding: 8px 4px 16px;
+}
+
+.season-stage-stack {
+    display: grid;
+    gap: 14px;
+}
+
+.season-stage-grid {
+    display: grid;
+    gap: 14px;
+}
+
+.season-stage-grid--top {
+    grid-template-columns: minmax(320px, 0.92fr) minmax(0, 1.08fr);
+    align-items: start;
+}
+
+.season-stage-grid--performance {
+    grid-template-columns: minmax(332px, 0.92fr) minmax(0, 1.08fr);
+    align-items: start;
+}
+
+.season-stage-panel,
+.season-stage-hero,
+.season-role-profile-card {
+    background:
+        linear-gradient(180deg, rgba(245, 185, 66, 0.12), rgba(255, 255, 255, 0.02)),
+        rgba(255, 255, 255, 0.025);
+    border: 1px solid rgba(245, 185, 66, 0.14);
+    border-radius: 18px;
+    padding: 18px;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.season-stage-panel--split,
+.season-role-profile-card {
+    height: 100%;
+}
+
+.season-stage-eyebrow {
+    color: #f5b942;
+    font-size: 0.8rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-bottom: 10px;
+}
+
+.season-stage-intro-copy,
+.season-stage-section-subtitle,
+.season-role-copy,
+.season-profile-neighbors,
+.season-umap-explainer,
+.season-competition-row__stats {
+    color: rgba(233, 240, 247, 0.78);
+    font-size: 0.98rem;
+    line-height: 1.7;
+}
+
+.season-stage-hero {
+    padding: 24px 24px 22px;
+}
+
+.season-stage-competition-surface {
+    padding-top: 8px;
+}
+
+.season-stage-hero__top {
+    margin-bottom: 14px;
+}
+
+.season-stage-hero__copy {
+    display: grid;
+    gap: 12px;
+}
+
+.season-stage-hero__club {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.season-stage-hero__crest {
+    width: 44px;
+    height: 44px;
+    object-fit: contain;
+    flex-shrink: 0;
+}
+
+.season-stage-hero__title {
+    font-size: clamp(1.9rem, 2.2vw, 2.35rem);
+    line-height: 1.05;
+    letter-spacing: -0.02em;
+}
+
+.season-stage-hero__meta {
+    display: inline-flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    color: rgba(233, 240, 247, 0.7);
+    font-size: 0.98rem;
+    line-height: 1.55;
+}
+
+.season-stage-hero__meta-primary {
+    color: #ffffff;
+    font-weight: 700;
+}
+
+.season-stage-hero__meta-dot {
+    color: rgba(255, 255, 255, 0.35);
+}
+
+.season-stage-hero__meta-secondary {
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+.season-stage-hero__meta-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 6px 12px;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.04);
+    color: rgba(244, 248, 252, 0.92);
+}
+
+.season-stage-hero__meta-chip--cluster {
+    background: rgba(82, 220, 142, 0.14);
+    border-color: rgba(82, 220, 142, 0.34);
+    color: #8cf0b6;
+}
+
+.season-stage-kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.season-stage-kpi-grid--performance {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    align-items: stretch;
+}
+
+.season-stage-performance-card-shell {
+    min-width: 150px;
+    max-width: 150px;
+    height: 150px;
+}
+
+.season-stage-performance-card-shell .card,
+.season-stage-performance-card-shell .card-body {
+    height: 100%;
+}
+
+.season-stage-performance-card-shell .card {
+    width: 150px !important;
+    min-width: 150px !important;
+    max-width: 150px !important;
+    height: 100% !important;
+    margin-bottom: 0 !important;
+    padding: 0 !important;
+    box-sizing: border-box !important;
+}
+
+.season-stage-performance-card-shell .card-body {
+    padding: 0.7rem 0.75rem;
+}
+
+.season-role-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 6px 12px;
+    border-radius: 999px;
+    background: rgba(245, 185, 66, 0.12);
+    border: 1px solid rgba(245, 185, 66, 0.35);
+    color: #ffd884;
+    font-size: 0.82rem;
+    font-weight: 700;
+}
+
+.season-role-badge--hero {
+    align-self: flex-start;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.season-role-badge--large {
+    margin-bottom: 6px;
+}
+
+.season-role-profile__summary {
+    margin-top: 14px;
+    padding: 12px 14px;
+    background: rgba(255, 255, 255, 0.035);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    border-radius: 14px;
+}
+
+.season-role-profile-section {
+    display: grid;
+    gap: 4px;
+}
+
+.season-role-profile__title {
+    margin-bottom: 2px;
+}
+
+.season-profile-clarity {
+    color: #f5b942;
+    font-size: 0.82rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+}
+
+.season-profile-cta.btn {
+    color: #ffd884 !important;
+    font-weight: 600;
+    text-decoration: none;
+}
+
+.season-profile-cta.btn:hover,
+.season-profile-cta.btn:focus {
+    color: #fff3cc !important;
+}
+
+.season-competition-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 14px;
+}
+
+.season-competition-legend__item {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 7px 10px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(245, 185, 66, 0.12);
+    border-radius: 999px;
+    color: rgba(244, 248, 252, 0.88);
+    font-size: 0.76rem;
+    font-weight: 600;
+}
+
+.season-competition-legend__swatch {
+    width: 10px;
+    height: 10px;
+    border-radius: 999px;
+    display: inline-block;
+    flex-shrink: 0;
+}
+
+.season-competition-metric {
+    display: grid;
+    grid-template-columns: 120px minmax(0, 1fr);
+    gap: 14px;
+    align-items: center;
+    margin-bottom: 12px;
+}
+
+.season-competition-metric__label {
+    color: rgba(244, 248, 252, 0.82);
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.season-competition-metric__track {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 12px;
+    align-items: center;
+}
+
+.season-competition-bar {
+    height: 16px;
+    display: flex;
+    overflow: hidden;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.season-competition-bar__segment {
+    min-width: 0;
+    flex-shrink: 0;
+    height: 100%;
+    display: block;
+}
+
+.season-competition-metric__value {
+    color: #f4f8fc;
+    font-size: 0.84rem;
+    font-weight: 700;
+    min-width: 38px;
+    text-align: right;
+}
+
+.season-comparison-panel {
+    min-height: 0;
+    height: 100%;
+}
+
+.season-stage-panel--performance-chart {
+    padding: 18px 18px 0 18px;
+}
+
+.season-quadrant-panel {
+    min-height: 560px;
+}
+
+@media (max-width: 991.98px) {
+    .season-stage-grid--top,
+    .season-stage-grid--performance {
+        grid-template-columns: 1fr;
+    }
+
+    .season-stage-kpi-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .season-stage-kpi-grid--performance {
+        gap: 12px;
+    }
+
+    .season-stage-performance-card-shell {
+        width: 100%;
+        min-width: 0;
+        max-width: none;
+        height: auto;
+        min-height: 150px;
+    }
+
+    .season-competition-metric {
+        grid-template-columns: 1fr;
+        gap: 8px;
+    }
 }
 
 /* ── AI Insight Card Styles ──────────────────────────────────── */

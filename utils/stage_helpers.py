@@ -5354,10 +5354,16 @@ def _build_career_progression_rating_chart(data: Dict[str, Any]) -> Optional[htm
         go.Scatter(
             x=plot_df["Season"],
             y=plot_df["Rating"],
-            mode="lines",
-            line=dict(color="#ffcf70", width=3, shape="spline", smoothing=0.7),
+            mode="lines+markers",
+            line=dict(color="#ffcf70", width=3, shape="spline", smoothing=1.3),
+            marker=dict(
+                color="#00bcd4",
+                size=8,
+                symbol="circle",
+                line=dict(color="#ffffff", width=1.5),
+            ),
             name="Season rating",
-            hovertemplate="Rating %{y:.2f}<extra></extra>",
+            hovertemplate="<br>  Rating %{y:.2f}  <extra></extra>",
         )
     )
     fig = glass_figure_layout(fig)
@@ -5366,7 +5372,7 @@ def _build_career_progression_rating_chart(data: Dict[str, Any]) -> Optional[htm
         plot_bgcolor="rgba(0,0,0,0)",
         margin=dict(l=34, r=18, t=12, b=34),
         height=400,
-        hovermode="x unified",
+        hovermode="closest",
         showlegend=False,
         legend=dict(
             bgcolor="rgba(0,0,0,0)",
@@ -5374,11 +5380,12 @@ def _build_career_progression_rating_chart(data: Dict[str, Any]) -> Optional[htm
             borderwidth=1,
         ),
         hoverlabel=dict(
-            bgcolor="rgba(24,24,26,0.96)",
-            bordercolor="rgba(255,255,255,0.12)",
+            bgcolor="rgba(10, 20, 40, 0.55)",
+            bordercolor="#00bcd4",
             font_size=13,
             font_family="Roboto, sans-serif",
             font_color="#FFFFFF",
+            align="left",
         ),
     )
     fig.update_xaxes(title=None, ticklabelstandoff=8)
@@ -6534,16 +6541,56 @@ def render_career_evidence_view(
     }
 
 
+def _render_dashboard_skeleton() -> html.Div:
+    """Phase 1 (UI/blue): pure HTML structure with shimmer placeholders — no ETL, no AI, ~0ms."""
+    skeleton_card = html.Div(className="skeleton-card glass-card p-3 mb-3", children=[
+        html.Div(className="skeleton-line skeleton-line--title mb-2"),
+        html.Div(className="skeleton-line skeleton-line--text mb-1"),
+        html.Div(className="skeleton-line skeleton-line--text skeleton-line--short"),
+    ])
+    return html.Div(
+        html.Div([skeleton_card] * 4, className="stage-view stage-view--dashboard pb-2"),
+    )
+
+
+def _serialize_dashboard_data(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Converts dashboard data dict for dcc.Store storage (DataFrame → JSON string)."""
+    import io as _io
+    serialized = {k: v for k, v in data.items() if k != "history_df"}
+    df = data.get("history_df")
+    if df is not None and hasattr(df, "to_json"):
+        try:
+            serialized["history_df_json"] = df.to_json(orient="records")
+        except Exception:
+            serialized["history_df_json"] = "[]"
+    return serialized
+
+
+def _deserialize_dashboard_data(serialized: Dict[str, Any]) -> Dict[str, Any]:
+    """Restores dashboard data dict from dcc.Store (JSON string → DataFrame)."""
+    import io as _io
+    data = dict(serialized)
+    if "history_df_json" in data:
+        try:
+            data["history_df"] = pd.read_json(_io.StringIO(data.pop("history_df_json")), orient="records")
+        except Exception:
+            data.pop("history_df_json", None)
+            data["history_df"] = pd.DataFrame()
+    return data
+
+
 def render_player_dashboard(
     player_name: str,
     player_id: str,
     user_role: str = "player",
     ai_payload: Optional[Dict[str, Any]] = None,
     synthesize_with_ai: bool = True,
+    pre_fetched_data: Optional[Dict[str, Any]] = None,
 ) -> html.Div:
     """
     Orchestrates the 6-section player dashboard for Estado A (no card open).
     Fetches data once and delegates to independent builders with per-section error isolation.
+    Pass pre_fetched_data to skip the DB fetch (used in progressive loading phases 2 and 3).
     """
     from utils.career_intelligence import (
         get_career_phase_data,
@@ -6553,7 +6600,7 @@ def render_player_dashboard(
     )
     from utils.domain_ai.career_dashboard_ai import normalize_career_dashboard_brief_payload
 
-    data = _fetch_dashboard_data(player_name, player_id)
+    data = pre_fetched_data if pre_fetched_data is not None else _fetch_dashboard_data(player_name, player_id)
     normalized_ai_payload = normalize_career_dashboard_brief_payload(ai_payload)
 
     # Compute career phase inline (pure function, no I/O)
@@ -8140,7 +8187,7 @@ def _build_projection_chart(
         return glass_figure_layout(fig)
 
 
-def render_season_stage(payload: dict) -> html.Div:
+def render_season_stage_legacy(payload: dict) -> html.Div:
     """
     Provisional season card stage — shows basic season stats without any AI calls.
     Used when a user clicks a season milestone in the timeline.

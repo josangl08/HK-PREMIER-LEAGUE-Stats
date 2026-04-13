@@ -21,7 +21,6 @@ from utils.stage_helpers import (
     render_career_overview,
     render_player_dashboard,
     render_career_evidence_view,
-    render_season_stage,
     _build_career_kpi_trend_view,
     get_cached_image_path,
     render_image_gallery,
@@ -29,6 +28,7 @@ from utils.stage_helpers import (
     _resolve_team_logo,
     _resolve_team_jersey,
 )
+from utils.season_stage import render_season_stage
 from utils.performance_helpers import get_streaming_label
 from utils.app_context import get_hong_kong_data_manager
 from data.competition_registry import (
@@ -74,8 +74,9 @@ def _display_match_position(position: Any) -> str:
     return _MATCH_POSITION_MAP.get(raw, raw or "N/A")
 
 
-def _render_default_stage_content(ai_payload=None):
-    """Renders the default dashboard stage inside the persistent shell."""
+def _render_default_stage_content(ai_payload=None, pre_fetched_data=None):
+    """Renders the default dashboard stage inside the persistent shell.
+    Pass pre_fetched_data to skip the DB fetch (progressive loading phases 2 and 3)."""
     try:
         from utils.domain_ai.career_dashboard_ai import normalize_career_dashboard_brief_payload
 
@@ -83,20 +84,27 @@ def _render_default_stage_content(ai_payload=None):
         normalized_ai_payload = normalize_career_dashboard_brief_payload(ai_payload)
         if player_id and player_name:
             if not normalized_ai_payload:
-                return render_player_dashboard(player_name, player_id, user_role, synthesize_with_ai=False)
-            return render_player_dashboard(
-                player_name,
-                player_id,
-                user_role,
-                ai_payload=normalized_ai_payload,
-                synthesize_with_ai=False,
-            )
+                try:
+                    return render_player_dashboard(
+                        player_name, player_id, user_role,
+                        synthesize_with_ai=False,
+                        pre_fetched_data=pre_fetched_data,
+                    )
+                except TypeError:
+                    return render_player_dashboard(player_name, player_id, user_role)
+            try:
+                return render_player_dashboard(
+                    player_name,
+                    player_id,
+                    user_role,
+                    ai_payload=normalized_ai_payload,
+                    synthesize_with_ai=False,
+                    pre_fetched_data=pre_fetched_data,
+                )
+            except TypeError:
+                return render_player_dashboard(player_name, player_id, user_role)
         logger.warning("default stage render skipped: missing player identity id=%s name=%s", player_id, player_name)
-        return dbc.Alert(
-            "No se pudo cargar el stage del jugador. Recarga el portal e inténtalo de nuevo.",
-            color="warning",
-            className="m-3",
-        )
+        return no_update
     except Exception as exc:
         logger.exception("default stage render error: %s", exc)
         return dbc.Alert(
@@ -116,7 +124,10 @@ def _render_stage_content_for_context(context):
     payload = context.get("payload", {})
 
     if m_type == "post-match":
-        return render_post_match(payload, milestone_id=context.get("id", ""))
+        try:
+            return render_post_match(payload, milestone_id=context.get("id", ""))
+        except TypeError:
+            return render_post_match(payload)
 
     if m_type == "pre-match":
         pos_group = ""
@@ -2051,45 +2062,34 @@ def register_player_portal_callbacks(app):
         return no_update
 
     # ------------------------------------------------------------------ #
-    # milestones-data-store → Initial career overview (no card selected) #
+    # Progressive loading: 3-phase cascade                               #
+    #   Phase 1 (UI):    layout initial content = create_skeleton_stage  #
+    #                    + create_skeleton_timeline — no callback needed  #
+    #   Phase 2 (amber): portal-data-store → deterministic render        #
+    #   Phase 3 (purple): portal-render-complete-store → AI synthesis    #
     # ------------------------------------------------------------------ #
-    @app.callback(
-        Output("stage-content", "children", allow_duplicate=True),
-        Input("milestones-data-store", "data"),
-        State("career-dashboard-brief-store", "data"),
-        prevent_initial_call=True,
-    )
-    def render_initial_stage(milestones_data, career_dashboard_brief):
-        """
-        Shows the Career Overview as the default stage when milestones first load
-        and no card has been selected yet.
-        """
-        if milestones_data is None:
-            return no_update
-        return _render_default_stage_content(ai_payload=career_dashboard_brief)
 
+    # Phase 1 — ETL: fetch all dashboard data once into portal-data-store
+    # (The layout already provides create_skeleton_stage / create_skeleton_timeline
+    #  as initial HTML — no callback needed for Phase 1.)
     @app.callback(
-        Output("career-dashboard-brief-store", "data"),
+        Output("portal-data-store", "data"),
         Input("milestones-data-store", "data"),
         prevent_initial_call=True,
     )
-    def build_career_dashboard_ai_brief(milestones_data):
-        """Synthesizes AI-only career dashboard overrides after the deterministic stage has already rendered."""
+    def populate_portal_data_store(milestones_data):
+        """ETL phase: fetches all dashboard data once. Feeds both phase 2 render and phase 3 AI synthesis."""
         if milestones_data is None:
             return no_update
         try:
             from utils.career_intelligence import (
-                DashboardInsightItem,
-                CareerDashboardBrief,
                 get_career_phase_data,
                 get_career_signals,
                 get_development_priorities,
             )
-            from utils.domain_ai import synthesize_career_dashboard_ai_payload
-            from utils.domain_ai.career_dashboard_ai import normalize_career_dashboard_brief_payload
-            from utils.stage_helpers import _fetch_dashboard_data
+            from utils.stage_helpers import _fetch_dashboard_data, _serialize_dashboard_data
 
-            player_id, player_name, _user_role = _get_active_player_identity()
+            player_id, player_name, user_role = _get_active_player_identity()
             if not player_id or not player_name:
                 return no_update
 
@@ -2097,13 +2097,75 @@ def register_player_portal_callbacks(app):
             career_phase_data = get_career_phase_data(data, data.get("history_df"))
             career_signals = get_career_signals(data, data.get("history_df"), career_phase_data or {})
             development_priorities = get_development_priorities(data.get("percentiles_data") or {})
+            return {
+                "player_id": player_id,
+                "player_name": player_name,
+                "user_role": user_role,
+                "data": _serialize_dashboard_data(data),
+                "career_phase": career_phase_data,
+                "signals": career_signals,
+                "priorities": development_priorities,
+            }
+        except Exception as exc:
+            logger.error(f"populate_portal_data_store error: {exc}")
+            return no_update
+
+    # Phase 2 — deterministic render with real data (no AI)
+    # Emits portal-render-complete-store to signal phase 3 can start.
+    @app.callback(
+        Output("stage-content", "children", allow_duplicate=True),
+        Output("portal-render-complete-store", "data"),
+        Input("portal-data-store", "data"),
+        State("timeline-context-store", "data"),
+        prevent_initial_call=True,
+    )
+    def render_stage_with_data(portal_data, timeline_context):
+        """Phase 2 (data/amber): renders full dashboard with deterministic data, no AI.
+        Skips render if a card is open (timeline_context set) to avoid overwriting it."""
+        if not portal_data:
+            return no_update, no_update
+        if timeline_context:
+            # Card is open — don't overwrite stage, but still signal phase 3 to proceed
+            return no_update, {"player_id": portal_data.get("player_id"), "skipped": True}
+        try:
+            from utils.stage_helpers import _deserialize_dashboard_data
+            data = _deserialize_dashboard_data(portal_data["data"])
+            content = _render_default_stage_content(ai_payload=None, pre_fetched_data=data)
+            return content, {"player_id": portal_data.get("player_id"), "skipped": False}
+        except Exception as exc:
+            logger.error(f"render_stage_with_data error: {exc}")
+            return no_update, no_update
+
+    # Phase 3a — AI synthesis (starts AFTER phase 2 render completes, not in parallel)
+    # Using portal-render-complete-store as input ensures sequential execution.
+    @app.callback(
+        Output("career-dashboard-brief-store", "data"),
+        Input("portal-render-complete-store", "data"),
+        State("portal-data-store", "data"),
+        prevent_initial_call=True,
+    )
+    def build_career_dashboard_ai_brief(render_signal, portal_data):
+        """Phase 3a: synthesizes AI overrides using pre-fetched data — no second DB fetch.
+        Runs strictly after phase 2 render to avoid parallel career_dashboard_ai calls."""
+        if not render_signal or not portal_data:
+            return no_update
+        try:
+            from utils.career_intelligence import (
+                DashboardInsightItem,
+                CareerDashboardBrief,
+            )
+            from utils.domain_ai import synthesize_career_dashboard_ai_payload
+            from utils.domain_ai.career_dashboard_ai import normalize_career_dashboard_brief_payload
+            from utils.stage_helpers import _deserialize_dashboard_data
+
+            data = _deserialize_dashboard_data(portal_data["data"])
             synthesized = synthesize_career_dashboard_ai_payload(
                 CareerDashboardBrief,
                 DashboardInsightItem,
                 data,
-                career_phase_data or {},
-                career_signals,
-                development_priorities,
+                portal_data.get("career_phase") or {},
+                portal_data.get("signals") or {},
+                portal_data.get("priorities") or [],
             )
             normalized = normalize_career_dashboard_brief_payload(synthesized)
             return normalized or no_update
@@ -2111,19 +2173,30 @@ def register_player_portal_callbacks(app):
             logger.debug(f"build_career_dashboard_ai_brief error: {exc}")
             return no_update
 
+    # Phase 3b — re-render with AI copy (no DB fetch: data from State)
     @app.callback(
         Output("stage-content", "children", allow_duplicate=True),
         Input("career-dashboard-brief-store", "data"),
         State("timeline-context-store", "data"),
+        State("portal-data-store", "data"),
         prevent_initial_call=True,
     )
-    def refresh_default_stage_with_ai(career_dashboard_brief, timeline_context):
-        """Updates the default career dashboard only when AI copy arrives and no other stage is active."""
+    def refresh_default_stage_with_ai(career_dashboard_brief, timeline_context, portal_data):
+        """Phase 3b (AI/purple): re-renders dashboard with AI copy — no ETL (data from portal-data-store)."""
         if not career_dashboard_brief:
             return no_update
         if timeline_context:
             return no_update
-        return _render_default_stage_content(ai_payload=career_dashboard_brief)
+        try:
+            from utils.stage_helpers import _deserialize_dashboard_data
+            pre_fetched = _deserialize_dashboard_data(portal_data["data"]) if portal_data else None
+            return _render_default_stage_content(
+                ai_payload=career_dashboard_brief,
+                pre_fetched_data=pre_fetched,
+            )
+        except Exception as exc:
+            logger.error(f"refresh_default_stage_with_ai error: {exc}")
+            return _render_default_stage_content(ai_payload=career_dashboard_brief)
 
     # ------------------------------------------------------------------ #
     # timeline-context-store → Stage content                              #
@@ -2907,6 +2980,19 @@ def register_career_intelligence_callbacks(app):
             logger.warning(f"career kpi trend modal error: {exc}")
             return "KPI Trend", html.P("Trend detail is not available right now.", className="text-muted small mb-0"), True
 
+    @app.callback(
+        Output("season-profile-map-modal", "is_open"),
+        Input("season-profile-map-open", "n_clicks"),
+        Input("season-profile-map-close", "n_clicks"),
+        State("season-profile-map-modal", "is_open"),
+        prevent_initial_call=True,
+    )
+    def toggle_season_profile_map_modal(open_clicks, close_clicks, is_open):
+        trigger_value = ctx.triggered[0].get("value", 0) if ctx.triggered else 0
+        if not trigger_value:
+            return no_update
+        return not bool(is_open)
+
     # ── 7.2 T1 render/dismiss callback ──────────────────────────────────────
 
     @app.callback(
@@ -3187,4 +3273,44 @@ def register_career_intelligence_callbacks(app):
         Output("stage-loading-type-sync-dummy", "data", allow_duplicate=True),
         Input("career-dashboard-brief-store", "data"),
         prevent_initial_call=True,
+    )
+
+    # Phase 2 pre-flight: portal-data-store ready → data (amber)
+    app.clientside_callback(
+        """function() {
+            var el = document.getElementById('stage-shell');
+            if (el) el.dataset.loadingType = 'data';
+            return window.dash_clientside.no_update;
+        }""",
+        Output("stage-loading-type-sync-dummy", "data", allow_duplicate=True),
+        Input("portal-data-store", "data"),
+        prevent_initial_call=True,
+    )
+
+    # Bug B fix: reset data-loading-type after stage-content finishes loading.
+    # Without this, the color from the previous action persists and the next
+    # untagged load (e.g. player change) shows the wrong color instead of blue.
+    app.clientside_callback(
+        """function() {
+            var el = document.getElementById('stage-shell');
+            if (el) el.dataset.loadingType = '';
+            return window.dash_clientside.no_update;
+        }""",
+        Output("stage-loading-type-sync-dummy", "data", allow_duplicate=True),
+        Input("stage-content", "children"),
+        prevent_initial_call=True,
+    )
+
+    # Bug A fix: set data-timeline-loading-type before render_timeline_milestones fires.
+    # null/undefined store → first load (interface building) → blue (ui).
+    # existing data → data refresh from polling or pagination → amber (data).
+    app.clientside_callback(
+        """function(data) {
+            var el = document.getElementById('timeline-milestones');
+            if (el) el.dataset.timelineLoadingType = (data === null || data === undefined) ? 'ui' : 'data';
+            return window.dash_clientside.no_update;
+        }""",
+        Output("stage-loading-type-sync-dummy", "data", allow_duplicate=True),
+        Input("milestones-data-store", "data"),
+        prevent_initial_call="initial_duplicate",
     )

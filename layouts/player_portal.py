@@ -117,6 +117,8 @@ def create_player_portal_layout(user_role: str = "player") -> html.Div:
         children=[
             # Stores (Phase 2 & 3)
             dcc.Store(id="milestones-data-store"),
+            dcc.Store(id="portal-data-store"),  # Pre-fetched dashboard data (ETL phase 2)
+            dcc.Store(id="portal-render-complete-store"),  # Signals phase 2 render done → triggers phase 3 AI
             dcc.Store(id="selected-year-store", data=None),
             dcc.Store(id="year-nav-scroll-dummy"),
             dcc.Store(id="year-timeline-scroll-dummy"),
