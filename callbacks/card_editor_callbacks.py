@@ -118,6 +118,7 @@ def _merge_agent_result_into_state(current_state: dict, result: dict) -> dict:
     new_state.update(
         {
             "generated_card_path": result.get("generated_card_path"),
+            "caption": result.get("caption"),
             "agency_status": result.get("agency_status", "Success"),
             "ai_proposal": design_strategy,
             "design_strategy": design_strategy,
@@ -285,6 +286,25 @@ def _build_preview_layout(
         if not editor_state:
             return html.Div(
                 "No profile loaded.", className="text-muted text-center p-4"
+            )
+
+        # 0. Check if a final card already exists to avoid showing blueprint briefly
+        card_path = editor_state.get("generated_card_path")
+        if card_path and Path(card_path).exists():
+            with open(card_path, "rb") as f:
+                src = "data:image/jpeg;base64," + base64.b64encode(f.read()).decode()
+            return html.Div(
+                html.Img(
+                    src=src,
+                    style={
+                        "width": "100%",
+                        "height": "100%",
+                        "objectFit": "cover",
+                        "display": "block",
+                        "borderRadius": "inherit",
+                    },
+                ),
+                style={"position": "absolute", "inset": "0", "background": "#0a1a2f"},
             )
 
         proposal = editor_state.get("ai_proposal") or {}
@@ -792,6 +812,7 @@ def register_card_editor_callbacks(app):
         Input({"type": "card-photo-thumb", "index": ALL}, "n_clicks"),
         Input({"type": "card-history-thumb", "index": ALL}, "n_clicks"),
         Input("card-stats-selection", "value"),
+        Input("card-instagram-caption", "value"),
         State("card-editor-state", "data"),
         prevent_initial_call=True,
     )
@@ -802,6 +823,7 @@ def register_card_editor_callbacks(app):
         photo_clicks,
         history_clicks,
         manual_stats,
+        caption_value,
         current_state,
     ):
         if not current_state:
@@ -830,9 +852,13 @@ def register_card_editor_callbacks(app):
                 return state, no_update
             return state, no_update
 
-        # 1. Stats Selection
+        # 1. Stats & Caption updates
         if triggered_id == "card-stats-selection":
             state["selected_stats_manual"] = manual_stats
+            return state, no_update
+
+        if triggered_id == "card-instagram-caption":
+            state["caption"] = caption_value
             return state, no_update
 
         # 2. Handle Design History Selection
@@ -873,7 +899,12 @@ def register_card_editor_callbacks(app):
 
             state["generating"] = True
             state["generated_card_path"] = None
-            state["progress"] = {"phase": "Iniciando Agencia Elite...", "pct": 10}
+            state["progress"] = {
+                "phase": "INITIALIZING ELITE AGENCY...",
+                "pct": 10,
+                "icon": "bi bi-cpu",
+                "bg": "rgba(10, 10, 15, 0.95)"
+            }
             return state, True
 
         return no_update, no_update
@@ -900,7 +931,12 @@ def register_card_editor_callbacks(app):
 
         _GENERATION_JOBS[player_id] = {
             "_generating": True,
-            "_progress": {"phase": "Agencia Elite en marcha...", "pct": 15},
+            "_progress": {
+                "phase": "INITIALIZING ELITE AGENCY...",
+                "pct": 15,
+                "icon": "bi bi-cpu",
+                "bg": "rgba(10, 10, 15, 0.95)"
+            },
             "_result": None,
             "_error": None,
         }
@@ -923,17 +959,23 @@ def register_card_editor_callbacks(app):
                     if player_id in _GENERATION_JOBS:
                         _GENERATION_JOBS[player_id]["_progress"] = p
 
+                # Get already used trends to avoid repetition
+                meta = _get_card_metadata(player_id, milestone_id)
+                used_trends = meta.get("used_trends", [])
+
                 result = run_card_design_agent(
                     match_payload=match_payload,
                     player_profile=profile,
                     card_format=state.get("format", "9:16"),
                     forced_stats=forced if forced else None,
+                    exclude_trends=used_trends,
                     on_progress=on_progress,
                 )
 
                 if result.get("generated_card_path"):
                     _GENERATION_JOBS[player_id]["_result"] = {
                         "generated_card_path": result["generated_card_path"],
+                        "caption": result.get("caption"),
                         "agency_status": result.get("agency_status", "Success"),
                         "ai_proposal": result.get("design_strategy", {}),
                         "design_strategy": result.get("design_strategy", {}),
@@ -988,12 +1030,20 @@ def register_card_editor_callbacks(app):
             if new_path and new_path not in designs:
                 designs.append(new_path)
             meta["designs"] = designs
+
+            # Store trend used for this generation to avoid repetition later
+            strategy = result.get("design_strategy") or result.get("ai_proposal") or {}
+            trend_id = strategy.get("trend_id")
+            if trend_id:
+                used_trends = list(meta.get("used_trends", []))
+                if trend_id not in used_trends:
+                    used_trends.append(trend_id)
+                meta["used_trends"] = used_trends
+
             meta["editorial_decision"] = _normalize_editorial_decision(
                 result.get("editorial_decision", {})
             )
-            meta["last_design_strategy"] = (
-                result.get("design_strategy") or result.get("ai_proposal") or {}
-            )
+            meta["last_design_strategy"] = strategy
             _save_card_metadata(player_id, milestone_id, meta)
 
             new_state["design_history"] = designs
@@ -1019,6 +1069,7 @@ def register_card_editor_callbacks(app):
         Output("card-stats-selection", "value"),
         Output("card-stats-selection", "disabled"),
         Output("card-stats-selection", "placeholder"),
+        Output("card-instagram-caption", "value"),
         Input("card-editor-state", "data"),
         State("player-photos-store", "data"),
         State("milestones-data-store", "data"),
@@ -1092,19 +1143,23 @@ def register_card_editor_callbacks(app):
         # Case: Generating
         if state.get("generating"):
             progress = state.get("progress") or {}
+            icon_class = progress.get("icon", "bi bi-stars")
+            bg_style = progress.get("bg", "rgba(0,0,0,0.8)")
             content = html.Div(
                 [
                     html.I(
-                        className="bi bi-stars animate-glass-pulse",
+                        className=f"{icon_class} animate-glass-pulse",
                         style={
-                            "fontSize": "2.5rem",
+                            "fontSize": "3.5rem",
                             "color": "#00f2ff",
-                            "marginBottom": "16px",
+                            "marginBottom": "24px",
+                            "textShadow": "0 0 20px rgba(0,242,255,0.5)"
                         },
                     ),
                     html.P(
-                        progress.get("phase", "Generando..."),
-                        className="text-white fw-bold mb-3 small",
+                        progress.get("phase", "Generating..."),
+                        className="text-white fw-bold mb-3 small text-center px-4",
+                        style={"letterSpacing": "1px"}
                     ),
                     dbc.Progress(
                         value=progress.get("pct", 15),
@@ -1119,7 +1174,9 @@ def register_card_editor_callbacks(app):
                 style={
                     "position": "absolute",
                     "inset": "0",
-                    "background": "rgba(0,0,0,0.8)",
+                    "background": bg_style,
+                    "zIndex": "10",
+                    "transition": "background 0.5s ease"
                 },
             )
             return (
@@ -1132,6 +1189,7 @@ def register_card_editor_callbacks(app):
                 stats_value,
                 stats_disabled,
                 stats_placeholder,
+                state.get("caption", ""),
             )
 
         # Case: Final Result (Current selected design from history or new generation)
@@ -1161,6 +1219,7 @@ def register_card_editor_callbacks(app):
                 stats_value,
                 stats_disabled,
                 stats_placeholder,
+                state.get("caption", ""),
             )
 
         # Case: Status/Error message (quota, generation error)
@@ -1211,6 +1270,7 @@ def register_card_editor_callbacks(app):
                 stats_value,
                 stats_disabled,
                 stats_placeholder,
+                state.get("caption", ""),
             )
 
         # Case: Live Preview (Blueprint / Fallback)
@@ -1225,6 +1285,7 @@ def register_card_editor_callbacks(app):
             stats_value,
             stats_disabled,
             stats_placeholder,
+            state.get("caption", ""),
         )
 
     # 6. Expand Preview Modal logic
@@ -1403,6 +1464,7 @@ def register_card_editor_callbacks(app):
             # PERSISTENCE: Mark as final card
             meta = _get_card_metadata(player_id, milestone_id)
             meta["final_card"] = final_path_str
+            meta["final_caption"] = state.get("caption")
 
             # CACHE CLEANUP: Delete designs/ subfolder
             designs_dir = source_path.parent
@@ -1411,6 +1473,7 @@ def register_card_editor_callbacks(app):
                     shutil.rmtree(designs_dir)
                     # Clear history list in metadata since files are gone
                     meta["designs"] = []
+                    meta["used_trends"] = []
                 except Exception as e:
                     logger.error(f"Error clearing designs cache: {e}")
 
@@ -1451,7 +1514,7 @@ def register_card_editor_callbacks(app):
 def _build_history_gallery(history: list, active_path: str = None) -> html.Div:
     """Builds a small gallery of previously generated designs."""
     if not history:
-        return None
+        return html.P("No designs yet.", className="text-muted small", style={"fontSize": "0.75rem"})
 
     thumbs = []
     for path_str in history:
@@ -1480,13 +1543,7 @@ def _build_history_gallery(history: list, active_path: str = None) -> html.Div:
             )
         )
 
-    return html.Div(
-        [
-            html.P("DESIGN HISTORY", style=_SECTION_LABEL_STYLE),
-            html.Div(thumbs, className="d-flex overflow-auto pb-2"),
-        ],
-        className="mt-3",
-    )
+    return html.Div(thumbs, className="d-flex overflow-auto pb-2")
 
 
 def _build_album_grid(album: list, selected_idx=None) -> html.Div:

@@ -14,7 +14,7 @@ from utils.ai_helpers import constellation_chart, _build_knn_edges
 from utils.chart_helpers import HKFATheme, glass_figure_layout
 from utils.cache import cache
 
-_FIGURE_CACHE_VERSION = "v1"
+_FIGURE_CACHE_VERSION = "v3"
 _FIGURE_CACHE_TTL = 3600  # 1 hour — season data doesn't change between ETL runs
 
 
@@ -193,7 +193,7 @@ def build_season_quadrant_figure(profile_context: Dict[str, Any]) -> go.Figure:
         name="You",
         text=[player_name],
         textposition="top center",
-        marker=dict(size=18, color=HKFATheme.ACCENT_GOLD, line=dict(color="#ffffff", width=2)),
+        marker=dict(size=18, color="#22c55e", line=dict(color="#ffffff", width=2)),
         hovertemplate=f"{player_name}<br>{profile_context.get('archetype_label')}<extra></extra>",
     ))
 
@@ -279,7 +279,7 @@ def build_season_umap_evidence_figure(profile_context: Dict[str, Any]) -> go.Fig
         highlight_player=player_name,
         knn_edges=knn_edges,
     )
-    fig.update_layout(title="Full Profile Map")
+    fig.update_layout(title="Full Profile Map", height=480, autosize=False)
     result = glass_figure_layout(fig)
     if _player and _season:
         cache.set(_ck, result.to_dict(), timeout=_FIGURE_CACHE_TTL)

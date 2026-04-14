@@ -284,7 +284,25 @@ def _create_card_studio_layout(milestone_id, match_context, album, studio_type="
 
                     # Design History Gallery (below stats, not pushed to bottom)
                     html.P("HISTORY", style=_SECTION_LABEL_STYLE),
-                    html.Div(id="card-history-gallery", style={"overflowY": "auto", "maxHeight": "160px"}),
+                    html.Div(id="card-history-gallery", style={"overflowY": "auto", "maxHeight": "160px", "marginBottom": "15px"}),
+
+                    # Instagram Caption
+                    html.P("INSTAGRAM CAPTION", style=_SECTION_LABEL_STYLE),
+                    dbc.Textarea(
+                        id="card-instagram-caption",
+                        placeholder="Agent will generate a caption here...",
+                        style={
+                            "backgroundColor": "rgba(0,0,0,0.3)",
+                            "color": "white",
+                            "border": "1px solid rgba(255,255,255,0.1)",
+                            "fontSize": "0.75rem",
+                            "minHeight": "100px",
+                            "borderRadius": "8px",
+                            "resize": "none",
+                            "padding": "10px",
+                        },
+                        className="mb-2"
+                    ),
 
                 ], style=_PANEL_STYLE)
             ], width=4, className="h-100"),

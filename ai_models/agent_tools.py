@@ -259,6 +259,7 @@ def generate_caption(player_name: str, context: str) -> str:
         prompt = (
             f"Write a short, engaging social media caption (2-3 sentences) for "
             f"{player_name} in the context of: {context}. "
+            f"Include 3-5 relevant hashtags (e.g., #HKPL, player name, team name). "
             f"Style: professional football, Hong Kong Premier League."
         )
         response = llm.invoke([HumanMessage(content=prompt)])

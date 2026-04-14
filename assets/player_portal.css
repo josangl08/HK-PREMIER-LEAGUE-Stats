@@ -1303,6 +1303,86 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
     padding-right: 20px;
 }
 
+.season-worth-noticing {
+    display: grid;
+    gap: 12px;
+    margin-bottom: 14px;
+    background:
+        radial-gradient(circle at top right, rgba(82, 220, 142, 0.18), transparent 42%),
+        linear-gradient(180deg, rgba(82, 220, 142, 0.12), rgba(255, 255, 255, 0.025)),
+        rgba(255, 255, 255, 0.028);
+    border-color: rgba(82, 220, 142, 0.22);
+}
+
+.season-worth-noticing__top {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 14px;
+    flex-wrap: wrap;
+}
+
+.season-worth-noticing__heading {
+    display: grid;
+    gap: 4px;
+}
+
+.season-worth-noticing__eyebrow {
+    color: #8cf0b6;
+    font-size: 0.76rem;
+    font-weight: 800;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+}
+
+.season-worth-noticing__title {
+    color: #f4f8fc;
+    font-size: 1.08rem;
+    font-weight: 800;
+    line-height: 1.2;
+}
+
+.season-worth-noticing__meta {
+    color: rgba(217, 234, 226, 0.72);
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.season-worth-noticing__body {
+    color: rgba(233, 240, 247, 0.86);
+    font-size: 0.96rem;
+    line-height: 1.65;
+}
+
+.season-worth-noticing__footer {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.season-worth-noticing__chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 6px 10px;
+    border-radius: 999px;
+    background: rgba(82, 220, 142, 0.12);
+    border: 1px solid rgba(82, 220, 142, 0.24);
+    color: #b7f5cf;
+    font-size: 0.74rem;
+    font-weight: 700;
+    line-height: 1;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.season-worth-noticing__chip--muted {
+    background: rgba(255, 255, 255, 0.05);
+    border-color: rgba(255, 255, 255, 0.08);
+    color: rgba(233, 240, 247, 0.68);
+}
+
 .season-stage-hero__top {
     margin-bottom: 14px;
 }
@@ -1567,6 +1647,11 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
     .season-competition-metric {
         grid-template-columns: 1fr;
         gap: 8px;
+    }
+
+    .season-worth-noticing__top {
+        flex-direction: column;
+        align-items: stretch;
     }
 }
 

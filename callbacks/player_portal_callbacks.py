@@ -29,6 +29,13 @@ from utils.stage_helpers import (
     _resolve_team_jersey,
 )
 from utils.season_stage import render_season_stage
+# Pre-warm lazy sklearn / UMAP imports so they're never first-initialized inside a
+# running callback.  The season_stage __init__ wraps render_season_stage in a lazy
+# function to avoid circular imports at package load time; importing the concrete
+# renderer here forces sklearn.cluster._kmeans and umap to initialize before any
+# callback thread is spawned, preventing _ModuleLock deadlocks on concurrent calls.
+from utils.season_stage.season_stage_renderer import render_season_stage as _  # noqa: F811
+from utils.season_stage.season_figures import build_season_umap_evidence_figure
 from utils.performance_helpers import get_streaming_label
 from utils.app_context import get_hong_kong_data_manager
 from data.competition_registry import (
@@ -2275,7 +2282,6 @@ def register_player_portal_callbacks(app):
         if not player_name or not season:
             return no_update
         from utils.cache import cache as _cache
-        from utils.season_stage.season_figures import build_season_umap_evidence_figure
         profile_context = _cache.get(f"season-profile-ctx:v1:{player_name}:{season}")
         if profile_context is None:
             logger.warning(f"render_season_umap_on_modal_open: no cached profile_context for {player_name}/{season}")
@@ -2573,6 +2579,8 @@ def register_player_portal_callbacks(app):
             editor_state["design_history"] = existing_designs
             if not editor_state.get("generated_card_path") and last_card:
                 editor_state["generated_card_path"] = last_card
+            if not editor_state.get("caption"):
+                editor_state["caption"] = meta.get("final_caption", "")
 
             # Pre-render the initial preview (blueprint) so it's visible immediately
             initial_preview = _build_preview_layout(editor_state, {"album": album}, milestones_data)

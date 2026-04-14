@@ -7839,37 +7839,37 @@
   "umap_reducer": {
     "versions": [
       {
-        "version": 558,
-        "path": "/Users/joseangel/Downloads/Projects/HongKong_PremierLeague/HK-PREMIER-LEAGUE-Stats/models/clustering/umap_reducer_v558.pkl",
+        "version": 572,
+        "path": "/Users/joseangel/Downloads/Projects/HongKong_PremierLeague/HK-PREMIER-LEAGUE-Stats/models/clustering/umap_reducer_v572.pkl",
         "model_type": "clustering",
         "metrics": {},
         "features": [],
-        "trained_at": "2026-04-14T01:02:34.972459+00:00"
+        "trained_at": "2026-04-14T06:04:25.634412+00:00"
       },
       {
-        "version": 559,
-        "path": "/Users/joseangel/Downloads/Projects/HongKong_PremierLeague/HK-PREMIER-LEAGUE-Stats/models/clustering/umap_reducer_v559.pkl",
+        "version": 573,
+        "path": "/Users/joseangel/Downloads/Projects/HongKong_PremierLeague/HK-PREMIER-LEAGUE-Stats/models/clustering/umap_reducer_v573.pkl",
         "model_type": "clustering",
         "metrics": {},
         "features": [],
-        "trained_at": "2026-04-14T01:08:06.418321+00:00"
+        "trained_at": "2026-04-14T06:49:35.501909+00:00"
       },
       {
-        "version": 560,
-        "path": "/Users/joseangel/Downloads/Projects/HongKong_PremierLeague/HK-PREMIER-LEAGUE-Stats/models/clustering/umap_reducer_v560.pkl",
+        "version": 574,
+        "path": "/Users/joseangel/Downloads/Projects/HongKong_PremierLeague/HK-PREMIER-LEAGUE-Stats/models/clustering/umap_reducer_v574.pkl",
         "model_type": "clustering",
         "metrics": {},
         "features": [],
-        "trained_at": "2026-04-14T02:09:55.568733+00:00"
+        "trained_at": "2026-04-14T07:23:07.905340+00:00"
       }
     ],
     "latest": {
-      "version": 560,
-      "path": "/Users/joseangel/Downloads/Projects/HongKong_PremierLeague/HK-PREMIER-LEAGUE-Stats/models/clustering/umap_reducer_v560.pkl",
+      "version": 574,
+      "path": "/Users/joseangel/Downloads/Projects/HongKong_PremierLeague/HK-PREMIER-LEAGUE-Stats/models/clustering/umap_reducer_v574.pkl",
       "model_type": "clustering",
       "metrics": {},
       "features": [],
-      "trained_at": "2026-04-14T02:09:55.568733+00:00"
+      "trained_at": "2026-04-14T07:23:07.905340+00:00"
     }
   },
   "scaler_Goals": {

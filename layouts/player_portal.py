@@ -164,10 +164,26 @@ def create_player_portal_layout(user_role: str = "player") -> html.Div:
                     dbc.ModalBody(
                         [
                             html.Div(id="season-umap-modal-explainer", className="mb-3"),
-                            dcc.Graph(
-                                id="season-umap-graph",
-                                figure={},
-                                config={"displayModeBar": False, "responsive": True},
+                            dcc.Loading(
+                                dcc.Graph(
+                                    id="season-umap-graph",
+                                    # Transparent dark initial state so there is no white
+                                    # flash while render_season_umap_on_modal_open runs.
+                                    figure={
+                                        "layout": {
+                                            "paper_bgcolor": "rgba(0,0,0,0)",
+                                            "plot_bgcolor": "rgba(0,0,0,0)",
+                                            "height": 480,
+                                            "xaxis": {"visible": False},
+                                            "yaxis": {"visible": False},
+                                        }
+                                    },
+                                    config={"displayModeBar": False, "responsive": True},
+                                    style={"height": "500px", "minHeight": "500px"},
+                                ),
+                                type="circle",
+                                color="#f5b942",
+                                style={"minHeight": "500px"},
                             ),
                         ],
                         className="career-evidence-modal-body",

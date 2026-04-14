@@ -1,9 +1,10 @@
-# ABOUTME: Dash component builders for the season-stage surface, including snapshot, profile block, competition split, and UMAP modal.
+# ABOUTME: Dash component builders for the season-stage surface: snapshot, profile block, competition split, and role profile.
 # ABOUTME: Keeps season-stage UI composition modular and independent from data assembly helpers.
 
 from __future__ import annotations
 
 from typing import Any, Dict, List
+import json
 
 import dash_bootstrap_components as dbc
 from dash import dcc, html
@@ -240,6 +241,90 @@ def render_season_header(context: Dict[str, Any]) -> html.Div:
     )
 
 
+def render_worth_noticing_block(
+    curated_insight: Dict[str, Any] | None,
+    debug_meta: Dict[str, Any] | None = None,
+) -> html.Div | None:
+    """Render the compact inline Worth Noticing surface when a curated insight exists."""
+    if not curated_insight:
+        return None
+
+    debug_meta = debug_meta or {}
+    badge_label = str(curated_insight.get("type") or "context")
+    anchor = str(curated_insight.get("anchor") or "")
+    served_from = str((debug_meta.get("served_from") or {}).get("overlay") or "")
+    confidence = curated_insight.get("confidence")
+
+    meta_bits = [badge_label.replace("_", " ")]
+    if confidence is not None:
+        meta_bits.append(f"confidence {float(confidence):.2f}")
+    if served_from:
+        meta_bits.append(served_from)
+
+    return html.Div(
+        [
+            html.Div(
+                [
+                    html.Div(
+                        [
+                            html.Span("Worth Noticing", className="season-worth-noticing__eyebrow"),
+                            html.H5(
+                                str(curated_insight.get("title") or "Worth Noticing"),
+                                className="season-worth-noticing__title mb-0",
+                            ),
+                        ],
+                        className="season-worth-noticing__heading",
+                    ),
+                    html.Div(" · ".join(meta_bits), className="season-worth-noticing__meta"),
+                ],
+                className="season-worth-noticing__top",
+            ),
+            html.P(
+                str(curated_insight.get("body") or ""),
+                className="season-worth-noticing__body mb-0",
+            ),
+            html.Div(
+                [
+                    html.Span(
+                        f"Anchor: {anchor.replace('_', ' ')}" if anchor else "Anchor: season intelligence",
+                        className="season-worth-noticing__chip",
+                    ),
+                    html.Span(
+                        str(curated_insight.get("signal_id") or ""),
+                        className="season-worth-noticing__chip season-worth-noticing__chip--muted",
+                    ),
+                ],
+                className="season-worth-noticing__footer",
+            ),
+        ],
+        className="season-stage-panel season-worth-noticing",
+    )
+
+
+def render_season_intelligence_debug(debug_meta: Dict[str, Any] | None) -> html.Div:
+    """Render a hidden debug hook so developers can inspect season intelligence mode and refresh state."""
+    debug_meta = debug_meta or {}
+    mode = str(debug_meta.get("mode") or "unknown")
+    refresh_requested = bool(debug_meta.get("background_refresh_requested"))
+    fallback_reason = str(debug_meta.get("fallback_reason") or "")
+    served_from = debug_meta.get("served_from") or {}
+    summary = {
+        "mode": mode,
+        "refresh_requested": refresh_requested,
+        "fallback_reason": fallback_reason,
+        "served_from": served_from,
+    }
+    return html.Div(
+        json.dumps(summary, sort_keys=True),
+        className="season-stage-intelligence-debug visually-hidden",
+        **{
+            "data-mode": mode,
+            "data-refresh-requested": str(refresh_requested).lower(),
+            "data-fallback-reason": fallback_reason,
+        },
+    )
+
+
 def render_season_performance(context: Dict[str, Any]) -> html.Div:
     prev = context.get("previous_season") or {}
     current_row = context.get("season_row")
@@ -439,59 +524,3 @@ def render_season_competition_split(split_rows: List[Dict[str, Any]], is_current
             )
         )
     return html.Div(body)
-
-
-def render_season_umap_modal(profile_context: Dict[str, Any]) -> dbc.Modal:
-    explainer = html.Div(
-        [
-            html.Div(
-                [
-                    html.Span("Stage role:", className="season-umap-label-pair__key"),
-                    html.Span(profile_context.get("archetype_label", "Season Profile"), className="season-umap-label-pair__value"),
-                ],
-                className="season-umap-label-pair",
-            ),
-            html.Div(
-                [
-                    html.Span("Cluster role:", className="season-umap-label-pair__key"),
-                    html.Span(profile_context.get("cluster_archetype_label", profile_context.get("archetype_label", "Season Profile")), className="season-umap-label-pair__value"),
-                ],
-                className="season-umap-label-pair",
-            ),
-            html.Div("Nearby points suggest similar statistical profiles for this season.", className="season-umap-explainer"),
-            html.Div("Cluster colors indicate broader role families rather than exact football positions.", className="season-umap-explainer"),
-            html.Div("The highlighted point marks the selected season profile. The stage role comes from the semantic quadrant, while the cluster role comes from KMeans grouping.", className="season-umap-explainer"),
-        ],
-        className="mb-3",
-    )
-    return dbc.Modal(
-        [
-            dbc.ModalHeader(
-                dbc.ModalTitle(f"Full Profile Map · {profile_context.get('archetype_label', 'Season Profile')}"),
-                close_button=True,
-            ),
-            dbc.ModalBody(
-                [
-                    explainer,
-                    # Figure is lazy-loaded by render_season_umap_on_modal_open callback
-                    # (player_portal_callbacks.py) to avoid running UMAP on every stage render.
-                    dcc.Graph(
-                        id="season-umap-graph",
-                        figure={},
-                        config={"displayModeBar": False, "responsive": True},
-                    ),
-                ],
-                className="career-evidence-modal-body",
-            ),
-            dbc.ModalFooter(
-                dbc.Button("Close", id="season-profile-map-close", color="secondary", n_clicks=0)
-            ),
-        ],
-        id="season-profile-map-modal",
-        is_open=False,
-        centered=True,
-        size="xl",
-        scrollable=True,
-        className="career-evidence-modal season-umap-modal",
-        fade=False,
-    )

@@ -38,10 +38,12 @@ class AgentState(TypedDict):
     editorial_decision: Dict[str, Any]
     design_strategy: Dict[str, Any]
     forced_stats: Optional[List[Dict[str, Any]]] # Added for manual selection
+    exclude_trends: List[str] # Trends to skip in randomness
     
     # Artifacts
     player_photo_path: Optional[str]
     generated_card_path: Optional[str]
+    caption: Optional[str]
     agency_status: str
     progress: Dict[str, Any]
     on_progress: Optional[Callable[[Dict[str, Any]], None]]
@@ -174,9 +176,18 @@ def _build_editorial_brief(editorial_decision: Dict[str, Any]) -> str:
 # --- Node 1: Match Intelligence Collector ---
 def match_intelligence_node(state: AgentState) -> AgentState:
     """Gathers all game/player context (teams, venue, time, colors, and post-game stats)."""
-    p = {"phase": "Analizando inteligencia del partido...", "pct": 10}
+    p = {
+        "phase": "ANALYZING MATCH INTELLIGENCE...",
+        "pct": 10,
+        "icon": "bi bi-radar",
+        "bg": "linear-gradient(135deg, rgba(10, 10, 15, 0.95) 0%, rgba(0, 100, 255, 0.3) 100%)"
+    }
     state["progress"] = p
-    if state.get("on_progress"): state["on_progress"](p)
+    if state.get("on_progress"):
+        state["on_progress"](p)
+    
+    # Delay to allow user to read the phase
+    time.sleep(5)
 
     match = state["match_payload"]
     # 1. Determine if it's pre or post game
@@ -239,10 +250,18 @@ def match_intelligence_node(state: AgentState) -> AgentState:
 
 def performance_editor_node(state: AgentState) -> AgentState:
     """Selects the promotional angle, the 4-5 key stats, and the optional supporting visual."""
-    p = {"phase": "Editando la historia del partido...", "pct": 22}
+    p = {
+        "phase": "CRAFTING MATCH NARRATIVE...",
+        "pct": 22,
+        "icon": "bi bi-vector-pen",
+        "bg": "linear-gradient(135deg, rgba(10, 10, 15, 0.95) 0%, rgba(200, 0, 255, 0.3) 100%)"
+    }
     state["progress"] = p
     if state.get("on_progress"):
         state["on_progress"](p)
+    
+    # Delay to allow user to read the phase
+    time.sleep(5)
 
     intel = state.get("match_intelligence") or {}
 
@@ -416,9 +435,15 @@ def performance_editor_node(state: AgentState) -> AgentState:
 # --- Node 2: Art Director Strategist ---
 def art_director_node(state: AgentState) -> AgentState:
     """Selects Trend, Archetype and builds the Master Prompt for Nano Banana."""
-    p = {"phase": "Definiendo estrategia visual...", "pct": 30}
+    p = {
+        "phase": "DEFINING VISUAL STRATEGY...",
+        "pct": 30,
+        "icon": "bi bi-palette",
+        "bg": "linear-gradient(135deg, rgba(10, 10, 15, 0.95) 0%, rgba(0, 255, 128, 0.3) 100%)"
+    }
     state["progress"] = p
-    if state.get("on_progress"): state["on_progress"](p)
+    if state.get("on_progress"):
+        state["on_progress"](p)
 
     intel = state["match_intelligence"]
     is_post = state["is_post_game"]
@@ -433,11 +458,20 @@ def art_director_node(state: AgentState) -> AgentState:
     trend_dir = Path("assets/design_trends")
     available_trends = list(trend_dir.glob("*.json"))
     
+    exclude = state.get("exclude_trends") or []
+    # Filter out excluded trends by filename stem
+    filtered_trends = [t for t in available_trends if t.stem not in exclude]
+    # If we excluded everything, fall back to all available to avoid crash
+    if not filtered_trends:
+        filtered_trends = available_trends
+
     # Competition-based priority
     if intel["competition"] in ["AFC", "Cup"]:
         trend_path = trend_dir / "minimal_luxury.json"
+        # If minimal_luxury was excluded but we forced it, it's okay for high-tier comps,
+        # but we could also try to find an alternative filtered if it was excluded.
     else:
-        trend_path = random.choice(available_trends) if available_trends else trend_dir / "urban_gritty.json"
+        trend_path = random.choice(filtered_trends) if filtered_trends else trend_dir / "urban_gritty.json"
     
     try:
         with open(trend_path, "r") as f:
@@ -527,8 +561,15 @@ def art_director_node(state: AgentState) -> AgentState:
     4. REALISM: Elite professional football marketing aesthetic only.
     """
 
+    # Generate Social Media Caption
+    from ai_models.agent_tools import generate_caption
+    player_name = str((state.get("player_profile") or {}).get("name") or "Player")
+    brief = _build_editorial_brief(editorial_decision)
+    caption = generate_caption.invoke({"player_name": player_name, "context": brief})
+
     return {
         **state,
+        "caption": caption,
         "editorial_decision": editorial_decision,
         "design_strategy": {
             "prompt": prompt,
@@ -542,9 +583,15 @@ def art_director_node(state: AgentState) -> AgentState:
 # --- Node 3: Design Studio (Nano Banana One-Shot) ---
 def design_studio_node(state: AgentState) -> AgentState:
     """The core engine. Sends all visual materials to Gemini for a 100% integrated result."""
-    p = {"phase": "Nano Banana está diseñando tu obra maestra...", "pct": 60}
+    p = {
+        "phase": "DESIGNERS ARE RENDERING YOUR MASTERPIECE...",
+        "pct": 60,
+        "icon": "bi bi-stars",
+        "bg": "linear-gradient(135deg, rgba(10, 10, 15, 0.95) 0%, rgba(255, 150, 0, 0.3) 100%)"
+    }
     state["progress"] = p
-    if state.get("on_progress"): state["on_progress"](p)
+    if state.get("on_progress"):
+        state["on_progress"](p)
 
     t0 = time.time()
     match = state["match_payload"]
@@ -628,15 +675,30 @@ def design_studio_node(state: AgentState) -> AgentState:
 def validator_node(state: AgentState) -> AgentState:
     """Saves the result and executes Pillow fallback if IA failed."""
     if state.get("generated_card_path") and not state.get("error"):
-        p = {"phase": "¡Diseño de élite completado!", "pct": 100}
+        p = {
+            "phase": "ELITE DESIGN COMPLETED!",
+            "pct": 100,
+            "icon": "bi bi-check-circle-fill",
+            "bg": "linear-gradient(135deg, rgba(10, 10, 15, 0.95) 0%, rgba(0, 255, 0, 0.3) 100%)"
+        }
         state["progress"] = p
-        if state.get("on_progress"): state["on_progress"](p)
+        if state.get("on_progress"):
+            state["on_progress"](p)
+        
+        # Delay to allow user to see the success state
+        time.sleep(5)
         return state
 
     # --- FALLBACK: Use Pillow Compositor ---
-    p = {"phase": "IA falló. Generando diseño de emergencia (Pillow)...", "pct": 80}
+    p = {
+        "phase": "AI FAILED. GENERATING EMERGENCY FALLBACK...",
+        "pct": 80,
+        "icon": "bi bi-exclamation-triangle-fill",
+        "bg": "linear-gradient(135deg, rgba(10, 10, 15, 0.95) 0%, rgba(255, 0, 0, 0.4) 100%)"
+    }
     state["progress"] = p
-    if state.get("on_progress"): state["on_progress"](p)
+    if state.get("on_progress"):
+        state["on_progress"](p)
     try:
         from utils.card_compositor import compose_precision_card
         match = state["match_payload"]
@@ -659,7 +721,9 @@ def validator_node(state: AgentState) -> AgentState:
 
 # --- Graph Construction ---
 def run_card_design_agent(match_payload: Dict, player_profile: Dict, card_format: str = "9:16",
-                          forced_stats: Optional[List[Dict]] = None, on_progress: Optional[Callable] = None) -> Dict:
+                          forced_stats: Optional[List[Dict]] = None, 
+                          exclude_trends: Optional[List[str]] = None,
+                          on_progress: Optional[Callable] = None) -> Dict:
     """Entry point for the One-Shot Agency."""
     builder = StateGraph(AgentState)
 
@@ -684,10 +748,17 @@ def run_card_design_agent(match_payload: Dict, player_profile: Dict, card_format
         "is_post_game": False,
         "format": card_format,
         "forced_stats": forced_stats,
+        "exclude_trends": exclude_trends or [],
         "editorial_decision": _default_editorial_decision(match_payload, player_profile),
         "generated_card_path": None,
+        "caption": None,
         "agency_status": "Starting...",
-        "progress": {"phase": "Iniciando Agencia Elite...", "pct": 0},
+        "progress": {
+            "phase": "INITIALIZING ELITE AGENCY...",
+            "pct": 0,
+            "icon": "bi bi-cpu",
+            "bg": "rgba(10, 10, 15, 0.95)"
+        },
         "on_progress": on_progress,
         "error": None
     }

@@ -241,6 +241,8 @@ data/player_cards/*
 !data/player_cards/.gitkeep
 !data/player_cards/README.md
 storage/
+runtime/intelligence_artifacts/
+runtime/intelligence_session_memory/
 htmlcov/
 
 

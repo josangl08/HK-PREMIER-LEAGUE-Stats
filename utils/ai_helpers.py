@@ -255,20 +255,21 @@ def constellation_chart(
         hp_mask = [n == highlight_player for n in names]
         hp_x = coords[[i for i, m in enumerate(hp_mask) if m], 0]
         hp_y = coords[[i for i, m in enumerate(hp_mask) if m], 1]
+        _HP_COLOR = "#a855f7"
         if len(hp_x):
-            for hp_size, hp_op in [(28, 0.07), (20, 0.15), (10, 1.0)]:
+            for hp_size, hp_op in [(36, 0.07), (26, 0.15), (16, 1.0)]:
                 fig.add_trace(go.Scatter(
                     x=hp_x, y=hp_y,
-                    mode="markers" + ("+text" if hp_size == 10 else ""),
-                    marker=dict(size=hp_size, color=HKFATheme.ACCENT_RED, opacity=hp_op,
+                    mode="markers" + ("+text" if hp_size == 16 else ""),
+                    marker=dict(size=hp_size, color=_HP_COLOR, opacity=hp_op,
                                 line=dict(width=0)),
-                    text=[highlight_player] if hp_size == 10 else None,
+                    text=[highlight_player] if hp_size == 16 else None,
                     textposition="top center",
-                    textfont=dict(size=10, color=HKFATheme.ACCENT_RED),
-                    name="Selected" if hp_size == 10 else None,
-                    showlegend=hp_size == 10,
-                    hoverinfo="skip" if hp_size != 10 else None,
-                    hovertemplate=f"{highlight_player}<extra></extra>" if hp_size == 10 else None,
+                    textfont=dict(size=11, color=_HP_COLOR),
+                    name="Selected" if hp_size == 16 else None,
+                    showlegend=hp_size == 16,
+                    hoverinfo="skip" if hp_size != 16 else None,
+                    hovertemplate=f"{highlight_player}<extra></extra>" if hp_size == 16 else None,
                 ))
 
     fig.update_layout(
