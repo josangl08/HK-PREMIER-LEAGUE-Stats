@@ -14,6 +14,7 @@ from data.aggregators.timeline_aggregator import TimelineAggregator
 from data.aggregators.hong_kong_aggregator import get_h2h_record
 from data.managers.transfermarkt_runtime_manager import TransfermarktRuntimeManager
 from utils.ai_services.evidence_router import normalize_evidence_key, resolve_career_surface_evidence_key
+from utils.intelligence.runtime_config import get_intelligence_runtime_config
 from utils.intelligence.discovery_overlay_mapper import build_overlay_candidates_from_analysis
 from utils.intelligence.overlay_surface import (
     PRESENTATION_CONTEXTUAL,
@@ -91,18 +92,24 @@ def _career_visible_overlay_queue(resolved_surface: dict | None) -> list[dict]:
     return queue
 
 
-def _dismissed_overlay_keys(session_state: dict | None, *, stage: str) -> set[str]:
+def _dismissed_overlay_keys(session_state: dict | None, *, stage: str, player_id: str = "") -> set[str]:
     """Collect dismissed overlay identifiers from persisted inbox history."""
     dismissed: set[str] = set()
     for entry in list((session_state or {}).get("history") or []):
         if str(entry.get("stage") or "").strip().lower() != stage:
             continue
         cta_context = dict(entry.get("cta_context") or {})
+        entry_player_id = str(cta_context.get("player_id") or entry.get("player_id") or "").strip()
+        if player_id and entry_player_id and entry_player_id != str(player_id).strip():
+            continue
         signal_id = str(cta_context.get("signal_id") or "").strip()
+        novelty_key = str(cta_context.get("novelty_key") or "").strip()
         evidence_key = str(cta_context.get("evidence_key") or "").strip()
         title = str(entry.get("title") or "").strip()
         if signal_id:
             dismissed.add(signal_id)
+        if novelty_key:
+            dismissed.add(novelty_key)
         if evidence_key:
             dismissed.add(evidence_key)
         if title:
@@ -126,17 +133,19 @@ def _build_active_stage_inbox_entries(context: dict | None) -> list[dict]:
             return []
 
         if stage_type == "pre-match":
-            recent_form = _build_prematch_overlay_surface(
-                payload,
-                {
-                    "confidence": "limited",
-                    "plan_headline": f"Focus the next phase against {payload.get('opponent') or 'the opponent'}.",
-                    "meeting_count": 0,
-                    "recent_form_goals": 0,
-                    "recent_form_assists": 0,
-                },
-            )
-            return list(recent_form.get("inbox_entries") or [])
+            if payload.get("prematch_stage_analysis"):
+                recent_form = _build_prematch_overlay_surface(
+                    payload,
+                    {
+                        "confidence": "limited",
+                        "plan_headline": f"Focus the next phase against {payload.get('opponent') or 'the opponent'}.",
+                        "meeting_count": 0,
+                        "recent_form_goals": 0,
+                        "recent_form_assists": 0,
+                    },
+                )
+                return list(recent_form.get("inbox_entries") or [])
+            return []
 
         if stage_type == "post-match":
             overlay_surface = _build_postmatch_overlay_surface(payload)
@@ -165,9 +174,38 @@ def _dedupe_inbox_entries(entries: list[dict]) -> list[dict]:
     return deduped
 
 
+def _filter_history_entries_for_active_player(entries: list[dict], timeline_context: dict | None) -> list[dict]:
+    """Keep player-scoped history isolated to the active player."""
+    active_player_id = str(
+        ((timeline_context or {}).get("payload") or {}).get("player_id")
+        or getattr(current_user, "player_id", "")
+        or ""
+    ).strip()
+    if not active_player_id:
+        return list(entries or [])
+
+    player_scoped_stages = {"career", "season", "prematch", "postmatch", "pre-match", "post-match"}
+    filtered: list[dict] = []
+    for entry in list(entries or []):
+        stage_name = str(entry.get("stage") or "").strip().lower()
+        if stage_name not in player_scoped_stages:
+            filtered.append(entry)
+            continue
+        cta_context = dict(entry.get("cta_context") or {})
+        entry_player_id = str(cta_context.get("player_id") or entry.get("player_id") or "").strip()
+        if not entry_player_id:
+            continue
+        if entry_player_id == active_player_id:
+            filtered.append(entry)
+    return filtered
+
+
 def collect_insight_inbox_entries(session_state: dict | None, timeline_context: dict | None) -> list[dict]:
     """Combine persisted history with active-stage overlay entries for the shared inbox."""
-    history = list((session_state or {}).get("history", []))
+    history = _filter_history_entries_for_active_player(
+        list((session_state or {}).get("history", [])),
+        timeline_context,
+    )
     active_stage_entries = _build_active_stage_inbox_entries(timeline_context)
     return _dedupe_inbox_entries(history + active_stage_entries)
 
@@ -335,7 +373,75 @@ def _render_stage_content_for_context(context):
     return _render_stage_content_for_context_with_session(context, None)
 
 
-def _render_stage_content_for_context_with_session(context, session_state):
+def _build_prematch_render_payload(payload: dict) -> tuple[dict, str, str, str]:
+    """Enrich the prematch payload with the logged-in player's role context."""
+    enriched_payload = dict(payload or {})
+    player_name = ""
+    pos_group = ""
+    position_main = ""
+    current_role_hint = ""
+    try:
+        player_id = getattr(current_user, "player_id", None)
+        if player_id:
+            from utils.player_index import get_player_index
+            from utils.app_context import get_hong_kong_data_manager as _get_dm
+            from models.db_models import Player, MatchHistory
+            from utils.db_engine import SessionFactory
+
+            pi = get_player_index()
+            player_info = pi.get_player_info(player_id)
+            player_name = player_info.get("canonical_name", "") if player_info else ""
+            with SessionFactory() as session:
+                player_obj = session.get(Player, player_id)
+                position_main = str(getattr(player_obj, "position_main", "") or "").strip()
+                recent_matches = (
+                    session.query(MatchHistory)
+                    .filter(MatchHistory.player_id == player_id)
+                    .order_by(MatchHistory.date.desc())
+                    .limit(8)
+                    .all()
+                )
+                weighted = {}
+                for idx, match in enumerate(recent_matches):
+                    raw_pos = str(getattr(match, "position", "") or "").strip().upper()
+                    mapped = {
+                        "ED": "RW", "EI": "LW", "ID": "RM", "II": "LM",
+                        "MCO": "AMF", "CMF": "CM", "DMF": "DM",
+                    }.get(raw_pos, raw_pos)
+                    if not mapped:
+                        continue
+                    minutes = int(getattr(match, "minutes_played", 0) or 0)
+                    weight = max(minutes, 1) + max(0, 8 - idx)
+                    weighted[mapped] = weighted.get(mapped, 0) + weight
+                if weighted:
+                    current_role_hint = max(weighted.items(), key=lambda item: item[1])[0]
+            if player_name:
+                pos_group = _get_position_group(player_name, _get_dm())
+    except Exception:
+        pass
+
+    enriched_payload["player_name"] = player_name
+    enriched_payload["player_pos_group"] = pos_group
+    enriched_payload["player_position_main"] = position_main
+    enriched_payload["player_current_role"] = current_role_hint
+    return enriched_payload, pos_group, position_main, current_role_hint
+
+
+def _prematch_analysis_request_key(payload: dict) -> str:
+    """Build a stable key for one prematch analysis request."""
+    return "|".join(
+        [
+            str(payload.get("player_id") or ""),
+            str(payload.get("fixture_id") or ""),
+            str(payload.get("opponent") or ""),
+            str(payload.get("kickoff_display") or payload.get("date") or ""),
+            str(payload.get("player_name") or ""),
+            str(payload.get("player_current_role") or ""),
+        ]
+    )
+
+
+def _render_stage_content_for_context_with_session(context, session_state, prematch_stage_analysis=None):
     """Dispatches a context dict to the correct stage renderer with overlay-session awareness."""
     if not context:
         return _render_default_stage_content()
@@ -351,48 +457,13 @@ def _render_stage_content_for_context_with_session(context, session_state):
             return render_post_match(payload)
 
     if m_type == "pre-match":
-        pos_group = ""
-        position_main = ""
-        current_role_hint = ""
-        try:
-            player_id = getattr(current_user, "player_id", None)
-            if player_id:
-                from utils.player_index import get_player_index
-                from utils.app_context import get_hong_kong_data_manager as _get_dm
-                from models.db_models import Player, MatchHistory
-                from utils.db_engine import SessionFactory
-
-                pi = get_player_index()
-                player_info = pi.get_player_info(player_id)
-                player_name = player_info.get("canonical_name", "") if player_info else ""
-                with SessionFactory() as session:
-                    player_obj = session.get(Player, player_id)
-                    position_main = str(getattr(player_obj, "position_main", "") or "").strip()
-                    recent_matches = (
-                        session.query(MatchHistory)
-                        .filter(MatchHistory.player_id == player_id)
-                        .order_by(MatchHistory.date.desc())
-                        .limit(8)
-                        .all()
-                    )
-                    weighted = {}
-                    for idx, match in enumerate(recent_matches):
-                        raw_pos = str(getattr(match, "position", "") or "").strip().upper()
-                        mapped = {
-                            "ED": "RW", "EI": "LW", "ID": "RM", "II": "LM",
-                            "MCO": "AMF", "CMF": "CM", "DMF": "DM",
-                        }.get(raw_pos, raw_pos)
-                        if not mapped:
-                            continue
-                        minutes = int(getattr(match, "minutes_played", 0) or 0)
-                        weight = max(minutes, 1) + max(0, 8 - idx)
-                        weighted[mapped] = weighted.get(mapped, 0) + weight
-                    if weighted:
-                        current_role_hint = max(weighted.items(), key=lambda item: item[1])[0]
-                if player_name:
-                    pos_group = _get_position_group(player_name, _get_dm())
-        except Exception:
-            pass
+        payload, pos_group, position_main, current_role_hint = _build_prematch_render_payload(payload)
+        analysis_bundle = dict(prematch_stage_analysis or {})
+        request_key = _prematch_analysis_request_key(payload)
+        llm_enabled = bool(get_intelligence_runtime_config().get("prematch_agent_llm_enabled", False))
+        if request_key == str(analysis_bundle.get("request_key") or ""):
+            payload["prematch_stage_analysis"] = dict(analysis_bundle.get("analysis") or {})
+        payload["_prematch_ai_pending"] = bool(llm_enabled and not payload.get("prematch_stage_analysis"))
         return render_pre_match(
             payload,
             player_pos_group=pos_group,
@@ -2305,7 +2376,6 @@ def register_player_portal_callbacks(app):
             return no_update
         try:
             from utils.career_intelligence import get_career_phase_data, get_career_signals, get_development_priorities
-            from utils.career_stage.career_intelligence import build_career_stage_analysis_payload
             from utils.stage_helpers import _fetch_dashboard_data, _serialize_dashboard_data
 
             player_id, player_name, user_role = _get_active_player_identity()
@@ -2324,7 +2394,6 @@ def register_player_portal_callbacks(app):
                 "career_phase": career_phase_data,
                 "signals": career_signals,
                 "priorities": development_priorities,
-                "career_stage_analysis": build_career_stage_analysis_payload(data),
             }
         except Exception as exc:
             logger.error(f"populate_portal_data_store error: {exc}")
@@ -2393,6 +2462,27 @@ def register_player_portal_callbacks(app):
             logger.debug(f"build_career_dashboard_ai_brief error: {exc}")
             return no_update
 
+    @app.callback(
+        Output("career-stage-analysis-store", "data"),
+        Input("portal-render-complete-store", "data"),
+        State("portal-data-store", "data"),
+        prevent_initial_call=True,
+    )
+    def build_career_stage_analysis_after_render(render_signal, portal_data):
+        """Build shared career stage analysis after the deterministic dashboard render completes."""
+        if not render_signal or not portal_data:
+            return no_update
+        try:
+            from utils.career_stage.career_intelligence import build_career_stage_analysis_payload
+            from utils.stage_helpers import _deserialize_dashboard_data
+
+            data = _deserialize_dashboard_data(portal_data["data"])
+            analysis_payload = build_career_stage_analysis_payload(data)
+            return analysis_payload or no_update
+        except Exception as exc:
+            logger.info("build_career_stage_analysis_after_render error: %s", exc)
+            return no_update
+
     # Phase 3b — re-render with AI copy (no DB fetch: data from State)
     @app.callback(
         Output("stage-content", "children", allow_duplicate=True),
@@ -2425,15 +2515,63 @@ def register_player_portal_callbacks(app):
         Output("stage-content", "children"),
         Input("timeline-context-store", "data"),
         State("insight-session-state", "data"),
+        State("prematch-stage-analysis-store", "data"),
         prevent_initial_call=True,
     )
-    def update_stage(context, session_state):
+    def update_stage(context, session_state, prematch_stage_analysis):
         """Dispatches rendering to the appropriate stage helper based on card type."""
         try:
-            return _render_stage_content_for_context_with_session(context, session_state)
+            return _render_stage_content_for_context_with_session(context, session_state, prematch_stage_analysis)
         except Exception as e:
             logger.error(f"update_stage error: {e}")
             return dbc.Alert("Error al renderizar el escenario.", color="danger")
+
+    @app.callback(
+        Output("prematch-stage-analysis-store", "data"),
+        Input("stage-content", "children"),
+        State("timeline-context-store", "data"),
+        State("prematch-stage-analysis-store", "data"),
+        prevent_initial_call=True,
+    )
+    def build_prematch_stage_analysis_after_render(_, context, current_analysis_store):
+        """Compute prematch AI analysis after the stage is already visible, avoiding first-render blocking."""
+        if not context or str(context.get("type") or "") != "pre-match":
+            return no_update
+        try:
+            from utils.prematch_stage.prematch_intelligence import build_prematch_stage_analysis_payload
+
+            payload, _, _, _ = _build_prematch_render_payload(dict(context.get("payload") or {}))
+            request_key = _prematch_analysis_request_key(payload)
+            store = dict(current_analysis_store or {})
+            if str(store.get("request_key") or "") == request_key and store.get("analysis"):
+                return no_update
+            analysis = build_prematch_stage_analysis_payload(payload)
+            return {
+                "request_key": request_key,
+                "analysis": analysis,
+            }
+        except Exception as exc:
+            logger.debug("prematch stage analysis async build error: %s", exc)
+            return no_update
+
+    @app.callback(
+        Output("stage-content", "children", allow_duplicate=True),
+        Input("prematch-stage-analysis-store", "data"),
+        State("timeline-context-store", "data"),
+        State("insight-session-state", "data"),
+        prevent_initial_call=True,
+    )
+    def refresh_prematch_stage_after_analysis(prematch_stage_analysis, timeline_context, session_state):
+        """Refresh the visible prematch stage once the async AI analysis is ready."""
+        if not timeline_context or str(timeline_context.get("type") or "") != "pre-match":
+            return no_update
+        if not prematch_stage_analysis:
+            return no_update
+        return _render_stage_content_for_context_with_session(
+            timeline_context,
+            session_state,
+            prematch_stage_analysis,
+        )
 
     # ------------------------------------------------------------------ #
     # timeline-context-store → season-umap-context-store + modal header  #
@@ -3018,10 +3156,11 @@ def register_career_intelligence_callbacks(app):
         Output("insight-session-state", "data"),
         Input("timeline-context-store", "data"),
         Input("portal-data-store", "data"),
+        Input("career-stage-analysis-store", "data"),
         State("insight-session-state", "data"),
         prevent_initial_call=False,
     )
-    def evaluate_career_signals(timeline_context, portal_data, session_state):
+    def evaluate_career_signals(timeline_context, portal_data, career_stage_analysis, session_state):
         """
         Runs the career pattern detector for the default dashboard/career layer,
         not for season milestones that reuse `type="career"` in the timeline.
@@ -3048,7 +3187,7 @@ def register_career_intelligence_callbacks(app):
                 or ""
             )
             today = date.today().isoformat()
-            analysis_payload = portal_data.get("career_stage_analysis")
+            analysis_payload = career_stage_analysis
             raw_candidates = list(
                 (build_overlay_candidates_from_analysis(analysis_payload) or {}).get("candidates") or []
             )
@@ -3069,7 +3208,39 @@ def register_career_intelligence_callbacks(app):
                 "career",
                 {"candidates": raw_candidates},
             )
-            dismissed_keys = _dismissed_overlay_keys(session_state, stage="career")
+            logger.info(
+                "Career overlay raw candidates player=%s details=%s",
+                player_name,
+                [
+                    {
+                        "signal_id": str(candidate.get("signal_id") or ""),
+                        "novelty_key": str(candidate.get("novelty_key") or ""),
+                        "hint": str(candidate.get("presentation_hint") or ""),
+                        "priority": candidate.get("priority"),
+                        "confidence": candidate.get("confidence"),
+                    }
+                    for candidate in raw_candidates
+                ],
+            )
+            logger.info(
+                "Career overlay resolved candidates player=%s details=%s",
+                player_name,
+                [
+                    {
+                        "signal_id": str(candidate.get("signal_id") or ""),
+                        "novelty_key": str(candidate.get("novelty_key") or ""),
+                        "tier": str(candidate.get("presentation_tier") or ""),
+                        "priority": candidate.get("priority"),
+                        "confidence": candidate.get("confidence"),
+                    }
+                    for candidate in list(resolved_surface.get("candidates") or [])
+                ],
+            )
+            dismissed_keys = _dismissed_overlay_keys(
+                session_state,
+                stage="career",
+                player_id=str(portal_data.get("player_id") or ""),
+            )
             if dismissed_keys:
                 logger.info(
                     "Career overlay suppressing dismissed entries count=%s",
@@ -3079,9 +3250,20 @@ def register_career_intelligence_callbacks(app):
                     candidate
                     for candidate in list(resolved_surface.get("candidates") or [])
                     if str(candidate.get("signal_id") or "") not in dismissed_keys
-                    and str(candidate.get("evidence_key") or "") not in dismissed_keys
-                    and str(candidate.get("title") or "") not in dismissed_keys
+                    and str(candidate.get("novelty_key") or "") not in dismissed_keys
                 ]
+                logger.info(
+                    "Career overlay filtered candidates player=%s details=%s",
+                    player_name,
+                    [
+                        {
+                            "signal_id": str(candidate.get("signal_id") or ""),
+                            "novelty_key": str(candidate.get("novelty_key") or ""),
+                            "tier": str(candidate.get("presentation_tier") or ""),
+                        }
+                        for candidate in filtered_candidates
+                    ],
+                )
                 resolved_surface = resolve_stage_overlay_surface(
                     "career",
                     {"candidates": [candidate.get("raw_candidate") or candidate for candidate in filtered_candidates]},
@@ -3271,10 +3453,13 @@ def register_career_intelligence_callbacks(app):
                 history = list(updated_state.get("history", []))
                 entry = build_overlay_inbox_entry(primary_data, surfaced=True)
                 entry["timestamp"] = _dt.utcnow().isoformat()
+                entry["player_id"] = str(getattr(current_user, "player_id", "") or "")
                 entry["cta_context"]["evidence_key"] = resolve_career_surface_evidence_key(
                     primary_data.get("evidence_key", "career_arc"),
                     label=primary_data.get("title", ""),
                 )
+                entry["cta_context"]["novelty_key"] = str(primary_data.get("novelty_key") or "")
+                entry["cta_context"]["player_id"] = str(getattr(current_user, "player_id", "") or "")
                 history.append(entry)
                 updated_state["history"] = history
             logger.info(
@@ -3325,10 +3510,13 @@ def register_career_intelligence_callbacks(app):
                 history = list(updated_session.get("history", []))
                 entry = build_overlay_inbox_entry(dismissed, surfaced=True)
                 entry["timestamp"] = _dt.utcnow().isoformat()
+                entry["player_id"] = str(getattr(current_user, "player_id", "") or "")
                 entry["cta_context"]["evidence_key"] = resolve_career_surface_evidence_key(
                     dismissed.get("evidence_key", "career_arc"),
                     label=dismissed.get("title", ""),
                 )
+                entry["cta_context"]["novelty_key"] = str(dismissed.get("novelty_key") or "")
+                entry["cta_context"]["player_id"] = str(getattr(current_user, "player_id", "") or "")
                 history.append(entry)
                 updated_session["history"] = history
                 logger.info(
@@ -3455,6 +3643,7 @@ def register_career_intelligence_callbacks(app):
             history.append(
                 {
                     "stage": "season",
+                    "player_id": str(getattr(current_user, "player_id", "") or ""),
                     "tier": str(triggered_id.get("tier") or "prominent"),
                     "title": title,
                     "body": str(triggered_id.get("body") or ""),
@@ -3463,6 +3652,7 @@ def register_career_intelligence_callbacks(app):
                     "cta_context": {
                         "signal_id": signal_id,
                         "evidence_key": evidence_key,
+                        "player_id": str(getattr(current_user, "player_id", "") or ""),
                     },
                     "surfaced": True,
                 }

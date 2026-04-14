@@ -73,10 +73,20 @@ _SEASON_TOOL_SPECS = (
     ),
 )
 
+_SEASON_CORE_TOOL_NAMES = (
+    "season_performance",
+    "session_memory",
+)
+
 
 def get_season_tool_catalog() -> List[Dict[str, Any]]:
     """Return the public season tool catalog for prompt construction."""
     return [asdict(spec) for spec in _SEASON_TOOL_SPECS]
+
+
+def get_season_core_tool_names() -> List[str]:
+    """Return the always-included core tool names for season analysis."""
+    return list(_SEASON_CORE_TOOL_NAMES)
 
 
 def _artifact_payload(artifacts: Mapping[str, Mapping[str, Any]], artifact_name: str) -> Dict[str, Any]:

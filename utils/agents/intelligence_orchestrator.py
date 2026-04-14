@@ -349,11 +349,49 @@ def orchestrate_season_intelligence(
         elif persisted_analysis["failure"]:
             write_failures.append(
                 {"target": SEASON_STAGE_ANALYSIS_ARTIFACT, "error": persisted_analysis["failure"]}
-            )
+        )
         served_from["analysis"] = "inline"
 
     stored_overlay = (artifact_states.get(SEASON_OVERLAY_CANDIDATES_ARTIFACT) or {}).get("artifact")
-    if _is_fresh(artifact_states.get(SEASON_OVERLAY_CANDIDATES_ARTIFACT)) and stored_overlay:
+    if shared_stage_analysis is not None:
+        shared_overlay_payload = build_overlay_candidates_from_analysis(shared_stage_analysis)
+        shared_overlay_surface = resolve_stage_overlay_surface("season", shared_overlay_payload)
+        shared_primary_candidate = shared_overlay_surface.get("primary_candidate")
+        if _is_viable_season_overlay_candidate(shared_primary_candidate):
+            overlay_payload = shared_overlay_payload
+            overlay_surface = shared_overlay_surface
+            worth_noticing = shared_primary_candidate
+            served_from["overlay"] = f"analysis_{served_from['analysis']}"
+            if not (_is_fresh(artifact_states.get(SEASON_OVERLAY_CANDIDATES_ARTIFACT)) and stored_overlay):
+                persisted_overlay = _persist_runtime_artifact(
+                    SEASON_OVERLAY_CANDIDATES_ARTIFACT,
+                    overlay_payload,
+                    player_id=player_id,
+                    season=season,
+                    base_payloads=base_payloads,
+                    dependency_artifacts=runtime_artifacts,
+                    registry=active_registry,
+                    runtime_config=runtime_config,
+                )
+                runtime_artifacts[SEASON_OVERLAY_CANDIDATES_ARTIFACT] = persisted_overlay["artifact"]
+                if persisted_overlay["persisted"]:
+                    persisted_artifacts.append(SEASON_OVERLAY_CANDIDATES_ARTIFACT)
+                elif persisted_overlay["failure"]:
+                    write_failures.append(
+                        {"target": SEASON_OVERLAY_CANDIDATES_ARTIFACT, "error": persisted_overlay["failure"]}
+                    )
+            memory_result = _sync_session_memory(
+                player_id=player_id,
+                season=season,
+                current_candidate=worth_noticing,
+                existing_memory=session_memory,
+            )
+            session_memory = memory_result["memory"]
+            persisted_session_memory = memory_result["persisted"]
+            if memory_result["failure"]:
+                write_failures.append({"target": "session_memory", "error": memory_result["failure"]})
+
+    if worth_noticing is None and _is_fresh(artifact_states.get(SEASON_OVERLAY_CANDIDATES_ARTIFACT)) and stored_overlay:
         overlay_payload = dict((stored_overlay.get("payload") or {}))
         overlay_surface = resolve_stage_overlay_surface("season", overlay_payload)
         worth_noticing = overlay_surface.get("primary_candidate")
@@ -428,7 +466,7 @@ def orchestrate_season_intelligence(
                     persisted_session_memory = memory_result["persisted"]
                     if memory_result["failure"]:
                         write_failures.append({"target": "session_memory", "error": memory_result["failure"]})
-    elif signals_payload and (signals_payload.get("signals") or []):
+    elif worth_noticing is None and signals_payload and (signals_payload.get("signals") or []):
         next_candidate = curate_signals(
             signals_payload.get("signals") or [],
             session_state=session_state,
@@ -543,12 +581,6 @@ def orchestrate_season_intelligence(
         )
     if not stage_analysis_payload:
         stage_analysis_payload = shared_stage_analysis
-    shared_overlay_payload = build_overlay_candidates_from_analysis(shared_stage_analysis)
-    shared_overlay_surface = resolve_stage_overlay_surface("season", shared_overlay_payload)
-    if shared_overlay_surface.get("candidate_count"):
-        overlay_payload = shared_overlay_payload
-        overlay_surface = shared_overlay_surface
-        worth_noticing = overlay_surface.get("primary_candidate")
 
     result = {
         "available": bool(stage_analysis_payload or worth_noticing or signals_payload),

@@ -40,9 +40,18 @@ def get_dashboard_brief_model_candidates() -> list[str]:
     ]
 
 
-def get_stage_agent_model_candidates() -> list[str]:
+def get_stage_agent_model_candidates(profile: str = "flash") -> list[str]:
     """Returns the preferred model list for stage-agent tool selection and discovery synthesis."""
+    normalized = str(profile or "flash").strip().lower()
+    if normalized == "pro":
+        return [
+            "gemini-3.1-pro-preview",
+            "gemini-2.5-pro",
+            "gemini-3-flash-preview",
+        ]
     return [
+        "gemini-3-flash-preview",
+        "gemini-2.5-flash",
         "gemini-3.1-flash-lite-preview",
     ]
 

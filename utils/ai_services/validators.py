@@ -68,8 +68,20 @@ class SeasonToolPlanPayload:
     """Structured tool-selection contract for the season agentic discovery runtime."""
 
     selected_tools: tuple[str, ...]
-    selection_rationale: tuple[str, ...]
-    data_gaps: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PrematchToolPlanPayload:
+    """Structured tool-selection contract for the prematch agentic discovery runtime."""
+
+    selected_tools: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class CareerToolPlanPayload:
+    """Structured tool-selection contract for the career agentic discovery runtime."""
+
+    selected_tools: tuple[str, ...]
 
 
 def normalize_confidence(value: Any, default: str = "medium") -> str:
@@ -249,24 +261,12 @@ def coerce_season_tool_plan(raw_payload: Any) -> Optional[SeasonToolPlanPayload]
         for item in list(raw_payload.get("selected_tools") or [])
         if str(item).strip()
     )
-    selection_rationale = tuple(
-        str(item).strip()
-        for item in list(raw_payload.get("selection_rationale") or [])
-        if str(item).strip()
-    )
-    data_gaps = tuple(
-        str(item).strip()
-        for item in list(raw_payload.get("data_gaps") or [])
-        if str(item).strip()
-    )
     return SeasonToolPlanPayload(
         selected_tools=selected_tools,
-        selection_rationale=selection_rationale,
-        data_gaps=data_gaps,
     )
 
 
-def validate_season_tool_plan(raw_payload: Any, *, max_tools: int = 4) -> bool:
+def validate_season_tool_plan(raw_payload: Any, *, max_tools: int = 3) -> bool:
     """Return True only when the season tool plan is valid and usefully constrained."""
     payload = coerce_season_tool_plan(raw_payload)
     if payload is None:
@@ -277,13 +277,19 @@ def validate_season_tool_plan(raw_payload: Any, *, max_tools: int = 4) -> bool:
         return False
     if len(set(payload.selected_tools)) != len(payload.selected_tools):
         return False
-    if len(payload.selection_rationale) < len(payload.selected_tools):
-        return False
     return True
 
 
 def validate_season_stage_analysis_payload(raw_payload: Any) -> bool:
     """Return True only when a season AI response matches the shared stage-analysis contract and season rules."""
+    if isinstance(raw_payload, dict) and "stage" not in raw_payload:
+        raw_payload = {
+            "stage": "season",
+            "scope": {},
+            "supporting_artifacts": [],
+            "debug": {},
+            **raw_payload,
+        }
     payload = coerce_stage_analysis(raw_payload)
     if payload is None or payload.stage != "season":
         return False
@@ -293,6 +299,116 @@ def validate_season_stage_analysis_payload(raw_payload: Any) -> bool:
         return False
     for discovery in payload.discoveries:
         if discovery.stage != "season":
+            return False
+        if not discovery.title or not discovery.body:
+            return False
+        if not discovery.evidence_keys and not discovery.anchor:
+            return False
+    return True
+
+
+def coerce_prematch_tool_plan(raw_payload: Any) -> Optional[PrematchToolPlanPayload]:
+    """Convert dict-like tool-plan payloads into the structured prematch tool-plan contract."""
+    if isinstance(raw_payload, PrematchToolPlanPayload):
+        return raw_payload
+    if not isinstance(raw_payload, dict):
+        return None
+    selected_tools = tuple(
+        str(item).strip()
+        for item in list(raw_payload.get("selected_tools") or [])
+        if str(item).strip()
+    )
+    return PrematchToolPlanPayload(selected_tools=selected_tools)
+
+
+def validate_prematch_tool_plan(raw_payload: Any, *, max_tools: int = 3) -> bool:
+    """Return True only when the prematch tool plan is valid and usefully constrained."""
+    payload = coerce_prematch_tool_plan(raw_payload)
+    if payload is None:
+        return False
+    if not payload.selected_tools:
+        return False
+    if len(payload.selected_tools) > int(max_tools):
+        return False
+    if len(set(payload.selected_tools)) != len(payload.selected_tools):
+        return False
+    return True
+
+
+def validate_prematch_stage_analysis_payload(raw_payload: Any) -> bool:
+    """Return True only when a prematch AI response matches the shared stage-analysis contract and prematch rules."""
+    if isinstance(raw_payload, dict) and "stage" not in raw_payload:
+        raw_payload = {
+            "stage": "prematch",
+            "scope": {},
+            "supporting_artifacts": [],
+            "debug": {},
+            **raw_payload,
+        }
+    payload = coerce_stage_analysis(raw_payload)
+    if payload is None or payload.stage != "prematch":
+        return False
+    if payload.confidence not in ALLOWED_CONFIDENCE_LEVELS:
+        return False
+    if len(payload.discoveries) > 3:
+        return False
+    for discovery in payload.discoveries:
+        if discovery.stage != "prematch":
+            return False
+        if not discovery.title or not discovery.body:
+            return False
+        if not discovery.evidence_keys and not discovery.anchor:
+            return False
+    return True
+
+
+def coerce_career_tool_plan(raw_payload: Any) -> Optional[CareerToolPlanPayload]:
+    """Convert dict-like tool-plan payloads into the structured career tool-plan contract."""
+    if isinstance(raw_payload, CareerToolPlanPayload):
+        return raw_payload
+    if not isinstance(raw_payload, dict):
+        return None
+    selected_tools = tuple(
+        str(item).strip()
+        for item in list(raw_payload.get("selected_tools") or [])
+        if str(item).strip()
+    )
+    return CareerToolPlanPayload(selected_tools=selected_tools)
+
+
+def validate_career_tool_plan(raw_payload: Any, *, max_tools: int = 3) -> bool:
+    """Return True only when the career tool plan is valid and usefully constrained."""
+    payload = coerce_career_tool_plan(raw_payload)
+    if payload is None:
+        return False
+    if not payload.selected_tools:
+        return False
+    if len(payload.selected_tools) > int(max_tools):
+        return False
+    if len(set(payload.selected_tools)) != len(payload.selected_tools):
+        return False
+    return True
+
+
+def validate_career_stage_analysis_payload(raw_payload: Any) -> bool:
+    """Return True only when a career AI response matches the shared stage-analysis contract and career rules."""
+    if isinstance(raw_payload, dict) and "stage" not in raw_payload:
+        raw_payload = {
+            "stage": "career",
+            "scope": {},
+            "supporting_artifacts": [],
+            "debug": {},
+            **raw_payload,
+        }
+    payload = coerce_stage_analysis(raw_payload)
+    if payload is None or payload.stage != "career":
+        return False
+    if payload.confidence not in ALLOWED_CONFIDENCE_LEVELS:
+        return False
+    if len(payload.discoveries) > 3:
+        return False
+    for discovery in payload.discoveries:
+        if discovery.stage != "career":
             return False
         if not discovery.title or not discovery.body:
             return False

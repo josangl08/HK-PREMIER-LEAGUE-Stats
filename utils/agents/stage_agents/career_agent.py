@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import Any, Dict, Mapping
 
 from utils.agents.stage_agents.base import StageAgent
+from utils.domain_ai.career_agentic_discovery import synthesize_career_stage_analysis
 from utils.intelligence.discovery_contracts import StageAnalysis, StageDiscovery
 
 
@@ -19,7 +20,13 @@ class CareerStageAgent(StageAgent):
         artifacts: Mapping[str, Mapping[str, Any]],
         session_memory: Mapping[str, Any] | None = None,
     ) -> StageAnalysis:
-        del session_memory
+        ai_analysis = synthesize_career_stage_analysis(
+            scope=scope,
+            artifacts=artifacts,
+            session_memory=session_memory,
+        )
+        if ai_analysis is not None:
+            return ai_analysis
         phase_payload = ((artifacts.get("career_phase_context") or {}).get("payload") or {})
         signals_payload = ((artifacts.get("career_signals_context") or {}).get("payload") or {})
         priorities_payload = ((artifacts.get("career_priorities_context") or {}).get("payload") or {})

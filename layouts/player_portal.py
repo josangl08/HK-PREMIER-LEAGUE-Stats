@@ -130,6 +130,8 @@ def create_player_portal_layout(user_role: str = "player") -> html.Div:
             dcc.Store(id="stage-lucide-refresh-dummy"),
             dcc.Store(id="portal-overlay-store", storage_type="memory", data={"type": "none"}),
             dcc.Store(id="card-editor-state", storage_type="memory"),
+            dcc.Store(id="prematch-stage-analysis-store", storage_type="memory"),
+            dcc.Store(id="career-stage-analysis-store", storage_type="memory"),
             # Stores the player photo album — session only (never share between players)
             dcc.Store(id="player-photos-store", storage_type="session"),
             # Triggers post-generation gallery refresh or download

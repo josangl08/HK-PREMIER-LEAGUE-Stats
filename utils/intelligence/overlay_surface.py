@@ -127,6 +127,33 @@ def _normalize_season_candidate(candidate: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def _normalize_career_candidate(candidate: Mapping[str, Any]) -> Dict[str, Any]:
+    # Shared career stage analyses already emit normalized discovery candidates
+    # with stable ids/novelty keys. Preserve that identity instead of remapping
+    # them back onto legacy evidence keys.
+    if candidate.get("signal_id") or candidate.get("novelty_key") or candidate.get("presentation_hint"):
+        confidence = _safe_float(candidate.get("confidence"), 0.8)
+        priority = _safe_float(candidate.get("priority"), confidence or 0.8)
+        presentation_tier = _resolve_tier(candidate, priority=priority, confidence=confidence)
+        return {
+            "stage": "career",
+            "signal_id": str(candidate.get("signal_id") or candidate.get("evidence_key") or candidate.get("title") or ""),
+            "title": _candidate_title(candidate),
+            "body": _candidate_body(candidate),
+            "anchor": str(candidate.get("anchor") or candidate.get("evidence_key") or "career_arc"),
+            "priority": priority,
+            "confidence": confidence,
+            "presentation_tier": presentation_tier,
+            "presentation_reason": "importance_resolved",
+            "cta_label": str(candidate.get("cta_label") or "Ver análisis"),
+            "dismissible": True,
+            "evidence_key": str(candidate.get("evidence_key") or ""),
+            "type": str(candidate.get("type") or "career_overlay"),
+            "novelty_key": str(candidate.get("novelty_key") or candidate.get("signal_id") or candidate.get("evidence_key") or ""),
+            "evidence": deepcopy(dict(candidate.get("evidence") or {})),
+            "source_tier": str(candidate.get("source_tier") or ""),
+            "raw_candidate": deepcopy(dict(candidate)),
+        }
+
     source_tier = _safe_int(candidate.get("tier"), 2)
     raw_urgency = _safe_float(
         candidate.get("urgency"),
@@ -267,6 +294,7 @@ def build_overlay_inbox_entry(candidate: Mapping[str, Any], *, surfaced: bool = 
         "cta_context": {
             "signal_id": str(candidate.get("signal_id") or ""),
             "evidence_key": str(candidate.get("evidence_key") or ""),
+            "novelty_key": str(candidate.get("novelty_key") or ""),
         },
         "surfaced": bool(surfaced),
     }

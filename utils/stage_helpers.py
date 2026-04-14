@@ -39,7 +39,13 @@ from data.competition_registry import (
     normalize_competition,
 )
 from utils.cache import cache
-from utils.intelligence.overlay_surface import PRESENTATION_CONTEXTUAL, PRESENTATION_MICRO, resolve_stage_overlay_surface
+from utils.intelligence.overlay_surface import (
+    PRESENTATION_CONTEXTUAL,
+    PRESENTATION_CRITICAL,
+    PRESENTATION_MICRO,
+    PRESENTATION_PROMINENT,
+    resolve_stage_overlay_surface,
+)
 from utils.runtime_storage import PLAYER_CARDS_RUNTIME_ROOT, iter_player_cards_roots
 
 # Numba/UMAP is not thread-safe with the default workqueue layer.
@@ -129,16 +135,48 @@ def _build_stage_contextual_overlay_card(
     )
 
 
+def _presentation_tier_label(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    mapping = {
+        PRESENTATION_CRITICAL: "Critical",
+        PRESENTATION_PROMINENT: "Prominent",
+        PRESENTATION_CONTEXTUAL: "Contextual",
+        PRESENTATION_MICRO: "Micro",
+    }
+    return mapping.get(normalized, "Context")
+
+
 def _build_prematch_overlay_surface(
     payload: Dict[str, Any],
     game_plan_payload: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Build prematch shared overlay surface from stage discoveries when available."""
+    if bool(payload.get("_prematch_ai_pending")) and not payload.get("prematch_stage_analysis"):
+        return {
+            "stage": "prematch",
+            "candidates": [],
+            "candidate_count": 0,
+            "primary_candidate": None,
+            "visible_primary": None,
+            "deferred_candidates": [],
+            "inbox_entries": [],
+        }
     try:
         from utils.intelligence.discovery_overlay_mapper import build_overlay_candidates_from_analysis
         from utils.prematch_stage.prematch_intelligence import build_prematch_stage_analysis_payload
 
-        stage_analysis = payload.get("prematch_stage_analysis") or build_prematch_stage_analysis_payload(payload)
+        stage_analysis = payload.get("prematch_stage_analysis")
+        has_rich_prematch_scope = bool(
+            payload.get("fixture_id")
+            and payload.get("player_name")
+            and (
+                payload.get("player_current_role")
+                or payload.get("player_position_main")
+                or payload.get("player_pos_group")
+            )
+        )
+        if not stage_analysis and has_rich_prematch_scope:
+            stage_analysis = build_prematch_stage_analysis_payload(payload)
         overlay_payload = build_overlay_candidates_from_analysis(stage_analysis)
         if list((overlay_payload or {}).get("candidates") or []):
             return resolve_stage_overlay_surface("prematch", overlay_payload)
@@ -3507,11 +3545,19 @@ def _get_opponent_rivals(
                 opponent_team,
             )
             form_label = recent_form.get("label", "Stable")
+            rival_score = float(row.get("_rival_score", 0.0) or 0.0)
+            selection_reason = (
+                f"Likely matchup because {str(row.get('Player', 'Unknown'))} fits the expected role lane, "
+                f"has {int(float(row.get('Minutes played', 0) or 0))} minutes, and stands out through "
+                f"{_normalize_metric_label(key_label).lower()}."
+            )
             results.append({
                 "name": str(row.get("Player", "Unknown")),
                 "position_group": role_token,
                 "role_label": _format_role_token(role_token),
                 "matchup_tier": "Primary Matchup" if idx == 0 else "Support Matchup",
+                "rival_score": rival_score,
+                "selection_reason": selection_reason,
                 "form_label": form_label,
                 "form_reason": recent_form.get("reason", ""),
                 "recent_minutes": int(recent_form.get("minutes", 0) or 0),
@@ -7630,52 +7676,6 @@ def render_pre_match(
             h2h_text,
         ))
 
-    game_plan_card = _glass_card(
-        dbc.CardBody([
-            html.Div([
-                _section_title("bi-robot", "AI Game-Plan", "Structured from recent form, rival profiles and head-to-head data."),
-                html.Span(
-                    confidence_label,
-                    style={
-                        "padding": "6px 10px",
-                        "borderRadius": "999px",
-                        "background": f"rgba({_hex_to_rgb(confidence_color)}, 0.12)",
-                        "border": f"1px solid rgba({_hex_to_rgb(confidence_color)}, 0.24)",
-                        "color": "#eef4fa",
-                        "fontSize": "0.72rem",
-                        "fontWeight": "600",
-                        "whiteSpace": "nowrap",
-                    },
-                ),
-            ], style={"display": "flex", "justifyContent": "space-between", "alignItems": "flex-start", "gap": "12px", "marginBottom": "20px", "flexWrap": "wrap"}),
-            html.Div(
-                plan_headline,
-                style={
-                    "color": "#f4f8fc",
-                    "fontSize": "1.02rem",
-                    "fontWeight": "700",
-                    "lineHeight": "1.55",
-                    "marginBottom": "18px",
-                },
-            ),
-            html.Div([
-                html.Div([
-                    html.Div([
-                        html.I(className=f"bi {icon}", style={"color": accent, "fontSize": "1rem", "lineHeight": "1"}),
-                        html.Span(label, style={"color": "#f0f5fa", "fontWeight": "700", "fontSize": "0.84rem", "letterSpacing": "0.02em"}),
-                    ], style={"display": "flex", "alignItems": "center", "gap": "8px", "marginBottom": "6px"}),
-                    html.Div(text, style={"color": "#d8e1eb", "fontSize": "0.9rem", "lineHeight": "1.6"}),
-                ], style={
-                    "padding": "12px 14px",
-                    "borderRadius": "14px",
-                    "background": "rgba(255,255,255,0.04)",
-                    "border": "1px solid rgba(255,255,255,0.08)",
-                }) for icon, accent, label, text in plan_rows
-            ], style={"display": "grid", "gridTemplateColumns": "repeat(auto-fit, minmax(220px, 1fr))", "gap": "12px"}),
-        ]),
-        accent=HKFATheme.ACCENT_GOLD,
-    )
-
     overlay_surface = _build_prematch_overlay_surface(
         payload,
         {
@@ -7687,6 +7687,186 @@ def render_pre_match(
         },
     )
     contextual_overlay_card = _build_stage_contextual_overlay_card("prematch", overlay_surface)
+    resolved_candidates: List[Dict[str, Any]] = []
+    primary_candidate = dict((overlay_surface or {}).get("primary_candidate") or {})
+    if primary_candidate:
+        resolved_candidates.append(primary_candidate)
+    resolved_candidates.extend(
+        dict(candidate)
+        for candidate in list((overlay_surface or {}).get("deferred_candidates") or [])
+    )
+    analysis_payload = dict(payload.get("prematch_stage_analysis") or {})
+    analysis_summary = str(analysis_payload.get("summary") or "").strip()
+    use_agentic_game_plan = bool(resolved_candidates)
+    ai_pending = bool(payload.get("_prematch_ai_pending")) and not analysis_payload
+
+    if ai_pending:
+        game_plan_card = _glass_card(
+            dbc.CardBody([
+                html.Div([
+                    _section_title("bi-robot", "AI Game-Plan", "Structured from recent form, rival profiles and head-to-head data."),
+                    html.Span(
+                        "Updating...",
+                        style={
+                            "padding": "6px 10px",
+                            "borderRadius": "999px",
+                            "background": "rgba(255,255,255,0.06)",
+                            "border": "1px solid rgba(255,255,255,0.10)",
+                            "color": "#eef4fa",
+                            "fontSize": "0.72rem",
+                            "fontWeight": "600",
+                            "whiteSpace": "nowrap",
+                        },
+                    ),
+                ], style={"display": "flex", "justifyContent": "space-between", "alignItems": "flex-start", "gap": "12px", "marginBottom": "20px", "flexWrap": "wrap"}),
+                html.Div([
+                    html.Div(className="skeleton-line skeleton-line--title mb-2", style={"maxWidth": "78%"}),
+                    html.Div(className="skeleton-line skeleton-line--text mb-1", style={"maxWidth": "96%"}),
+                    html.Div(className="skeleton-line skeleton-line--text mb-3", style={"maxWidth": "84%"}),
+                ], style={"marginBottom": "10px"}),
+                html.Div([
+                    html.Div([
+                        html.Div(className="skeleton-line skeleton-line--short mb-2", style={"maxWidth": "42%"}),
+                        html.Div(className="skeleton-line skeleton-line--title mb-2", style={"maxWidth": "74%"}),
+                        html.Div(className="skeleton-line skeleton-line--text mb-1", style={"maxWidth": "94%"}),
+                        html.Div(className="skeleton-line skeleton-line--text", style={"maxWidth": "72%"}),
+                    ], style={
+                        "padding": "12px 14px",
+                        "borderRadius": "14px",
+                        "background": "rgba(255,255,255,0.04)",
+                        "border": "1px solid rgba(255,255,255,0.08)",
+                    }),
+                    html.Div([
+                        html.Div(className="skeleton-line skeleton-line--short mb-2", style={"maxWidth": "38%"}),
+                        html.Div(className="skeleton-line skeleton-line--title mb-2", style={"maxWidth": "68%"}),
+                        html.Div(className="skeleton-line skeleton-line--text mb-1", style={"maxWidth": "88%"}),
+                        html.Div(className="skeleton-line skeleton-line--text", style={"maxWidth": "66%"}),
+                    ], style={
+                        "padding": "12px 14px",
+                        "borderRadius": "14px",
+                        "background": "rgba(255,255,255,0.04)",
+                        "border": "1px solid rgba(255,255,255,0.08)",
+                    }),
+                ], style={"display": "grid", "gridTemplateColumns": "repeat(auto-fit, minmax(220px, 1fr))", "gap": "12px"}),
+            ]),
+            accent=HKFATheme.ACCENT_GOLD,
+        )
+    elif use_agentic_game_plan:
+        game_plan_card = _glass_card(
+            dbc.CardBody([
+                html.Div([
+                    _section_title("bi-robot", "AI Game-Plan", "Structured from recent form, rival profiles and head-to-head data."),
+                    html.Span(
+                        confidence_label,
+                        style={
+                            "padding": "6px 10px",
+                            "borderRadius": "999px",
+                            "background": f"rgba({_hex_to_rgb(confidence_color)}, 0.12)",
+                            "border": f"1px solid rgba({_hex_to_rgb(confidence_color)}, 0.24)",
+                            "color": "#eef4fa",
+                            "fontSize": "0.72rem",
+                            "fontWeight": "600",
+                            "whiteSpace": "nowrap",
+                        },
+                    ),
+                ], style={"display": "flex", "justifyContent": "space-between", "alignItems": "flex-start", "gap": "12px", "marginBottom": "20px", "flexWrap": "wrap"}),
+                html.Div(
+                    analysis_summary or str(primary_candidate.get("body") or plan_headline),
+                    style={
+                        "color": "#f4f8fc",
+                        "fontSize": "1.02rem",
+                        "fontWeight": "700",
+                        "lineHeight": "1.55",
+                        "marginBottom": "18px",
+                    },
+                ),
+                html.Div([
+                    html.Div([
+                        html.Div([
+                            html.Div([
+                                html.Span(
+                                    _presentation_tier_label(candidate.get("presentation_tier", "")),
+                                    style={
+                                        "padding": "5px 10px",
+                                        "borderRadius": "999px",
+                                        "background": "rgba(255,255,255,0.06)",
+                                        "border": "1px solid rgba(255,255,255,0.10)",
+                                        "color": "#dce5ee",
+                                        "fontSize": "0.72rem",
+                                        "fontWeight": "600",
+                                        "whiteSpace": "nowrap",
+                                    },
+                                ),
+                                html.Span(
+                                    str(candidate.get("type") or "context").replace("_", " ").title(),
+                                    style={"color": "#aebbc8", "fontSize": "0.76rem", "fontWeight": "500"},
+                                ),
+                            ], style={"display": "flex", "alignItems": "center", "gap": "8px", "flexWrap": "wrap"}),
+                            html.Div(
+                                str(candidate.get("title") or "Stage Intelligence"),
+                                style={"color": "#f0f5fa", "fontWeight": "700", "fontSize": "0.92rem", "marginTop": "10px"},
+                            ),
+                        ], style={"marginBottom": "8px"}),
+                        html.Div(
+                            str(candidate.get("body") or ""),
+                            style={"color": "#d8e1eb", "fontSize": "0.9rem", "lineHeight": "1.6"},
+                        ),
+                    ], style={
+                        "padding": "12px 14px",
+                        "borderRadius": "14px",
+                        "background": "rgba(255,255,255,0.04)",
+                        "border": "1px solid rgba(255,255,255,0.08)",
+                    }) for candidate in resolved_candidates[:3]
+                ], style={"display": "grid", "gridTemplateColumns": "repeat(auto-fit, minmax(220px, 1fr))", "gap": "12px"}),
+            ]),
+            accent=HKFATheme.ACCENT_GOLD,
+        )
+    else:
+        game_plan_card = _glass_card(
+            dbc.CardBody([
+                html.Div([
+                    _section_title("bi-robot", "AI Game-Plan", "Structured from recent form, rival profiles and head-to-head data."),
+                    html.Span(
+                        confidence_label,
+                        style={
+                            "padding": "6px 10px",
+                            "borderRadius": "999px",
+                            "background": f"rgba({_hex_to_rgb(confidence_color)}, 0.12)",
+                            "border": f"1px solid rgba({_hex_to_rgb(confidence_color)}, 0.24)",
+                            "color": "#eef4fa",
+                            "fontSize": "0.72rem",
+                            "fontWeight": "600",
+                            "whiteSpace": "nowrap",
+                        },
+                    ),
+                ], style={"display": "flex", "justifyContent": "space-between", "alignItems": "flex-start", "gap": "12px", "marginBottom": "20px", "flexWrap": "wrap"}),
+                html.Div(
+                    plan_headline,
+                    style={
+                        "color": "#f4f8fc",
+                        "fontSize": "1.02rem",
+                        "fontWeight": "700",
+                        "lineHeight": "1.55",
+                        "marginBottom": "18px",
+                    },
+                ),
+                html.Div([
+                    html.Div([
+                        html.Div([
+                            html.I(className=f"bi {icon}", style={"color": accent, "fontSize": "1rem", "lineHeight": "1"}),
+                            html.Span(label, style={"color": "#f0f5fa", "fontWeight": "700", "fontSize": "0.84rem", "letterSpacing": "0.02em"}),
+                        ], style={"display": "flex", "alignItems": "center", "gap": "8px", "marginBottom": "6px"}),
+                        html.Div(text, style={"color": "#d8e1eb", "fontSize": "0.9rem", "lineHeight": "1.6"}),
+                    ], style={
+                        "padding": "12px 14px",
+                        "borderRadius": "14px",
+                        "background": "rgba(255,255,255,0.04)",
+                        "border": "1px solid rgba(255,255,255,0.08)",
+                    }) for icon, accent, label, text in plan_rows
+                ], style={"display": "grid", "gridTemplateColumns": "repeat(auto-fit, minmax(220px, 1fr))", "gap": "12px"}),
+            ]),
+            accent=HKFATheme.ACCENT_GOLD,
+        )
 
     return html.Div([
         html.Div(fixture_card, style={"marginBottom": "36px"}),

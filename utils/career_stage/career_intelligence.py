@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import asdict, is_dataclass
 from typing import Any, Dict, List, Mapping
 
 import pandas as pd
@@ -44,6 +45,8 @@ CAREER_FRESHNESS_POLICY = {
 
 def _safe_scalar(value: Any) -> Any:
     """Convert pandas/numpy scalars into plain JSON-safe values."""
+    if is_dataclass(value):
+        return _safe_scalar(asdict(value))
     if isinstance(value, dict):
         return {
             str(key): _safe_scalar(item)
@@ -123,6 +126,11 @@ def build_career_dashboard_brief_payload(
         development_priorities,
     )
     return {
+        "player_name": str(
+            (data.get("player") or {}).get("player_name")
+            or data.get("player_name")
+            or ""
+        ),
         "career_thesis": deepcopy(_safe_mapping(getattr(brief, "career_thesis", {}) or {})),
         "signals": deepcopy(_safe_records([getattr(item, "__dict__", item) for item in getattr(brief, "signals", [])])),
         "levers": deepcopy(_safe_records([getattr(item, "__dict__", item) for item in getattr(brief, "levers", [])])),
