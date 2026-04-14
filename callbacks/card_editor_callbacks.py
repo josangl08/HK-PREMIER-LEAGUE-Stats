@@ -22,7 +22,12 @@ from sqlalchemy import select
 from models.db_models import Player, UserPlayerLink, MatchHistory
 from utils.db_engine import SessionFactory
 from utils.chart_helpers import HKFATheme
-from utils.runtime_storage import PLAYER_CARDS_RUNTIME_ROOT, build_player_cards_path, resolve_player_cards_path
+from utils.runtime_storage import (
+    PLAYER_CARDS_RUNTIME_ROOT,
+    build_player_cards_path,
+    resolve_player_cards_path,
+)
+from utils.image_processing import get_team_assets
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +37,7 @@ _ALLOWED_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
 # ---------------------------------------------------------------------------
 # Metadata & Quota Helpers
 # ---------------------------------------------------------------------------
+
 
 def _get_card_metadata(player_id: str, milestone_id: str) -> dict:
     """Loads metadata for a specific milestone design session."""
@@ -63,7 +69,11 @@ def _save_card_metadata(player_id: str, milestone_id: str, data: dict):
 
 def _normalize_editorial_decision(editorial_decision: dict | None) -> dict:
     decision = editorial_decision if isinstance(editorial_decision, dict) else {}
-    raw_stats = decision.get("selected_stats") if isinstance(decision.get("selected_stats"), list) else []
+    raw_stats = (
+        decision.get("selected_stats")
+        if isinstance(decision.get("selected_stats"), list)
+        else []
+    )
     selected_stats = []
     for idx, item in enumerate(raw_stats, start=1):
         if not isinstance(item, dict):
@@ -72,12 +82,18 @@ def _normalize_editorial_decision(editorial_decision: dict | None) -> dict:
         value = str(item.get("value") or "").strip()
         if not label or not value:
             continue
-        selected_stats.append({
-            "label": label,
-            "value": value,
-            "priority": int(item.get("priority") or idx),
-        })
-    visual = decision.get("supporting_visual") if isinstance(decision.get("supporting_visual"), dict) else {}
+        selected_stats.append(
+            {
+                "label": label,
+                "value": value,
+                "priority": int(item.get("priority") or idx),
+            }
+        )
+    visual = (
+        decision.get("supporting_visual")
+        if isinstance(decision.get("supporting_visual"), dict)
+        else {}
+    )
     try:
         confidence = float(decision.get("confidence") or 0.0)
     except (TypeError, ValueError):
@@ -99,13 +115,15 @@ def _merge_agent_result_into_state(current_state: dict, result: dict) -> dict:
     new_state = dict(current_state or {})
     design_strategy = result.get("design_strategy") or result.get("ai_proposal") or {}
     editorial_decision = _normalize_editorial_decision(result.get("editorial_decision"))
-    new_state.update({
-        "generated_card_path": result.get("generated_card_path"),
-        "agency_status": result.get("agency_status", "Success"),
-        "ai_proposal": design_strategy,
-        "design_strategy": design_strategy,
-        "editorial_decision": editorial_decision,
-    })
+    new_state.update(
+        {
+            "generated_card_path": result.get("generated_card_path"),
+            "agency_status": result.get("agency_status", "Success"),
+            "ai_proposal": design_strategy,
+            "design_strategy": design_strategy,
+            "editorial_decision": editorial_decision,
+        }
+    )
     return new_state
 
 
@@ -135,9 +153,14 @@ _SECTION_LABEL_STYLE = {
 # Data Retrieval Helpers
 # ---------------------------------------------------------------------------
 
+
 def _get_player_id() -> str:
     try:
-        return str(current_user.id) if current_user and current_user.is_authenticated else "unknown"
+        return (
+            str(current_user.id)
+            if current_user and current_user.is_authenticated
+            else "unknown"
+        )
     except Exception:
         return "unknown"
 
@@ -147,10 +170,15 @@ def _get_player_display_name() -> str:
     user_id = _get_player_id()
     if user_id == "unknown":
         return "PLAYER NAME"
-    
+
     session = SessionFactory()
     try:
-        player = session.query(Player).join(UserPlayerLink).filter(UserPlayerLink.user_id == user_id).first()
+        player = (
+            session.query(Player)
+            .join(UserPlayerLink)
+            .filter(UserPlayerLink.user_id == user_id)
+            .first()
+        )
         if player:
             return player.name
         if hasattr(current_user, "username"):
@@ -167,10 +195,16 @@ def _get_player_profile(player_id: str) -> dict:
     """Returns a basic profile dict for the agent."""
     session = SessionFactory()
     try:
-        player = session.query(Player).join(UserPlayerLink).filter(UserPlayerLink.user_id == player_id).first()
+        player = (
+            session.query(Player)
+            .join(UserPlayerLink)
+            .filter(UserPlayerLink.user_id == player_id)
+            .first()
+        )
         if not player:
             player = session.get(Player, player_id)
-        if not player: return {}
+        if not player:
+            return {}
         return {
             "name": player.name,
             "position": player.position_main,
@@ -238,28 +272,36 @@ def _get_preset_modifiers(preset: str) -> dict:
             "comp_badge": {"x": 50, "y": 32, "scale": 100, "visible": True},
             "player_name": {"x": 50, "y": 70, "scale": 100, "visible": True},
             "subtitle": {"x": 50, "y": 25, "scale": 100, "visible": True},
-        }
+        },
     }
     return presets.get(preset, presets["classic"])
 
 
-def _build_preview_layout(editor_state: dict, photos_store: dict, milestones_data: list = None) -> html.Div:
+def _build_preview_layout(
+    editor_state: dict, photos_store: dict, milestones_data: list = None
+) -> html.Div:
     """Builds a professional Dash preview of the card with template-specific logic."""
     try:
         if not editor_state:
-            return html.Div("No profile loaded.", className="text-muted text-center p-4")
+            return html.Div(
+                "No profile loaded.", className="text-muted text-center p-4"
+            )
 
         proposal = editor_state.get("ai_proposal") or {}
         design = proposal.get("design") or {}
         raw_narrative = proposal.get("narrative") or {}
         narrative = raw_narrative if isinstance(raw_narrative, dict) else {}
-        editorial_decision = _normalize_editorial_decision(editor_state.get("editorial_decision"))
-        
+        editorial_decision = _normalize_editorial_decision(
+            editor_state.get("editorial_decision")
+        )
+
         fmt = editor_state.get("format", "9:16")
         layers = design.get("layers") or {}
-        headline_depth = editor_state.get("headline_depth") or proposal.get("headline_depth", "behind")
+        headline_depth = editor_state.get("headline_depth") or proposal.get(
+            "headline_depth", "behind"
+        )
         glow_color = layers.get("glow_color", "var(--accent-cyan)")
-        
+
         milestone_id = editor_state.get("milestone_id")
         match_payload = {}
         try:
@@ -275,72 +317,143 @@ def _build_preview_layout(editor_state: dict, photos_store: dict, milestones_dat
             try:
                 with open(nanobana_bg, "rb") as f:
                     src = "data:image/png;base64," + base64.b64encode(f.read()).decode()
-                    bg_style = {"backgroundImage": f"url({src})", "backgroundSize": "cover", "backgroundPosition": "center"}
+                    bg_style = {
+                        "backgroundImage": f"url({src})",
+                        "backgroundSize": "cover",
+                        "backgroundPosition": "center",
+                    }
             except Exception:
                 bg_style = {"background": "#0a1a2f"}
         else:
-            # FALLBACK LOGIC: Try to load a template fallback image if it exists, otherwise use refined gradient
-            fallback_path = Path("assets/templates/card_fallback.jpg")
-            if fallback_path.exists():
-                try:
-                    with open(fallback_path, "rb") as f:
-                        src = "data:image/jpeg;base64," + base64.b64encode(f.read()).decode()
-                        bg_style = {"backgroundImage": f"url({src})", "backgroundSize": "cover", "backgroundPosition": "center"}
-                except Exception:
-                    pass
-            
+            # FALLBACK 1: Stadium image from team assets
+            try:
+                home_team = match_payload.get("home_team")
+                from utils.image_processing import get_team_assets
+
+                assets = get_team_assets(home_team)
+                stadium_path = assets.get("stadium")
+                if stadium_path and Path(stadium_path).exists():
+                    with open(stadium_path, "rb") as f:
+                        src = (
+                            "data:image/jpeg;base64,"
+                            + base64.b64encode(f.read()).decode()
+                        )
+                        bg_style = {
+                            "backgroundImage": f"linear-gradient(rgba(0,0,0,0.6), rgba(0,0,0,0.8)), url({src})",
+                            "backgroundSize": "cover",
+                            "backgroundPosition": "center",
+                        }
+            except Exception:
+                pass
+
             if not bg_style:
-                # Use a more high-end gradient as default instead of just dark blue
+                # FALLBACK 2: Refined gradient
                 base_color = layers.get("base_color")
-                c1 = base_color[0] if (isinstance(base_color, list) and base_color) else "#0f172a"
-                c2 = "#05050a"
+                c1 = (
+                    base_color[0]
+                    if (isinstance(base_color, list) and base_color)
+                    else "#1e293b"
+                )
+                c2 = "#0f172a"
+                c3 = "#05050a"
                 bg_style = {
-                    "background": f"radial-gradient(circle at 50% 30%, {c1} 0%, {c2} 100%)",
+                    "background": f"linear-gradient(135deg, {c1} 0%, {c2} 50%, {c3} 100%)",
                     "position": "relative",
-                    "border": "1px solid rgba(255,255,255,0.05)"
+                    "border": "1px solid rgba(255,255,255,0.15)",
                 }
 
-        aspect_style = {"1:1": "100%", "9:16": "177.77%", "4:5": "125%", "16:9": "56.25%"}.get(fmt, "100%")
-        
-        fallback_layouts = {
+        aspect_style = {
+            "1:1": "100%",
+            "9:16": "177.77%",
+            "4:5": "125%",
+            "16:9": "56.25%",
+        }.get(fmt, "100%")
+
+        # Format-specific scaling tokens
+        scale_config = {
             "9:16": {
-                "headline": {"x": 50, "y": 15, "scale": 120},
-                "subtitle": {"x": 50, "y": 22, "scale": 100},
-                "home_logo": {"x": 15, "y": 10, "scale": 80},
-                "away_logo": {"x": 85, "y": 10, "scale": 80},
-                "player_name": {"x": 50, "y": 85, "scale": 110},
-                "match_info": {"x": 50, "y": 72, "scale": 100},
-                "comp_badge": {"x": 88, "y": 92, "scale": 70},
-                "player_photo": {"x": 50, "y": 98, "scale": 120},
+                "headline_fs": "5.5rem",
+                "player_name_fs": "1.4rem",
+                "stats_val_fs": "1.1rem",
+                "stats_lbl_fs": "0.6rem",
+                "logo_w": "85px",
+                "badge_w": "70px",
+                "stats_width": "85%",
+                "photo_max_h": "95%",
+                "subtitle_fs": "1.1rem",
+                "vs_fs": "1.5rem",
             },
             "1:1": {
-                "headline": {"x": 50, "y": 18, "scale": 110},
-                "subtitle": {"x": 50, "y": 26, "scale": 100},
-                "home_logo": {"x": 12, "y": 12, "scale": 80},
-                "away_logo": {"x": 88, "y": 12, "scale": 80},
-                "player_name": {"x": 50, "y": 88, "scale": 100},
-                "match_info": {"x": 50, "y": 76, "scale": 100},
-                "comp_badge": {"x": 90, "y": 90, "scale": 70},
-                "player_photo": {"x": 50, "y": 95, "scale": 110},
+                "headline_fs": "4rem",
+                "player_name_fs": "1.3rem",
+                "stats_val_fs": "1.0rem",
+                "stats_lbl_fs": "0.55rem",
+                "logo_w": "130px",
+                "badge_w": "65px",
+                "stats_width": "92%",
+                "photo_max_h": "85%",
+                "subtitle_fs": "0.95rem",
+                "vs_fs": "1.3rem",
             },
             "4:5": {
-                "headline": {"x": 50, "y": 16, "scale": 115},
-                "subtitle": {"x": 50, "y": 24, "scale": 100},
-                "home_logo": {"x": 15, "y": 12, "scale": 85},
-                "away_logo": {"x": 85, "y": 12, "scale": 85},
-                "player_name": {"x": 50, "y": 88, "scale": 110},
-                "match_info": {"x": 50, "y": 74, "scale": 100},
-                "comp_badge": {"x": 90, "y": 92, "scale": 75},
-                "player_photo": {"x": 50, "y": 98, "scale": 115},
-            }
+                "headline_fs": "5rem",
+                "player_name_fs": "1.4rem",
+                "stats_val_fs": "1.05rem",
+                "stats_lbl_fs": "0.58rem",
+                "logo_w": "115px",
+                "badge_w": "70px",
+                "stats_width": "88%",
+                "photo_max_h": "90%",
+                "subtitle_fs": "1.05rem",
+                "vs_fs": "1.4rem",
+            },
         }
-        
+        cfg = scale_config.get(fmt, scale_config["9:16"])
+
+        fallback_layouts = {
+            "9:16": {
+                "headline": {"x": 50, "y": 15, "scale": 110},
+                "home_logo": {"x": 28, "y": 50, "scale": 100},
+                "away_logo": {"x": 72, "y": 50, "scale": 100},
+                "vs_label": {"x": 50, "y": 50, "scale": 100},
+                "subtitle": {"x": 50, "y": 58, "scale": 100},
+                "player_name": {"x": 50, "y": 82, "scale": 110},
+                "match_info": {"x": 50, "y": 72, "scale": 100},
+                "comp_badge": {"x": 88, "y": 90, "scale": 80},
+                "player_photo": {"x": 50, "y": 98, "scale": 115},
+            },
+            "1:1": {
+                "headline": {"x": 50, "y": 18, "scale": 100},
+                "home_logo": {"x": 33, "y": 50, "scale": 90},
+                "away_logo": {"x": 67, "y": 50, "scale": 90},
+                "vs_label": {"x": 50, "y": 50, "scale": 100},
+                "subtitle": {"x": 50, "y": 58, "scale": 100},
+                "player_name": {"x": 50, "y": 86, "scale": 100},
+                "match_info": {"x": 50, "y": 76, "scale": 100},
+                "comp_badge": {"x": 90, "y": 88, "scale": 75},
+                "player_photo": {"x": 50, "y": 95, "scale": 105},
+            },
+            "4:5": {
+                "headline": {"x": 50, "y": 16, "scale": 105},
+                "home_logo": {"x": 28, "y": 50, "scale": 95},
+                "away_logo": {"x": 72, "y": 50, "scale": 95},
+                "vs_label": {"x": 50, "y": 50, "scale": 100},
+                "subtitle": {"x": 50, "y": 58, "scale": 100},
+                "player_name": {"x": 50, "y": 84, "scale": 105},
+                "match_info": {"x": 50, "y": 74, "scale": 100},
+                "comp_badge": {"x": 90, "y": 90, "scale": 75},
+                "player_photo": {"x": 50, "y": 98, "scale": 110},
+            },
+        }
+
         active_fallback = fallback_layouts.get(fmt, fallback_layouts["1:1"])
-        modifiers = editor_state.get("layout_modifiers") or proposal.get("layout_modifiers", {})
-        
+        modifiers = editor_state.get("layout_modifiers") or proposal.get(
+            "layout_modifiers", {}
+        )
+
         def get_style(key, zIndex="10"):
             m = modifiers.get(key, active_fallback.get(key, {}))
-            if not m.get("visible", True) and key in modifiers: 
+            if not m.get("visible", True) and key in modifiers:
                 return {"display": "none"}
             x = m.get("x", 50)
             y = m.get("y", 50)
@@ -350,8 +463,8 @@ def _build_preview_layout(editor_state: dict, photos_store: dict, milestones_dat
                 "left": f"{x}%",
                 "top": f"{y}%",
                 "transform": f"translate(-50%, -50%) scale({scale})",
-                "zIndex": zIndex, 
-                "transition": "all 0.4s cubic-bezier(0.23, 1, 0.32, 1)"
+                "zIndex": zIndex,
+                "transition": "all 0.4s cubic-bezier(0.23, 1, 0.32, 1)",
             }
 
         photo_src = None
@@ -364,70 +477,307 @@ def _build_preview_layout(editor_state: dict, photos_store: dict, milestones_dat
                         path = entry.get("bg_removed") or entry.get("original")
                         if path and Path(path).exists():
                             with open(path, "rb") as f:
-                                photo_src = "data:image/png;base64," + base64.b64encode(f.read()).decode()
+                                photo_src = (
+                                    "data:image/png;base64,"
+                                    + base64.b64encode(f.read()).decode()
+                                )
                         break
             except Exception:
                 pass
 
-        headline_text = str(editorial_decision.get("headline") or narrative.get("headline") or "MATCHDAY").upper()
+        headline_text = str(
+            editorial_decision.get("headline")
+            or narrative.get("headline")
+            or "MATCHDAY"
+        ).upper()
         subheadline_text = str(editorial_decision.get("subheadline") or "").upper()
         player_name_display = str(_get_player_display_name()).upper()
 
         def img_el(src, key, width="140px", zIndex="10"):
-            if not src: return None
-            return html.Img(src=src, style={**get_style(key, zIndex=zIndex), "width": width, "objectFit": "contain"})
-
-        stats_rows = []
-        selected_stats = editorial_decision.get("selected_stats", [])
-        if not selected_stats:
-            selected_stats = [{"label": "GOALS", "value": "0"}, {"label": "ASSISTS", "value": "0"}, {"label": "RATING", "value": "—"}]
-            
-        for stat in selected_stats[:5]:
-            stats_rows.append(
-                html.Div([
-                    html.Div(stat["value"], style={"fontWeight": "800", "fontSize": "1.05rem", "lineHeight": "1"}),
-                    html.Div(stat["label"], style={"fontSize": "0.58rem", "letterSpacing": "0.08em", "textTransform": "uppercase", "opacity": "0.72"}),
-                ], style={
-                    "background": "rgba(0,0,0,0.55)", "border": f"1px solid {glow_color}55",
-                    "borderRadius": "10px", "padding": "8px 10px", "minWidth": "76px", "textAlign": "center",
-                })
+            if not src:
+                return None
+            return html.Img(
+                src=src,
+                style={
+                    **get_style(key, zIndex=zIndex),
+                    "width": width,
+                    "objectFit": "contain",
+                },
             )
 
-        visual_type = str((editorial_decision.get("supporting_visual") or {}).get("type") or "none")
+        # CONTENT LOGIC: Stats (Post) vs Info (Pre)
+        info_children = []
+        is_post = (
+            match_payload.get("minutes_played") is not None
+            or editor_state.get("card_type") == "post-match"
+        )
+
+        if is_post:
+            selected_stats = editorial_decision.get("selected_stats", [])
+            if not selected_stats and match_payload:
+                rating = match_payload.get("rating")
+                rating_val = (
+                    f"{rating:.1f}"
+                    if isinstance(rating, (int, float))
+                    else str(rating or "—")
+                )
+                selected_stats = [
+                    {
+                        "label": "MINS",
+                        "value": f"{match_payload.get('minutes_played', 0)}'",
+                    },
+                    {"label": "GOALS", "value": str(match_payload.get("goals", 0))},
+                    {"label": "ASSISTS", "value": str(match_payload.get("assists", 0))},
+                    {"label": "RATING", "value": rating_val},
+                ]
+            if not selected_stats:
+                selected_stats = [
+                    {"label": "GOALS", "value": "0"},
+                    {"label": "ASSISTS", "value": "0"},
+                    {"label": "RATING", "value": "—"},
+                ]
+
+            for stat in selected_stats[:5]:
+                info_children.append(
+                    html.Div(
+                        [
+                            html.Div(
+                                stat["value"],
+                                style={
+                                    "fontWeight": "900",
+                                    "fontSize": cfg["stats_val_fs"],
+                                    "lineHeight": "1",
+                                    "fontFamily": "Impact, sans-serif",
+                                    "textShadow": "0 4px 10px rgba(0,0,0,0.8)",
+                                },
+                            ),
+                            html.Div(
+                                stat["label"],
+                                style={
+                                    "fontSize": cfg["stats_lbl_fs"],
+                                    "letterSpacing": "0.12em",
+                                    "textTransform": "uppercase",
+                                    "opacity": "0.9",
+                                    "fontWeight": "700",
+                                    "textShadow": "0 2px 5px rgba(0,0,0,0.8)",
+                                },
+                            ),
+                        ],
+                        style={
+                            "textAlign": "center",
+                            "minWidth": "70px",
+                            "padding": "0 10px",
+                        },
+                    )
+                )
+        else:
+            # Pre-game: Fecha, Hora, Lugar
+            date_info = (
+                match_payload.get("kickoff_display")
+                or match_payload.get("date")
+                or "MATCHDAY"
+            )
+            venue_info = (
+                match_payload.get("venue") or match_payload.get("stadium") or "STADIUM"
+            )
+            info_children = [
+                html.Div(
+                    [
+                        html.Div(
+                            date_info.upper(),
+                            style={
+                                "fontWeight": "900",
+                                "fontSize": cfg["stats_val_fs"],
+                                "letterSpacing": "0.08em",
+                                "fontFamily": "Impact, sans-serif",
+                                "textShadow": "0 5px 15px rgba(0,0,0,0.9)",
+                            },
+                        ),
+                        html.Div(
+                            venue_info.upper(),
+                            style={
+                                "fontSize": cfg["stats_lbl_fs"],
+                                "letterSpacing": "0.15em",
+                                "opacity": "0.9",
+                                "marginTop": "4px",
+                                "fontWeight": "700",
+                                "textShadow": "0 2px 8px rgba(0,0,0,0.9)",
+                            },
+                        ),
+                    ],
+                    style={"textAlign": "center"},
+                )
+            ]
+
+        visual_type = str(
+            (editorial_decision.get("supporting_visual") or {}).get("type") or "none"
+        )
         visual_label = f"{visual_type.upper()} SUPPORT" if visual_type != "none" else ""
 
+        # Score vs Versus logic
+        score_text = match_payload.get("score")
+        vs_or_score = score_text if (is_post and score_text) else "VS"
+
         inner_children = [
-            html.Div(style={"position": "absolute", "inset": "0", "opacity": "0.1", 
-                            "backgroundImage": "url('https://www.transparenttextures.com/patterns/asfalt-dark.png')", "zIndex": "1"}),
-            html.Div(headline_text, style={**get_style("headline", zIndex="5"), "display": "none" if headline_depth == "front" else "block",
-                            "color": "white", "fontWeight": "900", "fontSize": "6rem", "opacity": "0.5" if headline_depth == "sandwich" else "0.9",
-                            "textAlign": "center", "width": "100%", "fontFamily": "Impact, sans-serif", "textShadow": "0 10px 30px rgba(0,0,0,0.5)"}),
-            html.Img(src=photo_src, style={**get_style("player_photo", zIndex="10"), "maxHeight": "95%", "maxWidth": "none", 
-                            "filter": f"drop-shadow(0 0 20px {glow_color}44)"}) if photo_src else None,
-            html.Div(headline_text, style={**get_style("headline", zIndex="15"), "display": "block" if headline_depth in ["front", "sandwich"] else "none",
-                            "color": "transparent" if headline_depth == "sandwich" else "white", "WebkitTextStroke": f"2px white" if headline_depth == "sandwich" else "none",
-                            "fontWeight": "900", "fontSize": "6rem", "textAlign": "center", "width": "100%", "fontFamily": "Impact, sans-serif"}),
-            html.Div(player_name_display, style={**get_style("player_name", zIndex="30"), "color": "white", "fontWeight": "800", "fontSize": "1.5rem", 
-                            "background": "black", "padding": "5px 25px", "borderRadius": "4px", "borderLeft": f"5px solid {glow_color}"}),
-            html.Div(stats_rows, style={**get_style("match_info", zIndex="31"), "display": "flex" if stats_rows else "none",
-                            "gap": "8px", "flexWrap": "wrap", "justifyContent": "center", "width": "84%"}),
-            img_el(match_payload.get("home_logo"), "home_logo", width="120px", zIndex="30"),
-            img_el(match_payload.get("away_logo"), "away_logo", width="120px", zIndex="30"),
-            img_el(match_payload.get("competition_logo"), "comp_badge", width="80px", zIndex="30") if not visual_label else None,
+            html.Div(
+                style={
+                    "position": "absolute",
+                    "inset": "0",
+                    "opacity": "0.1",
+                    "backgroundImage": "url('https://www.transparenttextures.com/patterns/asfalt-dark.png')",
+                    "zIndex": "1",
+                }
+            ),
+            html.Div(
+                headline_text,
+                style={
+                    **get_style("headline", zIndex="5"),
+                    "display": "none" if headline_depth == "front" else "block",
+                    "color": "white",
+                    "fontWeight": "900",
+                    "fontSize": cfg["headline_fs"],
+                    "opacity": "0.5" if headline_depth == "sandwich" else "0.9",
+                    "textAlign": "center",
+                    "width": "100%",
+                    "fontFamily": "Impact, sans-serif",
+                    "textShadow": "0 10px 30px rgba(0,0,0,0.5)",
+                },
+            ),
+            (
+                html.Img(
+                    src=photo_src,
+                    style={
+                        **get_style("player_photo", zIndex="10"),
+                        "maxHeight": cfg["photo_max_h"],
+                        "maxWidth": "none",
+                        "filter": f"drop-shadow(0 0 20px {glow_color}44)",
+                    },
+                )
+                if photo_src
+                else None
+            ),
+            html.Div(
+                headline_text,
+                style={
+                    **get_style("headline", zIndex="15"),
+                    "display": (
+                        "block" if headline_depth in ["front", "sandwich"] else "none"
+                    ),
+                    "color": "transparent" if headline_depth == "sandwich" else "white",
+                    "WebkitTextStroke": (
+                        f"2px white" if headline_depth == "sandwich" else "none"
+                    ),
+                    "fontWeight": "900",
+                    "fontSize": cfg["headline_fs"],
+                    "textAlign": "center",
+                    "width": "100%",
+                    "fontFamily": "Impact, sans-serif",
+                },
+            ),
+            # VS or SCORE Label
+            html.Div(
+                vs_or_score,
+                style={
+                    **get_style("vs_label", zIndex="30"),
+                    "color": "white",
+                    "fontWeight": "900",
+                    "fontSize": cfg["vs_fs"],
+                    "fontFamily": "Impact, sans-serif",
+                    "letterSpacing": "0.05em",
+                    "textShadow": "0 0 15px rgba(0,0,0,0.9)",
+                },
+            ),
+            (
+                html.Div(
+                    subheadline_text,
+                    style={
+                        **get_style("subtitle", zIndex="16"),
+                        "color": "rgba(255,255,255,0.8)",
+                        "fontWeight": "600",
+                        "fontSize": cfg["subtitle_fs"],
+                        "textAlign": "center",
+                        "width": "100%",
+                        "letterSpacing": "0.1em",
+                    },
+                )
+                if subheadline_text
+                else None
+            ),
+            html.Div(
+                player_name_display,
+                style={
+                    **get_style("player_name", zIndex="30"),
+                    "color": "white",
+                    "fontWeight": "900",
+                    "fontSize": cfg["player_name_fs"],
+                    "fontFamily": "Impact, sans-serif",
+                    "letterSpacing": "0.05em",
+                    "textShadow": f"0 0 20px {glow_color}, 0 5px 15px rgba(0,0,0,0.9)",
+                    "textAlign": "center",
+                    "width": "100%",
+                },
+            ),
+            html.Div(
+                info_children,
+                style={
+                    **get_style("match_info", zIndex="31"),
+                    "display": "flex" if info_children else "none",
+                    "gap": "15px",
+                    "flexWrap": "wrap",
+                    "justifyContent": "center",
+                    "width": cfg["stats_width"],
+                },
+            ),
+            img_el(
+                match_payload.get("home_logo"),
+                "home_logo",
+                width=cfg["logo_w"],
+                zIndex="30",
+            ),
+            img_el(
+                match_payload.get("away_logo"),
+                "away_logo",
+                width=cfg["logo_w"],
+                zIndex="30",
+            ),
+            (
+                img_el(
+                    match_payload.get("competition_logo"),
+                    "comp_badge",
+                    width=cfg["badge_w"],
+                    zIndex="30",
+                )
+                if not visual_label
+                else None
+            ),
         ]
 
-        return html.Div(inner_children, style={"position": "absolute", "inset": "0", **bg_style, "overflow": "hidden", "borderRadius": "inherit"})
+        return html.Div(
+            inner_children,
+            style={
+                "position": "absolute",
+                "inset": "0",
+                **bg_style,
+                "overflow": "hidden",
+                "borderRadius": "inherit",
+            },
+        )
     except Exception as e:
         logger.error(f"Error in _build_preview_layout: {e}", exc_info=True)
-        return html.Div([
-            html.P("Error rendering preview.", className="text-danger"),
-            html.Small(str(e), className="text-white-50")
-        ], className="d-flex flex-column align-items-center justify-content-center h-100", style={"background": "#1a0a0a"})
+        return html.Div(
+            [
+                html.P("Error rendering preview.", className="text-danger"),
+                html.Small(str(e), className="text-white-50"),
+            ],
+            className="d-flex flex-column align-items-center justify-content-center h-100",
+            style={"background": "#1a0a0a"},
+        )
 
 
 # ---------------------------------------------------------------------------
 # Callback registration
 # ---------------------------------------------------------------------------
+
 
 def register_card_editor_callbacks(app):
     """Registers all Card Editor Studio callbacks."""
@@ -445,16 +795,23 @@ def register_card_editor_callbacks(app):
         State("card-editor-state", "data"),
         prevent_initial_call=True,
     )
-    def update_card_studio_state(n_repropose, n_generate, format_tab,
-                                 photo_clicks, history_clicks, manual_stats, current_state):
+    def update_card_studio_state(
+        n_repropose,
+        n_generate,
+        format_tab,
+        photo_clicks,
+        history_clicks,
+        manual_stats,
+        current_state,
+    ):
         if not current_state:
             return no_update, no_update
-            
+
         state = dict(current_state)
         triggered_id = ctx.triggered_id
         player_id = _get_player_id()
         milestone_id = state.get("milestone_id")
-        
+
         # Initial call or no interaction
         if not triggered_id:
             # Sync with persistent metadata on load
@@ -464,8 +821,10 @@ def register_card_editor_callbacks(app):
             state["editorial_decision"] = _normalize_editorial_decision(
                 state.get("editorial_decision") or meta.get("editorial_decision") or {}
             )
-            state["design_strategy"] = state.get("design_strategy") or meta.get("last_design_strategy") or {}
-            
+            state["design_strategy"] = (
+                state.get("design_strategy") or meta.get("last_design_strategy") or {}
+            )
+
             if format_tab and state.get("format") != format_tab:
                 state["format"] = format_tab
                 return state, no_update
@@ -477,7 +836,10 @@ def register_card_editor_callbacks(app):
             return state, no_update
 
         # 2. Handle Design History Selection
-        if isinstance(triggered_id, dict) and triggered_id.get("type") == "card-history-thumb":
+        if (
+            isinstance(triggered_id, dict)
+            and triggered_id.get("type") == "card-history-thumb"
+        ):
             selected_path = triggered_id.get("index")
             state["generated_card_path"] = selected_path
             state["generating"] = False
@@ -488,18 +850,24 @@ def register_card_editor_callbacks(app):
             state["format"] = format_tab
             return state, no_update
 
-        if isinstance(triggered_id, dict) and triggered_id.get("type") == "card-photo-thumb":
+        if (
+            isinstance(triggered_id, dict)
+            and triggered_id.get("type") == "card-photo-thumb"
+        ):
             state["selected_photo_idx"] = triggered_id.get("index")
             return state, no_update
 
         # 4. AI Trigger (Design)
         if triggered_id == "card-repropose-btn":
-            if not n_repropose: return no_update, no_update
-            
+            if not n_repropose:
+                return no_update, no_update
+
             # Quota Check (Max 2 designs)
             meta = _get_card_metadata(player_id, milestone_id)
             if len(meta.get("designs", [])) >= 2:
-                state["agency_status"] = "Límite alcanzado: ya tienes 2 diseños para este partido. Descarga uno para continuar."
+                state["agency_status"] = (
+                    "Límite alcanzado: ya tienes 2 diseños para este partido. Descarga uno para continuar."
+                )
                 state["generating"] = False
                 return state, no_update
 
@@ -539,6 +907,7 @@ def register_card_editor_callbacks(app):
 
         def _run_generation():
             from utils.card_design_agent import run_card_design_agent
+
             try:
                 match_payload = _get_match_payload(milestone_id, milestones_data)
                 match_payload["player_id"] = player_id
@@ -559,9 +928,9 @@ def register_card_editor_callbacks(app):
                     player_profile=profile,
                     card_format=state.get("format", "9:16"),
                     forced_stats=forced if forced else None,
-                    on_progress=on_progress
+                    on_progress=on_progress,
                 )
-                
+
                 if result.get("generated_card_path"):
                     _GENERATION_JOBS[player_id]["_result"] = {
                         "generated_card_path": result["generated_card_path"],
@@ -571,7 +940,9 @@ def register_card_editor_callbacks(app):
                         "editorial_decision": result.get("editorial_decision", {}),
                     }
                 else:
-                    _GENERATION_JOBS[player_id]["_error"] = result.get("error", "Error en Nano Banana")
+                    _GENERATION_JOBS[player_id]["_error"] = result.get(
+                        "error", "Error en Nano Banana"
+                    )
             except Exception as exc:
                 logger.error(f"Card generation error: {exc}", exc_info=True)
                 _GENERATION_JOBS[player_id]["_error"] = str(exc)
@@ -579,7 +950,7 @@ def register_card_editor_callbacks(app):
                 _GENERATION_JOBS[player_id]["_generating"] = False
 
         threading.Thread(target=_run_generation, daemon=True).start()
-        return no_update, False, False 
+        return no_update, False, False
 
     # 4. Polling interval
     @app.callback(
@@ -590,14 +961,17 @@ def register_card_editor_callbacks(app):
         prevent_initial_call=True,
     )
     def poll_generation_progress(n_intervals, state):
-        if not state: raise PreventUpdate
+        if not state:
+            raise PreventUpdate
         player_id = _get_player_id()
         milestone_id = state.get("milestone_id")
         job = _GENERATION_JOBS.get(player_id)
-        if not job: return no_update, True
+        if not job:
+            return no_update, True
 
         new_state = dict(state)
-        if job.get("_progress"): new_state["progress"] = job["_progress"]
+        if job.get("_progress"):
+            new_state["progress"] = job["_progress"]
 
         if job.get("_generating"):
             return new_state, False
@@ -607,17 +981,21 @@ def register_card_editor_callbacks(app):
             new_path = result.get("generated_card_path")
             new_state = _merge_agent_result_into_state(new_state, result)
             new_state["generating"] = False
-            
+
             # PERSISTENCE: Add to designs history in metadata.json
             meta = _get_card_metadata(player_id, milestone_id)
             designs = list(meta.get("designs", []))
             if new_path and new_path not in designs:
                 designs.append(new_path)
             meta["designs"] = designs
-            meta["editorial_decision"] = _normalize_editorial_decision(result.get("editorial_decision", {}))
-            meta["last_design_strategy"] = result.get("design_strategy") or result.get("ai_proposal") or {}
+            meta["editorial_decision"] = _normalize_editorial_decision(
+                result.get("editorial_decision", {})
+            )
+            meta["last_design_strategy"] = (
+                result.get("design_strategy") or result.get("ai_proposal") or {}
+            )
             _save_card_metadata(player_id, milestone_id, meta)
-            
+
             new_state["design_history"] = designs
             _GENERATION_JOBS.pop(player_id, None)
             return new_state, True
@@ -644,7 +1022,7 @@ def register_card_editor_callbacks(app):
         Input("card-editor-state", "data"),
         State("player-photos-store", "data"),
         State("milestones-data-store", "data"),
-        prevent_initial_call='initial_duplicate',
+        prevent_initial_call=True,
     )
     def render_editor_updates(editor_state, photos_store, milestones_data):
         if not editor_state or not editor_state.get("editor_active"):
@@ -656,26 +1034,31 @@ def register_card_editor_callbacks(app):
             first_out = ctx.outputs_list[0]
             if isinstance(first_out, list):
                 num_targets = len(first_out)
-        
-        if num_targets == 0: num_targets = 1
-        
+
+        if num_targets == 0:
+            num_targets = 1
+
         album = (photos_store or {}).get("album") or []
         sel_idx = state.get("selected_photo_idx")
         album_grid = _build_album_grid(album, selected_idx=sel_idx)
-        
+
         # Design History Gallery
         history = state.get("design_history", [])
         active_card = state.get("generated_card_path")
         history_gallery = _build_history_gallery(history, active_card)
-        
+
         # Stats Dropdown Logic
         stats_options = []
         stats_value = state.get("selected_stats_manual")
-        stats_disabled = len(history) == 0 # Disabled on first attempt
-        stats_placeholder = "Agente decidiendo..." if stats_disabled else "Selecciona 4-7 estadísticas"
-        
+        stats_disabled = len(history) == 0  # Disabled on first attempt
+        stats_placeholder = (
+            "Agente decidiendo..." if stats_disabled else "Selecciona 4-7 estadísticas"
+        )
+
         if not stats_disabled:
-            stats_options = _get_available_stats_options(milestones_data, state.get("milestone_id"))
+            stats_options = _get_available_stats_options(
+                milestones_data, state.get("milestone_id")
+            )
 
         # Quota Button State:
         # - Disabled if 2 designs exist (quota) OR currently generating
@@ -691,63 +1074,158 @@ def register_card_editor_callbacks(app):
         fmt = state.get("format", "9:16")
         aspect_ratios = {"1:1": "1/1", "9:16": "9/16", "4:5": "4/5", "16:9": "16/9"}
         active_ratio = aspect_ratios.get(fmt, "9/16")
-        
+
         container_style = {
             "background": "transparent",
             "borderRadius": "20px",
             "border": "1px solid rgba(255,255,255,0.1)",
-            "height": "100%", 
-            "aspectRatio": active_ratio, 
-            "width": "auto", 
+            "height": "100%",
+            "aspectRatio": active_ratio,
+            "width": "auto",
             "position": "relative",
             "overflow": "hidden",
             "boxShadow": "0 20px 40px rgba(0,0,0,0.5)",
             "transition": "all 0.4s cubic-bezier(0.23, 1, 0.32, 1)",
-            "margin": "0 auto"
+            "margin": "0 auto",
         }
 
         # Case: Generating
         if state.get("generating"):
             progress = state.get("progress") or {}
-            content = html.Div([
-                html.I(className="bi bi-stars animate-glass-pulse", style={"fontSize": "2.5rem", "color": "#00f2ff", "marginBottom": "16px"}),
-                html.P(progress.get("phase", "Generando..."), className="text-white fw-bold mb-3 small"),
-                dbc.Progress(value=progress.get("pct", 15), max=100, striped=True, animated=True, color="info", style={"height": "6px", "width": "200px"}),
-            ], className="d-flex flex-column align-items-center justify-content-center h-100",
-               style={"position": "absolute", "inset": "0", "background": "rgba(0,0,0,0.8)"})
-            return ([content] * num_targets, [container_style] * num_targets, album_grid, 
-                    history_gallery, design_disabled, stats_options, stats_value, stats_disabled, stats_placeholder)
+            content = html.Div(
+                [
+                    html.I(
+                        className="bi bi-stars animate-glass-pulse",
+                        style={
+                            "fontSize": "2.5rem",
+                            "color": "#00f2ff",
+                            "marginBottom": "16px",
+                        },
+                    ),
+                    html.P(
+                        progress.get("phase", "Generando..."),
+                        className="text-white fw-bold mb-3 small",
+                    ),
+                    dbc.Progress(
+                        value=progress.get("pct", 15),
+                        max=100,
+                        striped=True,
+                        animated=True,
+                        color="info",
+                        style={"height": "6px", "width": "200px"},
+                    ),
+                ],
+                className="d-flex flex-column align-items-center justify-content-center h-100",
+                style={
+                    "position": "absolute",
+                    "inset": "0",
+                    "background": "rgba(0,0,0,0.8)",
+                },
+            )
+            return (
+                [content] * num_targets,
+                [container_style] * num_targets,
+                album_grid,
+                history_gallery,
+                design_disabled,
+                stats_options,
+                stats_value,
+                stats_disabled,
+                stats_placeholder,
+            )
 
         # Case: Final Result (Current selected design from history or new generation)
         card_path = state.get("generated_card_path")
         if card_path and Path(card_path).exists():
             with open(card_path, "rb") as f:
                 src = "data:image/jpeg;base64," + base64.b64encode(f.read()).decode()
-            
+
             # For final result, we just fill the container with the image
-            img = html.Img(src=src, style={"width": "100%", "height": "100%", "objectFit": "cover", "display": "block", "borderRadius": "inherit"})
-            return ([img] * num_targets, [container_style] * num_targets, album_grid, 
-                    history_gallery, design_disabled, stats_options, stats_value, stats_disabled, stats_placeholder)
+            img = html.Img(
+                src=src,
+                style={
+                    "width": "100%",
+                    "height": "100%",
+                    "objectFit": "cover",
+                    "display": "block",
+                    "borderRadius": "inherit",
+                },
+            )
+            return (
+                [img] * num_targets,
+                [container_style] * num_targets,
+                album_grid,
+                history_gallery,
+                design_disabled,
+                stats_options,
+                stats_value,
+                stats_disabled,
+                stats_placeholder,
+            )
 
         # Case: Status/Error message (quota, generation error)
         agency_status = state.get("agency_status", "")
-        if agency_status and not agency_status.startswith("Starting") and "Success" not in agency_status:
-            icon = "bi bi-exclamation-triangle" if "Error" in agency_status else "bi bi-info-circle"
+        if (
+            agency_status
+            and not agency_status.startswith("Starting")
+            and "Success" not in agency_status
+        ):
+            icon = (
+                "bi bi-exclamation-triangle"
+                if "Error" in agency_status
+                else "bi bi-info-circle"
+            )
             color = "#ff4d6d" if "Error" in agency_status else "#00f2ff"
-            status_overlay = html.Div([
-                html.I(className=f"{icon} mb-2", style={"fontSize": "1.8rem", "color": color}),
-                html.P(agency_status, className="text-white small text-center px-3 mb-0", style={"lineHeight": "1.4"}),
-            ], className="d-flex flex-column align-items-center justify-content-center h-100",
-               style={"position": "absolute", "inset": "0", "background": "rgba(5,5,10,0.92)", "borderRadius": "inherit"})
+            status_overlay = html.Div(
+                [
+                    html.I(
+                        className=f"{icon} mb-2",
+                        style={"fontSize": "1.8rem", "color": color},
+                    ),
+                    html.P(
+                        agency_status,
+                        className="text-white small text-center px-3 mb-0",
+                        style={"lineHeight": "1.4"},
+                    ),
+                ],
+                className="d-flex flex-column align-items-center justify-content-center h-100",
+                style={
+                    "position": "absolute",
+                    "inset": "0",
+                    "background": "rgba(5,5,10,0.92)",
+                    "borderRadius": "inherit",
+                },
+            )
             preview_div = _build_preview_layout(state, photos_store, milestones_data)
-            wrapped = html.Div([preview_div, status_overlay], style={"position": "relative", "height": "100%"})
-            return ([wrapped] * num_targets, [container_style] * num_targets, album_grid,
-                    history_gallery, design_disabled, stats_options, stats_value, stats_disabled, stats_placeholder)
+            wrapped = html.Div(
+                [preview_div, status_overlay],
+                style={"position": "relative", "height": "100%"},
+            )
+            return (
+                [wrapped] * num_targets,
+                [container_style] * num_targets,
+                album_grid,
+                history_gallery,
+                design_disabled,
+                stats_options,
+                stats_value,
+                stats_disabled,
+                stats_placeholder,
+            )
 
         # Case: Live Preview (Blueprint / Fallback)
         preview_div = _build_preview_layout(state, photos_store, milestones_data)
-        return ([preview_div] * num_targets, [container_style] * num_targets, album_grid,
-                history_gallery, design_disabled, stats_options, stats_value, stats_disabled, stats_placeholder)
+        return (
+            [preview_div] * num_targets,
+            [container_style] * num_targets,
+            album_grid,
+            history_gallery,
+            design_disabled,
+            stats_options,
+            stats_value,
+            stats_disabled,
+            stats_placeholder,
+        )
 
     # 6. Expand Preview Modal logic
     @app.callback(
@@ -757,24 +1235,33 @@ def register_card_editor_callbacks(app):
         State("card-editor-state", "data"),
         State("player-photos-store", "data"),
         State("milestones-data-store", "data"),
-        prevent_initial_call=True
+        prevent_initial_call=True,
     )
     def expand_editor_preview(n, state, photos, milestones):
-        if not n: return no_update, no_update
-        
+        if not n:
+            return no_update, no_update
+
         # Build the preview for the modal
         card_path = state.get("generated_card_path")
         if card_path and Path(card_path).exists():
             with open(card_path, "rb") as f:
                 src = "data:image/jpeg;base64," + base64.b64encode(f.read()).decode()
             # Very large image for inspection, allowing scroll in modal body
-            content = html.Img(src=src, className="img-fluid rounded", style={"width": "100%", "maxWidth": "1000px", "boxShadow": "0 20px 40px rgba(0,0,0,0.5)"})
+            content = html.Img(
+                src=src,
+                className="img-fluid rounded",
+                style={
+                    "width": "100%",
+                    "maxWidth": "1000px",
+                    "boxShadow": "0 20px 40px rgba(0,0,0,0.5)",
+                },
+            )
         else:
             preview = _build_preview_layout(state, photos, milestones)
             fmt = state.get("format", "9:16")
             ratios = {"1:1": 1.0, "9:16": 0.5625, "4:5": 0.8, "16:9": 1.777}
             ratio = ratios.get(fmt, 0.5625)
-            
+
             # In modal we want it much larger (e.g. 120vh) to allow scrolling and detailed view
             content = html.Div(
                 preview,
@@ -786,8 +1273,8 @@ def register_card_editor_callbacks(app):
                     "overflow": "hidden",
                     "boxShadow": "0 25px 50px rgba(0,0,0,0.5)",
                     "background": "#0a1a2f",
-                    "margin": "0 auto"
-                }
+                    "margin": "0 auto",
+                },
             )
         return True, content
 
@@ -805,26 +1292,44 @@ def register_card_editor_callbacks(app):
         prevent_initial_call=True,
     )
     def upload_player_photo(contents, filename, photos_store, editor_state):
-        if not contents: return no_update, no_update, no_update, no_update, no_update
+        if not contents:
+            return no_update, no_update, no_update, no_update, no_update
         player_id = _get_player_id()
         try:
             header, data = contents.split(",", 1)
             image_bytes = base64.b64decode(data)
             from utils.image_processing import save_player_photo
+
             entry = save_player_photo(player_id, image_bytes, filename or "upload.png")
             store = dict(photos_store or {})
             album = list(store.get("album") or [])
             album.append(entry)
             store["album"] = album
-            
+
             new_state = dict(editor_state or {})
             new_state["selected_photo_idx"] = entry["idx"]
             new_state["generating"] = False
             new_state["generated_card_path"] = None
-            
-            return store, _build_album_grid(album, selected_idx=entry["idx"]), dbc.Alert("Photo uploaded! Click Design to generate your card.", color="success", duration=3000), new_state, no_update
+
+            return (
+                store,
+                _build_album_grid(album, selected_idx=entry["idx"]),
+                dbc.Alert(
+                    "Photo uploaded! Click Design to generate your card.",
+                    color="success",
+                    duration=3000,
+                ),
+                new_state,
+                no_update,
+            )
         except Exception as e:
-            return no_update, no_update, dbc.Alert(f"Error: {e}", color="danger"), no_update, no_update
+            return (
+                no_update,
+                no_update,
+                dbc.Alert(f"Error: {e}", color="danger"),
+                no_update,
+                no_update,
+            )
 
     # 7. Delete Photo
     @app.callback(
@@ -840,18 +1345,24 @@ def register_card_editor_callbacks(app):
         if not any(n for n in (delete_clicks or []) if n):
             raise PreventUpdate
         triggered = ctx.triggered_id
-        if not isinstance(triggered, dict) or triggered.get("type") != "card-photo-delete":
+        if (
+            not isinstance(triggered, dict)
+            or triggered.get("type") != "card-photo-delete"
+        ):
             raise PreventUpdate
         idx_to_delete = triggered["index"]
         player_id = _get_player_id()
         from utils.image_processing import delete_player_photo, get_player_album
+
         delete_player_photo(player_id, idx_to_delete)
         updated_album = get_player_album(player_id)
         store = dict(photos_store or {})
         store["album"] = updated_album
         new_state = dict(editor_state or {})
         if new_state.get("selected_photo_idx") == idx_to_delete:
-            new_state["selected_photo_idx"] = updated_album[0]["idx"] if updated_album else None
+            new_state["selected_photo_idx"] = (
+                updated_album[0]["idx"] if updated_album else None
+            )
         sel_idx = new_state.get("selected_photo_idx")
         return store, _build_album_grid(updated_album, selected_idx=sel_idx), new_state
 
@@ -866,41 +1377,45 @@ def register_card_editor_callbacks(app):
         prevent_initial_call=True,
     )
     def download_generated_card(n_clicks, state, pagination_store):
-        if not n_clicks: return no_update, no_update, no_update
+        if not n_clicks:
+            return no_update, no_update, no_update
         path_str = state.get("generated_card_path")
         if path_str and Path(path_str).exists():
             player_id = _get_player_id()
             milestone_id = state.get("milestone_id", "unknown")
-            
+
             # FINAL STORAGE: Copy from designs/ to root as final_card.jpg
             import shutil
+
             source_path = Path(path_str)
-            target_path = build_player_cards_path(player_id, milestone_id) / "final_card.jpg"
+            target_path = (
+                build_player_cards_path(player_id, milestone_id) / "final_card.jpg"
+            )
             target_path.parent.mkdir(parents=True, exist_ok=True)
-            
+
             try:
                 shutil.copy2(source_path, target_path)
                 final_path_str = str(target_path)
             except Exception as e:
                 logger.error(f"Error copying final card: {e}")
-                final_path_str = path_str # Fallback to original path if copy fails
+                final_path_str = path_str  # Fallback to original path if copy fails
 
             # PERSISTENCE: Mark as final card
             meta = _get_card_metadata(player_id, milestone_id)
             meta["final_card"] = final_path_str
-            
+
             # CACHE CLEANUP: Delete designs/ subfolder
             designs_dir = source_path.parent
             if designs_dir.name == "designs":
                 try:
                     shutil.rmtree(designs_dir)
                     # Clear history list in metadata since files are gone
-                    meta["designs"] = [] 
+                    meta["designs"] = []
                 except Exception as e:
                     logger.error(f"Error clearing designs cache: {e}")
 
             _save_card_metadata(player_id, milestone_id, meta)
-            
+
             # Update local state
             new_state = dict(state)
             new_state["final_card"] = final_path_str
@@ -932,38 +1447,51 @@ def register_card_editor_callbacks(app):
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _build_history_gallery(history: list, active_path: str = None) -> html.Div:
     """Builds a small gallery of previously generated designs."""
-    if not history: return None
-    
+    if not history:
+        return None
+
     thumbs = []
     for path_str in history:
-        if not Path(path_str).exists(): continue
-        
+        if not Path(path_str).exists():
+            continue
+
         with open(path_str, "rb") as f:
             src = "data:image/jpeg;base64," + base64.b64encode(f.read()).decode()
-            
-        is_active = (path_str == active_path)
-        thumbs.append(html.Img(
-            src=src,
-            id={"type": "card-history-thumb", "index": path_str},
-            style={
-                "width": "50px", "height": "80px", "objectFit": "cover",
-                "marginRight": "8px", "borderRadius": "4px", "cursor": "pointer",
-                "border": f"2px solid {'#00f2ff' if is_active else 'rgba(255,255,255,0.1)'}",
-                "opacity": "1" if is_active else "0.6",
-                "transition": "all 0.2s"
-            }
-        ))
-    
-    return html.Div([
-        html.P("DESIGN HISTORY", style=_SECTION_LABEL_STYLE),
-        html.Div(thumbs, className="d-flex overflow-auto pb-2")
-    ], className="mt-3")
+
+        is_active = path_str == active_path
+        thumbs.append(
+            html.Img(
+                src=src,
+                id={"type": "card-history-thumb", "index": path_str},
+                style={
+                    "width": "50px",
+                    "height": "80px",
+                    "objectFit": "cover",
+                    "marginRight": "8px",
+                    "borderRadius": "4px",
+                    "cursor": "pointer",
+                    "border": f"2px solid {'#00f2ff' if is_active else 'rgba(255,255,255,0.1)'}",
+                    "opacity": "1" if is_active else "0.6",
+                    "transition": "all 0.2s",
+                },
+            )
+        )
+
+    return html.Div(
+        [
+            html.P("DESIGN HISTORY", style=_SECTION_LABEL_STYLE),
+            html.Div(thumbs, className="d-flex overflow-auto pb-2"),
+        ],
+        className="mt-3",
+    )
 
 
 def _build_album_grid(album: list, selected_idx=None) -> html.Div:
-    if not album: return html.P("No photos yet.", className="text-muted small")
+    if not album:
+        return html.P("No photos yet.", className="text-muted small")
     thumbs = []
     for entry in album:
         idx = entry.get("idx", 0)
@@ -971,41 +1499,64 @@ def _build_album_grid(album: list, selected_idx=None) -> html.Div:
         if path and Path(path).exists():
             with open(path, "rb") as f:
                 src = "data:image/png;base64," + base64.b64encode(f.read()).decode()
-            is_selected = (selected_idx is not None and idx == selected_idx)
-            thumbs.append(html.Div([
-                html.Img(
-                    src=src,
-                    id={"type": "card-photo-thumb", "index": idx},
+            is_selected = selected_idx is not None and idx == selected_idx
+            thumbs.append(
+                html.Div(
+                    [
+                        html.Img(
+                            src=src,
+                            id={"type": "card-photo-thumb", "index": idx},
+                            style={
+                                "width": "100%",
+                                "height": "100%",
+                                "objectFit": "contain",
+                                "objectPosition": "center",
+                                "cursor": "pointer",
+                                "borderRadius": "4px",
+                                "padding": "4px",
+                            },
+                        ),
+                        html.Button(
+                            "×",
+                            id={"type": "card-photo-delete", "index": idx},
+                            n_clicks=0,
+                            style={
+                                "position": "absolute",
+                                "top": "2px",
+                                "right": "2px",
+                                "width": "16px",
+                                "height": "16px",
+                                "padding": "0",
+                                "lineHeight": "14px",
+                                "fontSize": "12px",
+                                "background": "rgba(237,28,36,0.85)",
+                                "color": "white",
+                                "border": "none",
+                                "borderRadius": "50%",
+                                "cursor": "pointer",
+                                "display": "flex",
+                                "alignItems": "center",
+                                "justifyContent": "center",
+                                "zIndex": "10",
+                            },
+                        ),
+                    ],
                     style={
-                        "width": "100%", "height": "100%",
-                        "objectFit": "contain", "objectPosition": "center",
-                        "cursor": "pointer", "borderRadius": "4px",
-                        "padding": "4px",
-                    }
-                ),
-                html.Button(
-                    "×",
-                    id={"type": "card-photo-delete", "index": idx},
-                    n_clicks=0,
-                    style={
-                        "position": "absolute", "top": "2px", "right": "2px",
-                        "width": "16px", "height": "16px",
-                        "padding": "0", "lineHeight": "14px", "fontSize": "12px",
-                        "background": "rgba(237,28,36,0.85)", "color": "white",
-                        "border": "none", "borderRadius": "50%", "cursor": "pointer",
-                        "display": "flex", "alignItems": "center", "justifyContent": "center",
-                        "zIndex": "10",
-                    }
-                ),
-            ], style={
-                "position": "relative", "width": "64px", "height": "64px",
-                "margin": "3px", "borderRadius": "6px",
-                "background": "rgba(255,255,255,0.05)",
-                "border": f"2px solid {'#00f2ff' if is_selected else 'rgba(255,255,255,0.1)'}",
-                "boxShadow": "0 0 8px rgba(0,242,255,0.6)" if is_selected else "none",
-                "transition": "border 0.15s",
-                "flexShrink": "0",
-            }))
+                        "position": "relative",
+                        "width": "64px",
+                        "height": "64px",
+                        "margin": "3px",
+                        "borderRadius": "6px",
+                        "background": "rgba(255,255,255,0.05)",
+                        "border": f"2px solid {'#00f2ff' if is_selected else 'rgba(255,255,255,0.1)'}",
+                        "boxShadow": (
+                            "0 0 8px rgba(0,242,255,0.6)" if is_selected else "none"
+                        ),
+                        "transition": "border 0.15s",
+                        "flexShrink": "0",
+                    },
+                )
+            )
     return html.Div(thumbs, style={"display": "flex", "flexWrap": "wrap", "gap": "2px"})
 
 
@@ -1016,8 +1567,9 @@ def _build_template_library_ui(player_id: str) -> list:
 def _get_available_stats_options(milestones_data, milestone_id):
     """Extracts all performance stats for the dropdown."""
     payload = _get_match_payload(milestone_id, milestones_data)
-    if not payload: return []
-    
+    if not payload:
+        return []
+
     # 1. Main high-level stats
     stats_dict = {
         "Goals": payload.get("goals", 0),
@@ -1025,7 +1577,7 @@ def _get_available_stats_options(milestones_data, milestone_id):
         "Rating": payload.get("rating", "—"),
         "Minutes": f"{payload.get('minutes_played', 0)}'",
     }
-    
+
     # 2. Add Match Stats sub-dict
     match_stats = payload.get("match_stats") or {}
     for k, v in match_stats.items():
@@ -1033,12 +1585,12 @@ def _get_available_stats_options(milestones_data, milestone_id):
         label = k.replace("_", " ").title()
         if label not in stats_dict:
             stats_dict[label] = v
-            
+
     options = []
     for label, val in stats_dict.items():
-        if val in [0, "0", "0'", "—", None]: continue # Hide empty
-        options.append({
-            "label": f"{label}: {val}",
-            "value": {"label": label, "value": str(val)}
-        })
+        if val in [0, "0", "0'", "—", None]:
+            continue  # Hide empty
+        options.append(
+            {"label": f"{label}: {val}", "value": {"label": label, "value": str(val)}}
+        )
     return options

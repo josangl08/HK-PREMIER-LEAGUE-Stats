@@ -138,6 +138,8 @@ def create_player_portal_layout(user_role: str = "player") -> html.Div:
             # Triggers post-generation gallery refresh or download
             dcc.Store(id="card-generation-trigger"),
             dcc.Store(id="career-dashboard-brief-store", storage_type="memory"),
+            # Keys (player_name + season) for lazy UMAP modal rendering
+            dcc.Store(id="season-umap-context-store", storage_type="memory"),
             # Loading color system: pre-flight store for stage dot type (ui/data/ai)
             dcc.Store(id="stage-loading-type-sync-dummy"),
             # Career Intelligence overlay stores
@@ -148,6 +150,40 @@ def create_player_portal_layout(user_role: str = "player") -> html.Div:
             dcc.Interval(id="sync-poll-interval", interval=8000, n_intervals=0, max_intervals=30, disabled=True),
             # AI Card Studio polling interval moved to card_editor.py for portability
             _build_sync_status_banner(),
+
+            # ── Persistent UMAP modal ────────────────────────────────────────
+            # Lives OUTSIDE stage-content so it is never recreated when stage
+            # callbacks rewrite stage-content.children — the graph figure
+            # is lazily populated by render_season_umap_on_modal_open.
+            dbc.Modal(
+                [
+                    dbc.ModalHeader(
+                        dbc.ModalTitle("Full Profile Map", id="season-umap-modal-title"),
+                        close_button=True,
+                    ),
+                    dbc.ModalBody(
+                        [
+                            html.Div(id="season-umap-modal-explainer", className="mb-3"),
+                            dcc.Graph(
+                                id="season-umap-graph",
+                                figure={},
+                                config={"displayModeBar": False, "responsive": True},
+                            ),
+                        ],
+                        className="career-evidence-modal-body",
+                    ),
+                    dbc.ModalFooter(
+                        dbc.Button("Close", id="season-profile-map-close", color="secondary", n_clicks=0)
+                    ),
+                ],
+                id="season-profile-map-modal",
+                is_open=False,
+                centered=True,
+                size="xl",
+                scrollable=True,
+                className="career-evidence-modal season-umap-modal",
+                fade=False,
+            ),
 
             # Portal Viewport — no horizontal padding on container
             dbc.Container(

@@ -13,8 +13,6 @@ from sqlalchemy import select
 from models.db_models import Player, Team, Season, PlayerSeasonStat, SystemSyncLog
 from utils.db_engine import SessionFactory
 from utils.common import get_current_season
-from utils.cache_manager import AdvancedCacheManager
-
 # Importar agregador y procesador
 from data.processors.hong_kong_processor import HongKongDataProcessor
 from data.aggregators.hong_kong_aggregator import HongKongStatsAggregator
@@ -34,7 +32,6 @@ class HongKongDataManager:
     def __init__(self, auto_load: bool = True):
         self.current_season = get_current_season()
         self.aggregator: Optional[HongKongStatsAggregator] = None
-        self.advanced_cache = AdvancedCacheManager()
         self.processor = HongKongDataProcessor()
         _PROCESSED_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -134,9 +131,6 @@ class HongKongDataManager:
             # 5. Inicializar el agregador
             self.aggregator = HongKongStatsAggregator(df)
             self.current_season = target_season
-
-            # 6. Limpiar cache de la temporada anterior
-            self.advanced_cache.clear()
 
             logger.info(f"✓ Agregador listo y normalizado para {target_season} ({len(df)} jugadores)")
             return True

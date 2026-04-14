@@ -2214,6 +2214,74 @@ def register_player_portal_callbacks(app):
             logger.error(f"update_stage error: {e}")
             return dbc.Alert("Error al renderizar el escenario.", color="danger")
 
+    # ------------------------------------------------------------------ #
+    # timeline-context-store → season-umap-context-store + modal header  #
+    # Populated whenever a career (season) stage becomes active so the    #
+    # lazy UMAP callback knows which profile_context to fetch.            #
+    # ------------------------------------------------------------------ #
+    @app.callback(
+        Output("season-umap-context-store", "data"),
+        Output("season-umap-modal-title", "children"),
+        Output("season-umap-modal-explainer", "children"),
+        Input("timeline-context-store", "data"),
+        prevent_initial_call=True,
+    )
+    def sync_umap_context_store(context):
+        if not context or context.get("type") != "career":
+            return no_update, no_update, no_update
+        payload = context.get("payload", {})
+        player_name = str(payload.get("player_name") or "")
+        season = str(payload.get("season") or "")
+        if not player_name or not season:
+            return no_update, no_update, no_update
+
+        # Try to get archetype labels from the cached profile_context
+        from utils.cache import cache as _cache
+        profile_context = _cache.get(f"season-profile-ctx:v1:{player_name}:{season}") or {}
+        archetype = profile_context.get("archetype_label", "Season Profile")
+        cluster_archetype = profile_context.get("cluster_archetype_label", archetype)
+
+        title = f"Full Profile Map · {archetype}"
+        explainer = html.Div([
+            html.Div([
+                html.Span("Stage role:", className="season-umap-label-pair__key"),
+                html.Span(archetype, className="season-umap-label-pair__value"),
+            ], className="season-umap-label-pair"),
+            html.Div([
+                html.Span("Cluster role:", className="season-umap-label-pair__key"),
+                html.Span(cluster_archetype, className="season-umap-label-pair__value"),
+            ], className="season-umap-label-pair"),
+            html.Div("Nearby points suggest similar statistical profiles for this season.", className="season-umap-explainer"),
+            html.Div("Cluster colors indicate broader role families rather than exact football positions.", className="season-umap-explainer"),
+            html.Div("The highlighted point marks the selected season profile.", className="season-umap-explainer"),
+        ])
+        return {"player_name": player_name, "season": season}, title, explainer
+
+    # ------------------------------------------------------------------ #
+    # season-profile-map-modal open → season-umap-graph figure            #
+    # Runs fit_umap only when the user actually opens the modal.          #
+    # ------------------------------------------------------------------ #
+    @app.callback(
+        Output("season-umap-graph", "figure"),
+        Input("season-profile-map-modal", "is_open"),
+        State("season-umap-context-store", "data"),
+        prevent_initial_call=True,
+    )
+    def render_season_umap_on_modal_open(is_open, keys):
+        if not is_open or not keys:
+            return no_update
+        player_name = keys.get("player_name", "")
+        season = keys.get("season", "")
+        if not player_name or not season:
+            return no_update
+        from utils.cache import cache as _cache
+        from utils.season_stage.season_figures import build_season_umap_evidence_figure
+        profile_context = _cache.get(f"season-profile-ctx:v1:{player_name}:{season}")
+        if profile_context is None:
+            logger.warning(f"render_season_umap_on_modal_open: no cached profile_context for {player_name}/{season}")
+            return no_update
+        return build_season_umap_evidence_figure(profile_context)
+
     @app.callback(
         Output("stage-shell", "className"),
         Input("timeline-context-store", "data"),
@@ -2367,8 +2435,8 @@ def register_player_portal_callbacks(app):
         Output("card-editor-state", "data", allow_duplicate=True),
         Output("gallery-close-btn", "style", allow_duplicate=True),
         Output("player-photos-store", "data", allow_duplicate=True),
-        Output("card-viewer-modal", "is_open"),
-        Output("card-viewer-modal-content", "children"),
+        Output("card-viewer-modal", "is_open", allow_duplicate=True),
+        Output("card-viewer-modal-content", "children", allow_duplicate=True),
         Input({"type": "action-node-pill", "index": ALL}, "n_clicks"),
         State("milestones-data-store", "data"),
         State("timeline-pagination-store", "data"),

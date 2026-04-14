@@ -1,12 +1,10 @@
 # ABOUTME: Helper functions for rendering Stage scenarios, AI widgets, and image gallery (Feature G).
 # ABOUTME: Renders player dashboard (default), post-match (Doble Capa: High-Fidelity/Fallback), pre-match, career-insights, and Action Node gallery views.
 
-import hashlib
 import json
 import logging
 import os
 import threading
-import time
 import copy
 import html as _html_lib
 import re
@@ -51,9 +49,9 @@ _dashboard_data_fetch_lock = threading.Lock()
 logger = logging.getLogger(__name__)
 
 _DASHBOARD_DATA_CACHE_VERSION = "v1"
-_DASHBOARD_DATA_CACHE_TTL_SECONDS = 30
+_DASHBOARD_DATA_CACHE_TTL_SECONDS = 300   # was 30s — season data is static between ETL runs
 _CAREER_EVIDENCE_PREP_CACHE_VERSION = "v1"
-_CAREER_EVIDENCE_PREP_CACHE_TTL_SECONDS = 60
+_CAREER_EVIDENCE_PREP_CACHE_TTL_SECONDS = 300  # was 60s — same rationale as dashboard data
 
 
 def _build_dashboard_data_cache_key(player_name: str, player_id: str) -> str:
@@ -141,38 +139,14 @@ def _prepare_career_evidence_bundle(player_name: str, player_id: str) -> Dict[st
     _set_cached_career_evidence_prep(player_name, player_id, bundle)
     return copy.deepcopy(bundle)
 
-# In-process cache for Gemini career-insight calls.
-# Key: (player_name, primary_metric) — reused across timeline navigation within the same session.
-_career_insight_cache: dict[tuple, Optional[str]] = {}
-
-# Disk cache for career insights — survives server restarts, TTL 2 weeks.
-_INSIGHT_CACHE_DIR = Path("cache/career_insights")
+# Career insights use Flask-Caching (filesystem backend) with a 14-day TTL.
+# This replaces the previous two-layer cache (in-memory dict + manual disk JSON files).
 _INSIGHT_CACHE_TTL = 60 * 60 * 24 * 14  # 14 days in seconds
+_INSIGHT_CACHE_VERSION = "v1"
 
 
-def _insight_cache_path(player_name: str, primary_metric: str) -> Path:
-    slug = hashlib.md5(f"{player_name}:{primary_metric}".encode()).hexdigest()[:12]
-    return _INSIGHT_CACHE_DIR / f"{slug}.json"
-
-
-def _read_insight_disk_cache(path: Path) -> Optional[str]:
-    try:
-        if not path.exists():
-            return None
-        data = json.loads(path.read_text("utf-8"))
-        if time.time() - data.get("ts", 0) > _INSIGHT_CACHE_TTL:
-            return None  # expired
-        return data.get("insight")
-    except Exception:
-        return None
-
-
-def _write_insight_disk_cache(path: Path, insight: str) -> None:
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"ts": time.time(), "insight": insight}), "utf-8")
-    except Exception:
-        pass  # write failure is non-fatal
+def _insight_flask_cache_key(player_name: str, primary_metric: str) -> str:
+    return f"career-insight:{_INSIGHT_CACHE_VERSION}:{player_name}:{primary_metric}"
 
 
 _COUNTRY_TO_ISO2 = {
@@ -1267,8 +1241,9 @@ def _generate_career_insight(
     Falls back to the original template-based approach when the API is
     unavailable or the API key is not configured.
 
-    Results are cached in-process by (player_name, primary_metric) so repeated
-    timeline navigation does not trigger redundant API calls.
+    Results are cached via Flask-Caching (filesystem, 14-day TTL) by
+    (player_name, primary_metric) so repeated timeline navigation does not
+    trigger redundant API calls, and the cache survives server restarts.
 
     Args:
         history_df:       Multi-season history DataFrame.
@@ -1278,18 +1253,12 @@ def _generate_career_insight(
         form_trend:       Output of ``get_form_trend`` (optional).
         transferability:  Output of ``get_transferability_score`` (optional).
     """
-    cache_key = (player_name, primary_metric)
+    flask_key = _insight_flask_cache_key(player_name, primary_metric)
 
-    # 1. In-memory cache (fastest, per-session)
-    if cache_key in _career_insight_cache:
-        return _career_insight_cache[cache_key]
-
-    # 2. Disk cache (survives restarts, 2-week TTL)
-    disk_path = _insight_cache_path(player_name, primary_metric)
-    cached_on_disk = _read_insight_disk_cache(disk_path)
-    if cached_on_disk is not None:
-        _career_insight_cache[cache_key] = cached_on_disk
-        return cached_on_disk
+    # Flask-Caching (filesystem, 14-day TTL) — survives restarts without a separate disk layer.
+    cached = cache.get(flask_key)
+    if cached is not None:
+        return cached
 
     def _template_fallback() -> Optional[str]:
         try:
@@ -1346,17 +1315,15 @@ def _generate_career_insight(
             else:
                 logger.debug("_generate_career_insight: JSON parse failed, using raw text")
                 result = raw_text
-            _career_insight_cache[cache_key] = result
-            _write_insight_disk_cache(disk_path, result)
+            cache.set(flask_key, result, timeout=_INSIGHT_CACHE_TTL)
             return result
 
     except Exception as e:
         logger.debug(f"_generate_career_insight Gemini error: {e}")
 
     fallback = _template_fallback()
-    _career_insight_cache[cache_key] = fallback  # cache fallback too to avoid retry on every open
     if fallback:
-        _write_insight_disk_cache(disk_path, fallback)
+        cache.set(flask_key, fallback, timeout=_INSIGHT_CACHE_TTL)
     return fallback
 
 

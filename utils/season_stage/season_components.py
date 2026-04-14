@@ -17,7 +17,6 @@ from utils.chart_helpers import HKFATheme
 from utils.season_stage.season_figures import (
     build_season_comparison_figure,
     build_season_quadrant_figure,
-    build_season_umap_evidence_figure,
 )
 from utils.stage_helpers import _resolve_team_logo
 
@@ -345,7 +344,8 @@ def render_season_role_profile(profile_context: Dict[str, Any]) -> html.Div:
                 className="season-profile-cta px-0 mt-2",
                 n_clicks=0,
             ),
-            render_season_umap_modal(profile_context),
+            # Modal lives in the persistent portal layout (player_portal.py) to avoid
+            # being recreated on every stage-content rewrite — do NOT add it here.
         ],
     )
 
@@ -473,8 +473,11 @@ def render_season_umap_modal(profile_context: Dict[str, Any]) -> dbc.Modal:
             dbc.ModalBody(
                 [
                     explainer,
+                    # Figure is lazy-loaded by render_season_umap_on_modal_open callback
+                    # (player_portal_callbacks.py) to avoid running UMAP on every stage render.
                     dcc.Graph(
-                        figure=build_season_umap_evidence_figure(profile_context),
+                        id="season-umap-graph",
+                        figure={},
                         config={"displayModeBar": False, "responsive": True},
                     ),
                 ],

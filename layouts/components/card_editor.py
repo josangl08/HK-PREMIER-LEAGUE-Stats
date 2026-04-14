@@ -174,7 +174,7 @@ def _create_card_studio_layout(milestone_id, match_context, album, studio_type="
                                         "position": "relative",
                                         "overflow": "hidden",
                                         "boxShadow": "0 20px 40px rgba(0,0,0,0.5)",
-                                        "background": "transparent",
+                                        "background": "#0a1a2f",
                                         "height": "100%",
                                         "width": "auto",
                                         "aspectRatio": "9/16",

@@ -12,6 +12,10 @@ from plotly.subplots import make_subplots
 from ai_models.clustering import fit_umap
 from utils.ai_helpers import constellation_chart, _build_knn_edges
 from utils.chart_helpers import HKFATheme, glass_figure_layout
+from utils.cache import cache
+
+_FIGURE_CACHE_VERSION = "v1"
+_FIGURE_CACHE_TTL = 3600  # 1 hour — season data doesn't change between ETL runs
 
 
 def build_season_comparison_figure(metrics: list[dict], previous_season_label: str, current_season_label: str) -> go.Figure:
@@ -108,6 +112,14 @@ def build_season_comparison_figure(metrics: list[dict], previous_season_label: s
 
 
 def build_season_quadrant_figure(profile_context: Dict[str, Any]) -> go.Figure:
+    _player = profile_context.get("player_name", "")
+    _season = profile_context.get("season", "")
+    if _player and _season:
+        _ck = f"season-quadrant-fig:{_FIGURE_CACHE_VERSION}:{_player}:{_season}"
+        _cached = cache.get(_ck)
+        if _cached is not None:
+            return go.Figure(_cached)
+
     fig = go.Figure()
     if not profile_context.get("available"):
         fig.add_annotation(text="Profile data is not available for this season.", showarrow=False)
@@ -214,10 +226,21 @@ def build_season_quadrant_figure(profile_context: Dict[str, Any]) -> go.Figure:
         xaxis=dict(range=x_range, zeroline=False),
         yaxis=dict(range=y_range, zeroline=False),
     )
-    return glass_figure_layout(fig)
+    result = glass_figure_layout(fig)
+    if _player and _season:
+        cache.set(_ck, result.to_dict(), timeout=_FIGURE_CACHE_TTL)
+    return result
 
 
 def build_season_umap_evidence_figure(profile_context: Dict[str, Any]) -> go.Figure:
+    _player = profile_context.get("player_name", "")
+    _season = profile_context.get("season", "")
+    if _player and _season:
+        _ck = f"season-umap-fig:{_FIGURE_CACHE_VERSION}:{_player}:{_season}"
+        _cached = cache.get(_ck)
+        if _cached is not None:
+            return go.Figure(_cached)
+
     fig = go.Figure()
     if not profile_context.get("available"):
         fig.add_annotation(text="Full profile map is not available for this season.", showarrow=False)
@@ -257,4 +280,7 @@ def build_season_umap_evidence_figure(profile_context: Dict[str, Any]) -> go.Fig
         knn_edges=knn_edges,
     )
     fig.update_layout(title="Full Profile Map")
-    return glass_figure_layout(fig)
+    result = glass_figure_layout(fig)
+    if _player and _season:
+        cache.set(_ck, result.to_dict(), timeout=_FIGURE_CACHE_TTL)
+    return result

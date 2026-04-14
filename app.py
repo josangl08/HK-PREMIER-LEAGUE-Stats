@@ -20,6 +20,7 @@ os.environ.setdefault("NUMBA_NUM_THREADS", "1")
 import dash
 from dash import html, dcc
 import dash_bootstrap_components as dbc
+from flask import request
 from flask_login import LoginManager, current_user
 import logging
 
@@ -72,6 +73,24 @@ app = dash.Dash(
 app.title = "Hong Kong Premier League Dashboard"
 # app._favicon = "assets/favicon.ico"  # Si tienes un favicon
 server = app.server
+
+# Cache-Control headers for static assets served from /assets/.
+# Assets in Dash don't use hash-based fingerprinting by default, so we use
+# max-age=3600 (1h) without immutable — safe for active development.
+@server.after_request
+def add_cache_control_headers(response):
+    path = getattr(request, 'path', '')
+    if path.startswith('/assets/'):
+        ct = response.headers.get('Content-Type', '')
+        if any(t in ct for t in ('javascript', 'css', 'font', 'image')):
+            # Remove any existing Cache-Control set by Werkzeug/Dash before
+            # setting ours — avoids duplicate/concatenated header values.
+            try:
+                del response.headers['Cache-Control']
+            except KeyError:
+                pass
+            response.headers['Cache-Control'] = 'public, max-age=3600'
+    return response
 
 # Configuración de Flask
 server.config.update(
@@ -153,6 +172,13 @@ if not is_werkzeug_reloader_parent():
             logger.warning("No se pudieron refrescar los datos iniciales. La app podría usar datos desactualizados.")
         else:
             logger.info("✓ Datos iniciales refrescados y listos.")
+            # Pre-warm aggregator caches so the first user request is fast.
+            try:
+                data_manager.get_league_statistics()
+                data_manager.get_available_teams()
+                logger.info("✓ Cache warmup completado (league stats + teams)")
+            except Exception as _we:
+                logger.warning(f"⚠️ Cache warmup parcial: {_we}")
     except Exception as e:
         logger.critical(f"❌ Error fatal al inicializar DataManager: {e}", exc_info=True)
         data_manager = DummyDataManager()

@@ -15,16 +15,32 @@ from utils.season_stage.season_components import (
 )
 from utils.season_stage.season_context import build_season_stage_context
 from utils.season_stage.season_profile import build_season_profile_context
+from utils.cache import cache
+
+_PROFILE_CTX_CACHE_TTL = 3600  # 1 hour — matches figure cache TTL
 
 
 def render_season_stage(payload: Dict) -> html.Div:
     context = build_season_stage_context(payload)
-    context["profile_context"] = build_season_profile_context(
+    player_name = context.get("player_name", "Player")
+    season = context.get("season", "")
+
+    profile_context = build_season_profile_context(
         context.get("season_df"),
-        context.get("player_name", "Player"),
+        player_name,
         context.get("pos_group", "Midfielder"),
-        context.get("season", ""),
+        season,
     )
+    context["profile_context"] = profile_context
+
+    # Cache profile_context so the lazy UMAP modal callback can retrieve it without
+    # re-running build_season_profile_context or touching the database again.
+    if player_name and season:
+        cache.set(
+            f"season-profile-ctx:v1:{player_name}:{season}",
+            profile_context,
+            timeout=_PROFILE_CTX_CACHE_TTL,
+        )
 
     return html.Div(
         [
