@@ -53,6 +53,8 @@ def is_materially_different(
     next_signal_id = str(next_candidate.get("signal_id") or "")
     current_anchor = str(current_candidate.get("anchor") or "")
     next_anchor = str(next_candidate.get("anchor") or "")
+    current_type = str(current_candidate.get("type") or "")
+    next_type = str(next_candidate.get("type") or "")
     priority_delta = abs(
         _safe_float(next_candidate.get("priority")) - _safe_float(current_candidate.get("priority"))
     )
@@ -65,7 +67,58 @@ def is_materially_different(
     ):
         return False
 
+    if (
+        current_anchor
+        and current_anchor == next_anchor
+        and current_type
+        and current_type == next_type
+        and priority_delta < (priority_delta_threshold + 0.04)
+    ):
+        return False
+
     return True
+
+
+def _is_clearly_stronger(
+    current_candidate: Mapping[str, Any] | None,
+    next_candidate: Mapping[str, Any] | None,
+    *,
+    base_priority_margin: float = 0.05,
+    confidence_margin: float = 0.05,
+    repeated_type_priority_margin: float = 0.1,
+) -> bool:
+    """Return whether a replacement is clearly stronger than the currently shown insight."""
+    if not next_candidate:
+        return False
+    if not current_candidate:
+        return True
+
+    current_priority = _safe_float(current_candidate.get("priority"))
+    next_priority = _safe_float(next_candidate.get("priority"))
+    current_confidence = _safe_float(current_candidate.get("confidence"))
+    next_confidence = _safe_float(next_candidate.get("confidence"))
+    priority_gain = next_priority - current_priority
+    confidence_gain = next_confidence - current_confidence
+    current_anchor = str(current_candidate.get("anchor") or "")
+    next_anchor = str(next_candidate.get("anchor") or "")
+    current_type = str(current_candidate.get("type") or "")
+    next_type = str(next_candidate.get("type") or "")
+
+    same_reading_lane = (
+        current_anchor
+        and current_anchor == next_anchor
+        and current_type
+        and current_type == next_type
+    )
+    required_priority_gain = repeated_type_priority_margin if same_reading_lane else base_priority_margin
+
+    if priority_gain >= required_priority_gain:
+        return True
+    if confidence_gain >= confidence_margin and priority_gain >= 0.0:
+        return True
+    if priority_gain >= (required_priority_gain * 0.7) and confidence_gain >= (confidence_margin * 0.7):
+        return True
+    return False
 
 
 def curate_signals(
@@ -109,6 +162,15 @@ def curate_signals(
             session_state.get("current_priority")
             or session_memory.get("current_priority"),
         ),
+        "confidence": _safe_float(
+            session_state.get("current_confidence")
+            or session_memory.get("current_confidence"),
+        ),
+        "type": str(
+            session_state.get("current_type")
+            or session_memory.get("current_type")
+            or ""
+        ),
     }
     if not any(current_candidate.values()):
         current_candidate = {}
@@ -148,6 +210,16 @@ def curate_signals(
                 curated["signal_id"],
                 curated["novelty_key"],
                 current_candidate.get("signal_id") or "",
+            )
+            continue
+
+        if current_candidate and not _is_clearly_stronger(current_candidate, curated):
+            logger.info(
+                "Signal agent held current insight signal_id=%s candidate_signal_id=%s current_type=%s candidate_type=%s",
+                current_candidate.get("signal_id") or "",
+                curated["signal_id"],
+                current_candidate.get("type") or "",
+                curated["type"],
             )
             continue
 

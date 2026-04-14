@@ -216,7 +216,7 @@ if not is_werkzeug_reloader_parent():
         import callbacks.ai_insights_callbacks
         from callbacks.agent_callbacks import register_agent_callbacks
         register_agent_callbacks(app)
-        logger.info("✓ Módulo AI Insights y Agent habilitados")
+        logger.info("✓ Módulo AI Insights y Stage Decision Nodes habilitados")
     except ImportError:
         logger.info("⚠️ Módulo AI Insights no disponible aún (pendiente de Gemini)")
 

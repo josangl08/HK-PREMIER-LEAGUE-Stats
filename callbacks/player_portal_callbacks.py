@@ -14,7 +14,15 @@ from data.aggregators.timeline_aggregator import TimelineAggregator
 from data.aggregators.hong_kong_aggregator import get_h2h_record
 from data.managers.transfermarkt_runtime_manager import TransfermarktRuntimeManager
 from utils.ai_services.evidence_router import normalize_evidence_key, resolve_career_surface_evidence_key
+from utils.intelligence.discovery_overlay_mapper import build_overlay_candidates_from_analysis
+from utils.intelligence.overlay_surface import (
+    PRESENTATION_CONTEXTUAL,
+    PRESENTATION_CRITICAL,
+    PRESENTATION_PROMINENT,
+)
 from utils.stage_helpers import (
+    _build_postmatch_overlay_surface,
+    _build_prematch_overlay_surface,
     render_post_match,
     render_pre_match,
     render_career_insights,
@@ -60,6 +68,207 @@ _MATCH_POSITION_MAP = {
     "CMF": "CM",
     "DMF": "DM",
 }
+
+
+def _career_visible_overlay_queue(resolved_surface: dict | None) -> list[dict]:
+    """Return the visible non-critical career queue ordered primary-first."""
+    surface = resolved_surface or {}
+    primary_candidate = dict(surface.get("primary_candidate") or {})
+    deferred_candidates = [
+        dict(candidate)
+        for candidate in list(surface.get("deferred_candidates") or [])
+    ]
+    visible_tiers = {PRESENTATION_PROMINENT, PRESENTATION_CONTEXTUAL}
+
+    queue: list[dict] = []
+    if str(primary_candidate.get("presentation_tier") or "") in visible_tiers:
+        queue.append(primary_candidate)
+
+    for candidate in deferred_candidates:
+        if str(candidate.get("presentation_tier") or "") in visible_tiers:
+            queue.append(candidate)
+
+    return queue
+
+
+def _dismissed_overlay_keys(session_state: dict | None, *, stage: str) -> set[str]:
+    """Collect dismissed overlay identifiers from persisted inbox history."""
+    dismissed: set[str] = set()
+    for entry in list((session_state or {}).get("history") or []):
+        if str(entry.get("stage") or "").strip().lower() != stage:
+            continue
+        cta_context = dict(entry.get("cta_context") or {})
+        signal_id = str(cta_context.get("signal_id") or "").strip()
+        evidence_key = str(cta_context.get("evidence_key") or "").strip()
+        title = str(entry.get("title") or "").strip()
+        if signal_id:
+            dismissed.add(signal_id)
+        if evidence_key:
+            dismissed.add(evidence_key)
+        if title:
+            dismissed.add(title)
+    return dismissed
+
+
+def _build_active_stage_inbox_entries(context: dict | None) -> list[dict]:
+    """Rebuild shared inbox entries for the currently active stage when possible."""
+    if not context:
+        return []
+
+    stage_type = str(context.get("type") or "").strip().lower()
+    payload = dict(context.get("payload") or {})
+
+    try:
+        if stage_type == "career":
+            # Career owns its active overlay runtime through t1/t2 stores and
+            # dismiss history. Rebuilding it via the season orchestrator was a
+            # legacy mismatch that could surface unrelated season entries.
+            return []
+
+        if stage_type == "pre-match":
+            recent_form = _build_prematch_overlay_surface(
+                payload,
+                {
+                    "confidence": "limited",
+                    "plan_headline": f"Focus the next phase against {payload.get('opponent') or 'the opponent'}.",
+                    "meeting_count": 0,
+                    "recent_form_goals": 0,
+                    "recent_form_assists": 0,
+                },
+            )
+            return list(recent_form.get("inbox_entries") or [])
+
+        if stage_type == "post-match":
+            overlay_surface = _build_postmatch_overlay_surface(payload)
+            return list(overlay_surface.get("inbox_entries") or [])
+    except Exception as exc:
+        logger.debug("active stage inbox rebuild error: %s", exc)
+
+    return []
+
+
+def _dedupe_inbox_entries(entries: list[dict]) -> list[dict]:
+    """Keep inbox ordering stable while deduplicating equivalent entries."""
+    seen: set[tuple[str, str, str, str]] = set()
+    deduped: list[dict] = []
+    for entry in entries:
+        signature = (
+            str(entry.get("stage") or ""),
+            str(entry.get("tier") or ""),
+            str(entry.get("title") or ""),
+            str(entry.get("body") or ""),
+        )
+        if signature in seen:
+            continue
+        seen.add(signature)
+        deduped.append(entry)
+    return deduped
+
+
+def collect_insight_inbox_entries(session_state: dict | None, timeline_context: dict | None) -> list[dict]:
+    """Combine persisted history with active-stage overlay entries for the shared inbox."""
+    history = list((session_state or {}).get("history", []))
+    active_stage_entries = _build_active_stage_inbox_entries(timeline_context)
+    return _dedupe_inbox_entries(history + active_stage_entries)
+
+
+def render_insight_inbox_entries(entries: list[dict]) -> list[Any]:
+    """Render stage-aware shared inbox entries into Offcanvas children."""
+    from datetime import datetime as _dt, timezone as _tz
+
+    if not entries:
+        return [html.P("Sin insights guardados aún.", className="text-muted small p-2")]
+
+    items = []
+    for entry in reversed(entries):
+        tier = entry.get("tier", PRESENTATION_CONTEXTUAL)
+        stage_name = str(entry.get("stage") or "career")
+        title = entry.get("title", "—")
+        body = entry.get("body", "")
+        cta_context = entry.get("cta_context") or {}
+        focus_metric = str(cta_context.get("focus_metric", "") or "")
+        timestamp_raw = entry.get("timestamp", "")
+        tier_class = {
+            PRESENTATION_CRITICAL: "insight-inbox-item--critical",
+            PRESENTATION_PROMINENT: "insight-inbox-item--prominent",
+            PRESENTATION_CONTEXTUAL: "insight-inbox-item--contextual",
+        }.get(tier, "insight-inbox-item--micro")
+        tier_label = str(tier or PRESENTATION_CONTEXTUAL).upper()
+        stage_label = stage_name.upper()
+
+        body_short = (body[:117] + "…") if len(body) > 120 else body
+
+        ts_display = ""
+        if timestamp_raw:
+            try:
+                ts = _dt.fromisoformat(timestamp_raw)
+                now = _dt.now(_tz.utc).replace(tzinfo=None)
+                diff = now - ts
+                minutes = int(diff.total_seconds() // 60)
+                if minutes < 1:
+                    ts_display = "Ahora"
+                elif minutes < 60:
+                    ts_display = f"Hace {minutes} min"
+                else:
+                    ts_display = f"Hace {minutes // 60} h"
+            except Exception:
+                ts_display = ""
+
+        actions: list[Any] = []
+        if stage_name == "career":
+            evidence_key = resolve_career_surface_evidence_key(
+                cta_context.get("evidence_key", "career_arc"),
+                label=title,
+            )
+            actions.append(
+                dbc.Button(
+                    "See evidence",
+                    id={
+                        "type": "career-evidence-trigger",
+                        "key": evidence_key,
+                        "source": "inbox",
+                        "index": f"inbox:{timestamp_raw or title}",
+                        "focus_metric": focus_metric,
+                    },
+                    color="link",
+                    className="insight-inbox-item__cta px-0 mt-2",
+                    n_clicks=0,
+                )
+            )
+        else:
+            actions.append(
+                html.Div(
+                    f"Visible in {stage_name.replace('-', ' ')} stage",
+                    className="insight-inbox-item__cta mt-2",
+                )
+            )
+
+        items.append(
+            html.Div(
+                [
+                    html.Div([
+                        html.Span(tier_label, style={
+                            "fontSize": "0.6rem", "fontWeight": "700",
+                            "textTransform": "uppercase", "letterSpacing": "0.06em",
+                            "opacity": "0.7",
+                        }),
+                        html.Span(" · ", style={"opacity": "0.45", "margin": "0 6px"}),
+                        html.Span(stage_label, style={
+                            "fontSize": "0.6rem", "fontWeight": "700",
+                            "textTransform": "uppercase", "letterSpacing": "0.06em",
+                            "opacity": "0.62",
+                        }),
+                        html.Span(ts_display, className="insight-inbox-timestamp ms-auto"),
+                    ], style={"display": "flex", "alignItems": "center", "marginBottom": "4px"}),
+                    html.Div(title, style={"fontSize": "0.8rem", "fontWeight": "700", "marginBottom": "4px"}),
+                    html.Div(body_short, style={"fontSize": "0.75rem", "opacity": "0.75", "lineHeight": "1.4"}),
+                    *actions,
+                ],
+                className=f"insight-inbox-item {tier_class}",
+            )
+        )
+
+    return items
 
 
 def _get_active_player_identity():
@@ -123,12 +332,17 @@ def _render_default_stage_content(ai_payload=None, pre_fetched_data=None):
 
 def _render_stage_content_for_context(context):
     """Dispatches a context dict to the correct stage renderer."""
+    return _render_stage_content_for_context_with_session(context, None)
+
+
+def _render_stage_content_for_context_with_session(context, session_state):
+    """Dispatches a context dict to the correct stage renderer with overlay-session awareness."""
     if not context:
         return _render_default_stage_content()
 
     user_role = getattr(current_user, "role", "player") if current_user else "player"
     m_type = context.get("type")
-    payload = context.get("payload", {})
+    payload = dict(context.get("payload", {}) or {})
 
     if m_type == "post-match":
         try:
@@ -187,6 +401,7 @@ def _render_stage_content_for_context(context):
         )
 
     if m_type == "career":
+        payload["_dismissed_overlay_keys"] = sorted(_dismissed_overlay_keys(session_state, stage="season"))
         return render_season_stage(payload)
 
     return dbc.Alert(f"Tipo de contexto desconocido: {m_type}", color="warning")
@@ -2089,11 +2304,8 @@ def register_player_portal_callbacks(app):
         if milestones_data is None:
             return no_update
         try:
-            from utils.career_intelligence import (
-                get_career_phase_data,
-                get_career_signals,
-                get_development_priorities,
-            )
+            from utils.career_intelligence import get_career_phase_data, get_career_signals, get_development_priorities
+            from utils.career_stage.career_intelligence import build_career_stage_analysis_payload
             from utils.stage_helpers import _fetch_dashboard_data, _serialize_dashboard_data
 
             player_id, player_name, user_role = _get_active_player_identity()
@@ -2112,6 +2324,7 @@ def register_player_portal_callbacks(app):
                 "career_phase": career_phase_data,
                 "signals": career_signals,
                 "priorities": development_priorities,
+                "career_stage_analysis": build_career_stage_analysis_payload(data),
             }
         except Exception as exc:
             logger.error(f"populate_portal_data_store error: {exc}")
@@ -2211,12 +2424,13 @@ def register_player_portal_callbacks(app):
     @app.callback(
         Output("stage-content", "children"),
         Input("timeline-context-store", "data"),
+        State("insight-session-state", "data"),
         prevent_initial_call=True,
     )
-    def update_stage(context):
+    def update_stage(context, session_state):
         """Dispatches rendering to the appropriate stage helper based on card type."""
         try:
-            return _render_stage_content_for_context(context)
+            return _render_stage_content_for_context_with_session(context, session_state)
         except Exception as e:
             logger.error(f"update_stage error: {e}")
             return dbc.Alert("Error al renderizar el escenario.", color="danger")
@@ -2788,165 +3002,124 @@ def register_career_intelligence_callbacks(app):
     from dash import clientside_callback
     from flask_login import current_user
 
-    from utils.career_intelligence import (
-        get_career_phase_data,
-        get_career_signals,
-        get_development_priorities,
-        classify_overlay_signals,
+    from utils.intelligence.overlay_surface import (
+        PRESENTATION_CONTEXTUAL,
+        PRESENTATION_CRITICAL,
+        build_overlay_inbox_entry,
+        resolve_stage_overlay_surface,
     )
-    from utils.stage_helpers import _fetch_player_season_history, _get_position_group
-    from utils.app_context import get_hong_kong_data_manager
-    from layouts.components.ai_overlay import render_t1_overlay, render_t2_overlay
+    from layouts.components.ai_overlay import render_contextual_overlay, render_critical_overlay
 
-    # ── 7.1 Portal-load callback: evaluate signals, populate stores ─────────
+    # ── Shared career overlay runtime ───────────────────────────────────────
 
     @app.callback(
-        Output("t1-signal-store", "data"),
-        Output("t2-overlay-queue", "data"),
+        Output("stage-overlay-primary-store", "data"),
+        Output("stage-overlay-queue-store", "data"),
         Output("insight-session-state", "data"),
-        Input("milestones-data-store", "data"),
+        Input("timeline-context-store", "data"),
+        Input("portal-data-store", "data"),
         State("insight-session-state", "data"),
         prevent_initial_call=False,
     )
-    def evaluate_career_signals(milestones_data, session_state):
+    def evaluate_career_signals(timeline_context, portal_data, session_state):
         """
-        Runs the career pattern detector on portal load.
-        Skips evaluation if session state is recent AND minutes unchanged.
-        Writes top signal to t1-signal-store and remaining to t2-overlay-queue.
+        Runs the career pattern detector for the default dashboard/career layer,
+        not for season milestones that reuse `type="career"` in the timeline.
         """
         try:
-            player_name = getattr(current_user, "player_name", None)
-            if not player_name:
-                return no_update, no_update, no_update
+            context_type = str((timeline_context or {}).get("type") or "")
+            is_career_dashboard_surface = not timeline_context or context_type in ("ai-insight", "career-overview")
+            if not is_career_dashboard_surface:
+                return None, [], no_update
 
-            history_df = _fetch_player_season_history(player_name)
-            if history_df is None or history_df.empty:
-                return no_update, no_update, no_update
+            if not portal_data:
+                logger.info("Career overlay skipped portal_data_missing")
+                return None, [], no_update
 
-            # Get current minutes for the most recent season
-            minutes_col = next((c for c in history_df.columns if "minute" in c.lower()), None)
-            current_minutes = int(history_df.iloc[-1][minutes_col]) if minutes_col else 0
-            current_season = str(history_df.iloc[-1].get("Season", "")) if "Season" in history_df.columns else ""
+            player_name = str(
+                portal_data.get("player_name")
+                or (timeline_context.get("payload") or {}).get("player_name")
+                or getattr(current_user, "player_name", None)
+                or ""
+            )
+            current_season = str(
+                ((timeline_context or {}).get("payload") or {}).get("season")
+                or (portal_data.get("career_phase") or {}).get("current_season")
+                or ""
+            )
             today = date.today().isoformat()
+            analysis_payload = portal_data.get("career_stage_analysis")
+            raw_candidates = list(
+                (build_overlay_candidates_from_analysis(analysis_payload) or {}).get("candidates") or []
+            )
 
-            # Check if re-evaluation is needed
-            if session_state:
-                stored_minutes = session_state.get("minutes_at_eval", -1)
-                stored_date_str = session_state.get("eval_date", "")
-                try:
-                    stored_date = date.fromisoformat(stored_date_str)
-                    days_elapsed = (date.today() - stored_date).days
-                except (ValueError, TypeError):
-                    days_elapsed = 999
-
-                if stored_minutes == current_minutes and days_elapsed < 7:
-                    return no_update, no_update, no_update
-
-            # Build player dict for career intelligence functions
-            dm = get_hong_kong_data_manager()
-            pos_group = _get_position_group(player_name, dm)
-
-            # Try to get transferability from the DB
-            try:
-                from ai_models.predictor import get_transferability_score
-                career_dict = (
-                    history_df.drop(columns=["Season"], errors="ignore").mean().to_dict()
-                    if not history_df.empty else {}
+            if not raw_candidates:
+                logger.info(
+                    "Career overlay evaluated player=%s season=%s discoveries=0",
+                    player_name,
+                    current_season,
                 )
-                t_result = get_transferability_score(career_dict, pos_group, player_id=None)
-            except Exception:
-                t_result = None
-
-            # Try to get birth_date from DB
-            try:
-                from models.db_models import Player as PlayerModel
-                from utils.db_engine import SessionFactory
-                from sqlalchemy import select as sa_select
-
-                with SessionFactory() as sess:
-                    player_obj = sess.execute(
-                        sa_select(PlayerModel).where(PlayerModel.name == player_name)
-                    ).scalar_one_or_none()
-                player_dict = {
-                    "position_main": pos_group,
-                    "birth_date": player_obj.birth_date if player_obj else None,
-                }
-            except Exception:
-                player_dict = {"position_main": pos_group, "birth_date": None}
-
-            # Run the career intelligence functions
-            career_phase_data = get_career_phase_data(player_dict, history_df)
-            career_phase_data["transferability"] = t_result
-
-            career_signals = get_career_signals(player_dict, history_df, career_phase_data)
-
-            # Build percentiles_data for development priorities (use last season values)
-            percentiles_data = {}
-            if not history_df.empty:
-                last_row = history_df.iloc[-1]
-                numeric_cols = history_df.select_dtypes(include="number").columns
-                for col in numeric_cols:
-                    if col.lower() in ("season", "minutes played", "minutes_played"):
-                        continue
-                    col_vals = history_df[col].dropna()
-                    if col_vals.empty:
-                        continue
-                    val = last_row.get(col)
-                    if val is None:
-                        continue
-                    pct_rank = int((col_vals < float(val)).sum() / len(col_vals) * 100)
-                    percentiles_data[col] = pct_rank
-
-            dev_priorities = get_development_priorities(percentiles_data)
-            signals = classify_overlay_signals(career_phase_data, career_signals, dev_priorities)
-
-            if not signals:
                 return None, [], {
-                    "minutes_at_eval": current_minutes,
+                    **dict(session_state or {}),
                     "season_at_eval": current_season,
                     "eval_date": today,
                 }
 
-            t1_signal = None
-            t2_queue = []
-            for sig in signals:
-                if sig.tier == 1 and t1_signal is None:
-                    t1_signal = {
-                        "tier": sig.tier,
-                        "title": sig.title,
-                        "body": sig.body,
-                        "cta_label": sig.cta_label,
-                        "urgency": sig.urgency,
-                        "evidence_key": sig.evidence_key,
-                    }
-                else:
-                    t2_queue.append({
-                        "tier": sig.tier,
-                        "title": sig.title,
-                        "body": sig.body,
-                        "cta_label": sig.cta_label,
-                        "urgency": sig.urgency,
-                        "evidence_key": sig.evidence_key,
-                    })
+            resolved_surface = resolve_stage_overlay_surface(
+                "career",
+                {"candidates": raw_candidates},
+            )
+            dismissed_keys = _dismissed_overlay_keys(session_state, stage="career")
+            if dismissed_keys:
+                logger.info(
+                    "Career overlay suppressing dismissed entries count=%s",
+                    len(dismissed_keys),
+                )
+                filtered_candidates = [
+                    candidate
+                    for candidate in list(resolved_surface.get("candidates") or [])
+                    if str(candidate.get("signal_id") or "") not in dismissed_keys
+                    and str(candidate.get("evidence_key") or "") not in dismissed_keys
+                    and str(candidate.get("title") or "") not in dismissed_keys
+                ]
+                resolved_surface = resolve_stage_overlay_surface(
+                    "career",
+                    {"candidates": [candidate.get("raw_candidate") or candidate for candidate in filtered_candidates]},
+                )
+            primary_overlay = None
+            contextual_queue = []
+            primary_candidate = dict(resolved_surface.get("primary_candidate") or {})
+            if primary_candidate and primary_candidate.get("presentation_tier") == PRESENTATION_CRITICAL:
+                primary_overlay = primary_candidate
+            contextual_queue = _career_visible_overlay_queue(resolved_surface)
+
+            logger.info(
+                "Career overlay evaluated player=%s season=%s candidates=%s primary_tier=%s queue=%s",
+                player_name,
+                current_season,
+                len(raw_candidates),
+                str(primary_candidate.get("presentation_tier") or "none"),
+                len(contextual_queue),
+            )
 
             new_session_state = {
-                "minutes_at_eval": current_minutes,
+                **dict(session_state or {}),
                 "season_at_eval": current_season,
                 "eval_date": today,
                 "t1_dismissed_this_session": False,
             }
-            return t1_signal, t2_queue, new_session_state
+            return primary_overlay, contextual_queue, new_session_state
 
         except Exception as exc:
-            logger.debug(f"evaluate_career_signals error: {exc}")
-            return no_update, no_update, no_update
+            logger.exception("Career overlay evaluation error: %s", exc)
+            return None, [], no_update
 
     @app.callback(
         Output("portal-overlay-store", "data"),
         Input("insight-inbox-btn", "n_clicks"),
         Input({"type": "career-evidence-trigger", "key": ALL, "source": ALL, "index": ALL, "focus_metric": ALL}, "n_clicks"),
-        Input({"type": "ai-overlay-t1-btn", "action": ALL, "evidence_key": ALL}, "n_clicks"),
-        Input({"type": "ai-overlay-t2-cta", "index": ALL, "evidence_key": ALL}, "n_clicks"),
+        Input({"type": "stage-overlay-critical-btn", "action": ALL, "evidence_key": ALL}, "n_clicks"),
+        Input({"type": "stage-overlay-contextual-cta", "index": ALL, "evidence_key": ALL}, "n_clicks"),
         Input("career-evidence-modal-close", "n_clicks"),
         State("portal-overlay-store", "data"),
         prevent_initial_call=True,
@@ -2979,20 +3152,20 @@ def register_career_intelligence_callbacks(app):
                 "source": triggered_id.get("source", "dashboard"),
                 "nonce": ctx.triggered[0]["value"],
             }
-        if triggered_id.get("type") == "ai-overlay-t1-btn" and triggered_id.get("action") == "cta":
+        if triggered_id.get("type") == "stage-overlay-critical-btn" and triggered_id.get("action") == "cta":
             return {
                 "type": "evidence",
                 "evidence_key": resolve_career_surface_evidence_key(triggered_id.get("evidence_key", "career_arc")),
                 "focus_metric": "",
-                "source": "overlay-t1",
+                "source": "overlay-critical",
                 "nonce": ctx.triggered[0]["value"],
             }
-        if triggered_id.get("type") == "ai-overlay-t2-cta":
+        if triggered_id.get("type") == "stage-overlay-contextual-cta":
             return {
                 "type": "evidence",
                 "evidence_key": resolve_career_surface_evidence_key(triggered_id.get("evidence_key", "career_arc")),
                 "focus_metric": "",
-                "source": "overlay-t2",
+                "source": "overlay-contextual",
                 "nonce": ctx.triggered[0]["value"],
             }
         return no_update
@@ -3072,84 +3245,77 @@ def register_career_intelligence_callbacks(app):
     # ── 7.2 T1 render/dismiss callback ──────────────────────────────────────
 
     @app.callback(
-        Output("ai-overlay-t1-container", "children"),
-        Output("ai-overlay-t1-container", "style"),
+        Output("stage-overlay-critical-container", "children"),
+        Output("stage-overlay-critical-container", "style"),
         Output("insight-session-state", "data", allow_duplicate=True),
-        Input("t1-signal-store", "data"),
-        Input({"type": "ai-overlay-t1-btn", "action": ALL, "evidence_key": ALL}, "n_clicks"),
+        Input("stage-overlay-primary-store", "data"),
+        Input({"type": "stage-overlay-critical-btn", "action": ALL, "evidence_key": ALL}, "n_clicks"),
         State("insight-session-state", "data"),
         prevent_initial_call=True,
     )
-    def render_t1_overlay_callback(t1_data, btn_clicks, session_state):
+    def render_critical_overlay_callback(primary_data, btn_clicks, session_state):
         """
         Renders the T1 overlay when the store is populated.
         Dismiss/CTA click → hide overlay + update session state.
         CTA navigation is handled by a clientside callback.
         """
-        from utils.career_intelligence import OverlaySignal
         triggered_id = ctx.triggered_id
 
-        # Dismiss or CTA click → hide (any ai-overlay-t1-btn with any n_clicks > 0)
-        if isinstance(triggered_id, dict) and triggered_id.get("type") == "ai-overlay-t1-btn":
+        # Dismiss or CTA click → hide the visible critical surface.
+        if isinstance(triggered_id, dict) and triggered_id.get("type") == "stage-overlay-critical-btn":
             updated_state = dict(session_state or {})
             updated_state["t1_dismissed_this_session"] = True
             # Append to history so Insight Inbox can display it
-            if t1_data:
-                import json as _json
+            if primary_data:
                 from datetime import datetime as _dt
                 history = list(updated_state.get("history", []))
-                history.append({
-                    "title": t1_data.get("title", ""),
-                    "body": t1_data.get("body", ""),
-                    "tier": t1_data.get("tier", 1),
-                    "evidence_key": resolve_career_surface_evidence_key(
-                        t1_data.get("evidence_key", "career_arc"),
-                        label=t1_data.get("title", ""),
-                    ),
-                    "focus_metric": "",
-                    "timestamp": _dt.utcnow().isoformat(),
-                })
+                entry = build_overlay_inbox_entry(primary_data, surfaced=True)
+                entry["timestamp"] = _dt.utcnow().isoformat()
+                entry["cta_context"]["evidence_key"] = resolve_career_surface_evidence_key(
+                    primary_data.get("evidence_key", "career_arc"),
+                    label=primary_data.get("title", ""),
+                )
+                history.append(entry)
                 updated_state["history"] = history
+            logger.info(
+                "Career critical overlay dismissed signal_id=%s",
+                str((primary_data or {}).get("signal_id") or ""),
+            )
             return None, {"display": "none"}, updated_state
 
-        # t1-signal-store populated → show
-        if not t1_data:
+        if not primary_data:
+            logger.info("Career critical overlay hidden no_signal")
             return None, {"display": "none"}, no_update
 
-        signal = OverlaySignal(
-            tier=t1_data.get("tier", 1),
-            title=t1_data.get("title", ""),
-            body=t1_data.get("body", ""),
-            cta_label=t1_data.get("cta_label", "Ver análisis →"),
-            urgency=t1_data.get("urgency", 0.8),
-            evidence_key=t1_data.get("evidence_key", "career_arc"),
+        logger.info(
+            "Career critical overlay rendered signal_id=%s",
+            str((primary_data or {}).get("signal_id") or ""),
         )
-        return render_t1_overlay(signal), {"display": "block"}, no_update
+        return render_critical_overlay(primary_data), {"display": "block"}, no_update
 
     # ── 7.3 T2 queue management callback ────────────────────────────────────
 
     @app.callback(
-        Output("ai-overlay-t2-container", "children"),
-        Output("t2-overlay-queue", "data", allow_duplicate=True),
+        Output("stage-overlay-contextual-container", "children"),
+        Output("stage-overlay-queue-store", "data", allow_duplicate=True),
         Output("insight-session-state", "data", allow_duplicate=True),
-        Input("t2-overlay-queue", "data"),
-        Input({"type": "ai-overlay-t2-dismiss", "index": ALL}, "n_clicks"),
+        Input("stage-overlay-queue-store", "data"),
+        Input({"type": "stage-overlay-contextual-dismiss", "index": ALL}, "n_clicks"),
         State("insight-session-state", "data"),
         prevent_initial_call=True,
     )
-    def render_t2_overlays(queue, dismiss_clicks_list, session_state):
+    def render_contextual_overlays(queue, dismiss_clicks_list, session_state):
         """
-        Renders up to 2 T2 overlay cards from the queue with 400ms CSS stagger.
-        Dismiss [×] click removes that card, appends it to history, and surfaces next queued signal.
+        Renders the next non-critical overlay card from the queue.
+        Dismiss [×] click removes that card, appends it to history, and surfaces the next queued signal.
         """
-        from utils.career_intelligence import OverlaySignal
         triggered_id = ctx.triggered_id
 
         queue = list(queue or [])
         updated_session = no_update
 
         # Handle dismiss click
-        if isinstance(triggered_id, dict) and triggered_id.get("type") == "ai-overlay-t2-dismiss":
+        if isinstance(triggered_id, dict) and triggered_id.get("type") == "stage-overlay-contextual-dismiss":
             idx = triggered_id.get("index", 0)
             if idx < len(queue):
                 dismissed = queue.pop(idx)
@@ -3157,62 +3323,59 @@ def register_career_intelligence_callbacks(app):
                 from datetime import datetime as _dt
                 updated_session = dict(session_state or {})
                 history = list(updated_session.get("history", []))
-                history.append({
-                    "title": dismissed.get("title", ""),
-                    "body": dismissed.get("body", ""),
-                    "tier": dismissed.get("tier", 2),
-                    "evidence_key": resolve_career_surface_evidence_key(
-                        dismissed.get("evidence_key", "career_arc"),
-                        label=dismissed.get("title", ""),
-                    ),
-                    "focus_metric": "",
-                    "timestamp": _dt.utcnow().isoformat(),
-                })
+                entry = build_overlay_inbox_entry(dismissed, surfaced=True)
+                entry["timestamp"] = _dt.utcnow().isoformat()
+                entry["cta_context"]["evidence_key"] = resolve_career_surface_evidence_key(
+                    dismissed.get("evidence_key", "career_arc"),
+                    label=dismissed.get("title", ""),
+                )
+                history.append(entry)
                 updated_session["history"] = history
+                logger.info(
+                    "Career non_critical overlay dismissed signal_id=%s remaining=%s",
+                    str(dismissed.get("signal_id") or ""),
+                    len(queue),
+                )
 
         if not queue:
+            logger.info("Career non_critical overlay hidden queue_empty")
             return [], queue, updated_session
 
-        # Render up to 2 visible cards
-        visible = queue[:2]
+        # Render only the next queued card so the stage shows one visible
+        # non-critical overlay at a time, aligned with the shared dismiss flow.
+        visible = queue[:1]
         cards = []
         for i, sig_data in enumerate(visible):
-            signal = OverlaySignal(
-                tier=sig_data.get("tier", 2),
-                title=sig_data.get("title", ""),
-                body=sig_data.get("body", ""),
-                cta_label=sig_data.get("cta_label", "Ver análisis →"),
-                urgency=sig_data.get("urgency", 0.5),
-                evidence_key=sig_data.get("evidence_key", "career_arc"),
-            )
-            cards.append(render_t2_overlay(signal, signal_index=i))
+            cards.append(render_contextual_overlay(sig_data, signal_index=i))
+
+        logger.info(
+            "Career non_critical overlay rendered signal_id=%s visible=%s queued=%s",
+            str((visible[0] or {}).get("signal_id") or ""),
+            len(visible),
+            len(queue),
+        )
 
         return cards, queue, updated_session
 
     # ── 7.4 T2 career-context gate ──────────────────────────────────────────
 
     @app.callback(
-        Output("ai-overlay-t2-container", "style"),
+        Output("stage-overlay-contextual-container", "style"),
         Input("timeline-context-store", "data"),
+        Input("stage-overlay-primary-store", "data"),
+        Input("insight-session-state", "data"),
         prevent_initial_call=True,
     )
-    def gate_t2_by_context(context):
-        """Hides T2 cards when not in a career context; shows them in career context."""
-        if not context:
-            return {"display": "none"}
-        context_type = context.get("type", "")
-        if context_type in ("career", "ai-insight", "career-overview"):
+    def gate_contextual_overlay_by_context(context, primary_data, session_state):
+        """Hide contextual overlays outside the dashboard/career layer and while a critical alert is active."""
+        context_type = str((context or {}).get("type") or "")
+        is_career_dashboard_surface = not context or context_type in ("ai-insight", "career-overview")
+        if is_career_dashboard_surface:
+            dismissed = bool((session_state or {}).get("t1_dismissed_this_session"))
+            if primary_data and not dismissed:
+                return {"display": "none"}
             return {"display": "block"}
         return {"display": "none"}
-
-    # ── 7.5 IntersectionObserver clientside callback ─────────────────────────
-
-    app.clientside_callback(
-        ClientsideFunction(namespace="playerPortal", function_name="observeCareerArc"),
-        Output("career-arc-observer-dummy", "data"),
-        Input("stage-content", "children"),
-        prevent_initial_call=True,
-    )
 
     # ── 13.3 Insight Inbox: Offcanvas toggle + badge count ──────────────────
 
@@ -3220,13 +3383,13 @@ def register_career_intelligence_callbacks(app):
         Output("insight-inbox-count", "children"),
         Output("insight-inbox-count", "style"),
         Input("insight-session-state", "data"),
-        State("insight-session-state", "data"),
+        Input("timeline-context-store", "data"),
         prevent_initial_call=True,
     )
-    def update_insight_inbox_badge(_, session_state):
+    def update_insight_inbox_badge(session_state, timeline_context):
         """Updates the inbox badge count independently from overlay open state."""
-        history = (session_state or {}).get("history", [])
-        count = len(history)
+        entries = collect_insight_inbox_entries(session_state, timeline_context)
+        count = len(entries)
         badge_text = str(count) if count > 0 else ""
         badge_style = {} if count > 0 else {"display": "none"}
         return badge_text, badge_style
@@ -3236,76 +3399,89 @@ def register_career_intelligence_callbacks(app):
     @app.callback(
         Output("insight-inbox-body", "children"),
         Input("insight-session-state", "data"),
+        Input("timeline-context-store", "data"),
     )
-    def render_insight_inbox_body(session_state):
+    def render_insight_inbox_body(session_state, timeline_context):
         """Renders dismissed insight history as inbox items in the Offcanvas."""
-        from datetime import datetime as _dt, timezone as _tz
-        history = list((session_state or {}).get("history", []))
+        entries = collect_insight_inbox_entries(session_state, timeline_context)
+        return render_insight_inbox_entries(entries)
 
-        if not history:
-            return html.P("Sin insights guardados aún.", className="text-muted small p-2")
+    @app.callback(
+        Output("insight-session-state", "data", allow_duplicate=True),
+        Input(
+            {
+                "type": "stage-overlay-prominent-dismiss",
+                "signal_id": ALL,
+                "evidence_key": ALL,
+                "title": ALL,
+                "body": ALL,
+                "anchor": ALL,
+                "tier": ALL,
+            },
+            "n_clicks",
+        ),
+        State("insight-session-state", "data"),
+        prevent_initial_call=True,
+    )
+    def dismiss_season_prominent_overlay(_, session_state):
+        """Dismiss the visible season prominent surface and archive it to inbox history."""
+        trigger_value = ctx.triggered[0].get("value", 0) if ctx.triggered else 0
+        triggered_id = ctx.triggered_id
+        if not trigger_value or not isinstance(triggered_id, dict):
+            return no_update
 
-        items = []
-        for entry in reversed(history):
-            tier = entry.get("tier", 2)
-            title = entry.get("title", "—")
-            body = entry.get("body", "")
-            evidence_key = resolve_career_surface_evidence_key(
-                entry.get("evidence_key", "career_arc"),
-                label=title,
-            )
-            focus_metric = str(entry.get("focus_metric", "") or "")
-            timestamp_raw = entry.get("timestamp", "")
-            tier_class = "insight-inbox-item--t1" if tier == 1 else "insight-inbox-item--t2"
-            tier_label = "CRITICAL" if tier == 1 else "TREND"
+        updated_state = dict(session_state or {})
+        history = list(updated_state.get("history", []))
+        signal_id = str(triggered_id.get("signal_id") or "").strip()
+        evidence_key = str(triggered_id.get("evidence_key") or "").strip()
+        title = str(triggered_id.get("title") or "").strip()
 
-            # Truncate body to 120 chars
-            body_short = (body[:117] + "…") if len(body) > 120 else body
+        duplicate = next(
+            (
+                entry
+                for entry in history
+                if str(entry.get("stage") or "").strip().lower() == "season"
+                and (
+                    str((entry.get("cta_context") or {}).get("signal_id") or "").strip() == signal_id
+                    or str((entry.get("cta_context") or {}).get("evidence_key") or "").strip() == evidence_key
+                    or str(entry.get("title") or "").strip() == title
+                )
+            ),
+            None,
+        )
+        if duplicate is None:
+            from datetime import datetime as _dt
 
-            # Relative timestamp
-            ts_display = ""
-            if timestamp_raw:
-                try:
-                    ts = _dt.fromisoformat(timestamp_raw)
-                    now = _dt.utcnow()
-                    diff = now - ts
-                    minutes = int(diff.total_seconds() // 60)
-                    if minutes < 1:
-                        ts_display = "Ahora"
-                    elif minutes < 60:
-                        ts_display = f"Hace {minutes} min"
-                    else:
-                        ts_display = f"Hace {minutes // 60} h"
-                except Exception:
-                    ts_display = ""
-
-            items.append(html.Div([
-                html.Div([
-                    html.Span(tier_label, style={
-                        "fontSize": "0.6rem", "fontWeight": "700",
-                        "textTransform": "uppercase", "letterSpacing": "0.06em",
-                        "opacity": "0.7",
-                    }),
-                    html.Span(ts_display, className="insight-inbox-timestamp ms-auto"),
-                ], style={"display": "flex", "alignItems": "center", "marginBottom": "4px"}),
-                html.Div(title, style={"fontSize": "0.8rem", "fontWeight": "700", "marginBottom": "4px"}),
-                html.Div(body_short, style={"fontSize": "0.75rem", "opacity": "0.75", "lineHeight": "1.4"}),
-                dbc.Button(
-                    "See evidence",
-                    id={
-                        "type": "career-evidence-trigger",
-                        "key": evidence_key,
-                        "source": "inbox",
-                        "index": f"inbox:{timestamp_raw or title}",
-                        "focus_metric": focus_metric,
+            history.append(
+                {
+                    "stage": "season",
+                    "tier": str(triggered_id.get("tier") or "prominent"),
+                    "title": title,
+                    "body": str(triggered_id.get("body") or ""),
+                    "timestamp": _dt.utcnow().isoformat(),
+                    "anchor": str(triggered_id.get("anchor") or ""),
+                    "cta_context": {
+                        "signal_id": signal_id,
+                        "evidence_key": evidence_key,
                     },
-                    color="link",
-                    className="insight-inbox-item__cta px-0 mt-2",
-                    n_clicks=0,
-                ),
-            ], className=f"insight-inbox-item {tier_class}"))
+                    "surfaced": True,
+                }
+            )
+        updated_state["history"] = history
+        logger.info("Season prominent overlay dismissed signal_id=%s", signal_id)
+        return updated_state
 
-        return items
+    @app.callback(
+        Output("stage-content", "children", allow_duplicate=True),
+        Input("insight-session-state", "data"),
+        State("timeline-context-store", "data"),
+        prevent_initial_call=True,
+    )
+    def refresh_stage_after_overlay_session_change(session_state, timeline_context):
+        """Refresh the active season stage when overlay dismiss history changes."""
+        if not timeline_context or str(timeline_context.get("type") or "") != "career":
+            return no_update
+        return _render_stage_content_for_context_with_session(timeline_context, session_state)
 
     # ── Loading Color System: pre-flight clientside callbacks ────────────────
     # These fire before the server callbacks (no network round-trip) so the

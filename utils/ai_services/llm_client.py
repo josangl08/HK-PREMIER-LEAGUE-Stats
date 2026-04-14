@@ -40,6 +40,13 @@ def get_dashboard_brief_model_candidates() -> list[str]:
     ]
 
 
+def get_stage_agent_model_candidates() -> list[str]:
+    """Returns the preferred model list for stage-agent tool selection and discovery synthesis."""
+    return [
+        "gemini-3.1-flash-lite-preview",
+    ]
+
+
 def get_career_dashboard_model_candidates() -> list[str]:
     """Returns the preferred model list for the main career dashboard command-center synthesis."""
     return [

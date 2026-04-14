@@ -39,6 +39,7 @@ from data.competition_registry import (
     normalize_competition,
 )
 from utils.cache import cache
+from utils.intelligence.overlay_surface import PRESENTATION_CONTEXTUAL, PRESENTATION_MICRO, resolve_stage_overlay_surface
 from utils.runtime_storage import PLAYER_CARDS_RUNTIME_ROOT, iter_player_cards_roots
 
 # Numba/UMAP is not thread-safe with the default workqueue layer.
@@ -52,6 +53,168 @@ _DASHBOARD_DATA_CACHE_VERSION = "v1"
 _DASHBOARD_DATA_CACHE_TTL_SECONDS = 300   # was 30s — season data is static between ETL runs
 _CAREER_EVIDENCE_PREP_CACHE_VERSION = "v1"
 _CAREER_EVIDENCE_PREP_CACHE_TTL_SECONDS = 300  # was 60s — same rationale as dashboard data
+
+
+def _overlay_confidence_score(value: Any, default: float = 0.0) -> float:
+    """Normalize textual or numeric confidence into a stable 0..1 score."""
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"high", "high confidence"}:
+            return 0.82
+        if normalized in {"good confidence", "medium"}:
+            return 0.72
+        if normalized in {"moderate confidence", "limited"}:
+            return 0.58
+        if normalized == "low":
+            return 0.42
+        if normalized == "limited confidence":
+            return 0.54
+        if normalized == "moderate":
+            return 0.68
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _build_stage_contextual_overlay_card(
+    stage: str,
+    overlay_surface: Optional[Dict[str, Any]],
+) -> Optional[html.Div]:
+    """Render a shared contextual overlay card anchored to a stage section."""
+    primary_candidate = dict((overlay_surface or {}).get("primary_candidate") or {})
+    if not primary_candidate:
+        return None
+
+    tier = str(primary_candidate.get("presentation_tier") or "")
+    if tier in {"", PRESENTATION_MICRO}:
+        return None
+    if tier != PRESENTATION_CONTEXTUAL:
+        return None
+
+    confidence = _overlay_confidence_score(primary_candidate.get("confidence"))
+    meta_bits = [
+        str(primary_candidate.get("type") or "context").replace("_", " "),
+    ]
+    if confidence > 0:
+        meta_bits.append(f"confidence {confidence:.2f}")
+
+    return html.Div(
+        [
+            html.Div(
+                [
+                    html.Span("Stage Intelligence", className="stage-contextual-overlay__eyebrow"),
+                    html.Div(
+                        " · ".join(meta_bits),
+                        className="stage-contextual-overlay__meta",
+                    ),
+                ],
+                className="stage-contextual-overlay__top",
+            ),
+            html.H5(
+                str(primary_candidate.get("title") or "Stage Intelligence"),
+                className="stage-contextual-overlay__title mb-2",
+            ),
+            html.P(
+                str(primary_candidate.get("body") or ""),
+                className="stage-contextual-overlay__body mb-0",
+            ),
+        ],
+        className=f"stage-contextual-overlay stage-contextual-overlay--{stage}",
+        **{
+            "data-stage": stage,
+            "data-tier": tier,
+            "data-signal-id": str(primary_candidate.get("signal_id") or ""),
+        },
+    )
+
+
+def _build_prematch_overlay_surface(
+    payload: Dict[str, Any],
+    game_plan_payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Build prematch shared overlay surface from stage discoveries when available."""
+    try:
+        from utils.intelligence.discovery_overlay_mapper import build_overlay_candidates_from_analysis
+        from utils.prematch_stage.prematch_intelligence import build_prematch_stage_analysis_payload
+
+        stage_analysis = payload.get("prematch_stage_analysis") or build_prematch_stage_analysis_payload(payload)
+        overlay_payload = build_overlay_candidates_from_analysis(stage_analysis)
+        if list((overlay_payload or {}).get("candidates") or []):
+            return resolve_stage_overlay_surface("prematch", overlay_payload)
+    except Exception as exc:
+        logger.debug("prematch shared overlay surface build error: %s", exc)
+
+    confidence = _overlay_confidence_score(game_plan_payload.get("confidence"), 0.68)
+    candidate = {
+        "signal_id": str(payload.get("fixture_id") or payload.get("opponent") or "prematch-game-plan"),
+        "headline": f"Pre-match focus vs {payload.get('opponent') or 'opponent'}",
+        "body": str(game_plan_payload.get("plan_headline") or ""),
+        "anchor": "prematch_game_plan_context",
+        "priority": confidence,
+        "confidence": confidence,
+        "cta_label": "Open preview",
+        "type": "prematch_game_plan",
+        "novelty_key": str(payload.get("fixture_id") or payload.get("opponent") or "prematch-game-plan"),
+        "evidence_key": "prematch_game_plan",
+        "evidence": {
+            "opponent": payload.get("opponent"),
+            "meeting_count": game_plan_payload.get("meeting_count"),
+            "recent_form_goals": game_plan_payload.get("recent_form_goals"),
+            "recent_form_assists": game_plan_payload.get("recent_form_assists"),
+        },
+    }
+    return resolve_stage_overlay_surface("prematch", {"candidates": [candidate]})
+
+
+def _build_postmatch_overlay_surface(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Build postmatch shared overlay surface from stage discoveries when available."""
+    try:
+        from utils.postmatch_stage.postmatch_intelligence import (
+            build_postmatch_match_context_payload,
+            build_postmatch_overlay_candidates_payload,
+            build_postmatch_performance_context_payload,
+            build_postmatch_reflection_payloads_payload,
+            build_postmatch_stage_analysis_payload,
+        )
+        from utils.intelligence.discovery_overlay_mapper import build_overlay_candidates_from_analysis
+
+        stage_analysis = payload.get("postmatch_stage_analysis") or build_postmatch_stage_analysis_payload(payload)
+        overlay_payload = build_overlay_candidates_from_analysis(stage_analysis)
+        if list((overlay_payload or {}).get("candidates") or []):
+            return resolve_stage_overlay_surface("postmatch", overlay_payload)
+
+        match_context_payload = build_postmatch_match_context_payload(payload)
+        performance_context_payload = build_postmatch_performance_context_payload(payload)
+        reflection_payloads_payload = build_postmatch_reflection_payloads_payload(payload)
+        overlay_candidates_payload = build_postmatch_overlay_candidates_payload(
+            match_context_payload,
+            performance_context_payload,
+            reflection_payloads_payload,
+        )
+        candidates = list(overlay_candidates_payload.get("candidates") or [])
+        for candidate in candidates:
+            body_text = str(candidate.get("body") or "")
+            if "entrypoint is prepared for structured reflective payloads" in body_text.lower():
+                continue
+            candidate["confidence"] = _overlay_confidence_score(candidate.get("confidence"), 0.68)
+            candidate["priority"] = candidate["confidence"]
+        filtered_candidates = [
+            candidate for candidate in candidates
+            if "priority" in candidate
+        ]
+        return resolve_stage_overlay_surface("postmatch", {"candidates": filtered_candidates})
+    except Exception as exc:
+        logger.debug(f"postmatch overlay surface build error: {exc}")
+        return {
+            "stage": "postmatch",
+            "candidates": [],
+            "candidate_count": 0,
+            "primary_candidate": None,
+            "visible_primary": None,
+            "deferred_candidates": [],
+            "inbox_entries": [],
+        }
 
 
 def _build_dashboard_data_cache_key(player_name: str, player_id: str) -> str:
@@ -1508,6 +1671,8 @@ def render_post_match(payload: Dict[str, Any], milestone_id: str = "") -> html.D
     competition = payload.get("competition", "HK Premier League")
     competition_display = get_competition_display_name(competition, long_form=True)
     competition_logo = payload.get("competition_logo") or get_competition_logo(competition)
+    overlay_surface = _build_postmatch_overlay_surface(payload)
+    contextual_overlay_card = _build_stage_contextual_overlay_card("postmatch", overlay_surface)
     
     home_logo = payload.get("home_logo") or _resolve_team_logo(home)
     away_logo = payload.get("away_logo") or _resolve_team_logo(away)
@@ -2462,6 +2627,7 @@ def render_post_match(payload: Dict[str, Any], milestone_id: str = "") -> html.D
         [
             header,
             summary_section,
+            contextual_overlay_card,
             dbc.Row(upper_analysis_cols, className="g-3 align-items-stretch"),
             dbc.Row(lower_analysis_cols, className="g-3 align-items-stretch mt-0") if lower_analysis_cols else None,
         ],
@@ -7510,11 +7676,24 @@ def render_pre_match(
         accent=HKFATheme.ACCENT_GOLD,
     )
 
+    overlay_surface = _build_prematch_overlay_surface(
+        payload,
+        {
+            "confidence": confidence_label.lower(),
+            "plan_headline": plan_headline,
+            "meeting_count": len(h2h_summary or []),
+            "recent_form_goals": int(recent_form.get("goals_total", 0) or 0),
+            "recent_form_assists": int(recent_form.get("assists_total", 0) or 0),
+        },
+    )
+    contextual_overlay_card = _build_stage_contextual_overlay_card("prematch", overlay_surface)
+
     return html.Div([
         html.Div(fixture_card, style={"marginBottom": "36px"}),
         html.Div(recent_form_section, style={"marginBottom": "36px"}),
         html.Div(rivals_section, style={"marginBottom": "36px"}),
         html.Div(h2h_section, style={"marginBottom": "36px"}),
+        contextual_overlay_card,
         game_plan_card,
     ], className="stage-view stage-view--prematch")
 

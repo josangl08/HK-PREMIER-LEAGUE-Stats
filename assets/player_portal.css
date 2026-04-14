@@ -1307,11 +1307,30 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
     display: grid;
     gap: 12px;
     margin-bottom: 14px;
+    padding: 18px 18px 16px;
     background:
         radial-gradient(circle at top right, rgba(82, 220, 142, 0.18), transparent 42%),
         linear-gradient(180deg, rgba(82, 220, 142, 0.12), rgba(255, 255, 255, 0.025)),
         rgba(255, 255, 255, 0.028);
     border-color: rgba(82, 220, 142, 0.22);
+    position: relative;
+    overflow: hidden;
+    box-shadow:
+        0 18px 34px rgba(8, 18, 14, 0.16),
+        inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.season-worth-noticing--full-width {
+    width: 100%;
+}
+
+.season-worth-noticing::before {
+    content: "";
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 4px;
+    background: linear-gradient(180deg, rgba(140, 240, 182, 0.95), rgba(54, 180, 117, 0.42));
+    border-radius: 18px 0 0 18px;
 }
 
 .season-worth-noticing__top {
@@ -1347,44 +1366,109 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
     font-size: 0.78rem;
     font-weight: 700;
     letter-spacing: 0.04em;
-    text-transform: uppercase;
+    text-transform: none;
+    line-height: 1.45;
+    max-width: 340px;
+    text-align: right;
+    cursor: help;
+}
+
+.season-worth-noticing__dismiss {
+    border: none;
+    background: rgba(255, 255, 255, 0.08);
+    color: rgba(231, 244, 235, 0.82);
+    width: 30px;
+    height: 30px;
+    min-width: 30px;
+    min-height: 30px;
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1rem;
+    line-height: 1;
+    cursor: pointer;
+    transition: background 0.18s ease, color 0.18s ease, transform 0.18s ease;
+}
+
+.season-worth-noticing__dismiss:hover {
+    background: rgba(255, 255, 255, 0.16);
+    color: #ffffff;
+    transform: translateY(-1px);
+}
+
+.season-stage-hero__top {
+    margin-bottom: 14px;
 }
 
 .season-worth-noticing__body {
     color: rgba(233, 240, 247, 0.86);
     font-size: 0.96rem;
     line-height: 1.65;
+    max-width: 72ch;
 }
 
-.season-worth-noticing__footer {
+.stage-contextual-overlay {
+    position: relative;
+    overflow: hidden;
+    margin-bottom: 20px;
+    padding: 16px 18px;
+    border-radius: 18px;
+    border: 1px solid rgba(94, 160, 255, 0.24);
+    background:
+        radial-gradient(circle at top right, rgba(72, 136, 255, 0.16), transparent 45%),
+        linear-gradient(180deg, rgba(64, 122, 224, 0.12), rgba(255, 255, 255, 0.025)),
+        rgba(255, 255, 255, 0.028);
+    box-shadow:
+        0 14px 30px rgba(8, 18, 34, 0.14),
+        inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.stage-contextual-overlay::before {
+    content: "";
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 4px;
+    background: linear-gradient(180deg, rgba(122, 186, 255, 0.96), rgba(64, 122, 224, 0.5));
+    border-radius: 18px 0 0 18px;
+}
+
+.stage-contextual-overlay__top {
     display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
     flex-wrap: wrap;
-    gap: 8px;
 }
 
-.season-worth-noticing__chip {
-    display: inline-flex;
-    align-items: center;
-    padding: 6px 10px;
-    border-radius: 999px;
-    background: rgba(82, 220, 142, 0.12);
-    border: 1px solid rgba(82, 220, 142, 0.24);
-    color: #b7f5cf;
-    font-size: 0.74rem;
-    font-weight: 700;
-    line-height: 1;
+.stage-contextual-overlay__eyebrow {
+    color: #8dc3ff;
+    font-size: 0.72rem;
+    font-weight: 800;
+    letter-spacing: 0.1em;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
 }
 
-.season-worth-noticing__chip--muted {
-    background: rgba(255, 255, 255, 0.05);
-    border-color: rgba(255, 255, 255, 0.08);
-    color: rgba(233, 240, 247, 0.68);
+.stage-contextual-overlay__meta {
+    color: rgba(207, 223, 238, 0.74);
+    font-size: 0.76rem;
+    font-weight: 700;
+    text-transform: none;
 }
 
-.season-stage-hero__top {
-    margin-bottom: 14px;
+.stage-contextual-overlay__title {
+    color: #f4f8fc;
+    font-size: 0.98rem;
+    font-weight: 780;
+    line-height: 1.25;
+}
+
+.stage-contextual-overlay__body {
+    color: rgba(225, 235, 246, 0.88);
+    font-size: 0.92rem;
+    line-height: 1.58;
+    max-width: 68ch;
 }
 
 .season-stage-hero__copy {
@@ -1650,6 +1734,26 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
     }
 
     .season-worth-noticing__top {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .season-worth-noticing__meta {
+        max-width: none;
+        text-align: left;
+    }
+
+    .season-worth-noticing {
+        padding: 16px 15px 15px;
+        margin-bottom: 12px;
+    }
+
+    .stage-contextual-overlay {
+        padding: 15px 14px;
+        margin-bottom: 16px;
+    }
+
+    .stage-contextual-overlay__top {
         flex-direction: column;
         align-items: stretch;
     }
@@ -2698,10 +2802,9 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
     50%       { opacity: 0.35; }
 }
 
-/* ── 3-Tier Career Intelligence Overlays ─────────────────────── */
+/* ── Shared Floating Overlay Surfaces ─────────────────────────── */
 
-/* T1: Critical Alert (Centered Modal) */
-.ai-overlay-t1-backdrop {
+.stage-overlay-critical-backdrop {
     position: fixed;
     inset: 0;
     z-index: 9999;
@@ -2714,60 +2817,63 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
     animation: fadeIn 0.4s ease-out;
 }
 
-.ai-overlay-t1-card {
+.stage-overlay-critical-card {
     width: 100%;
     max-width: 420px;
-    background: linear-gradient(-45deg, #00f2ff, #7b2ff7, #00f2ff);
-    background-size: 400% 400%;
-    animation: ai-gradient 15s ease infinite, slideUp 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
+    background:
+        radial-gradient(circle at top right, rgba(246, 196, 83, 0.34), transparent 45%),
+        linear-gradient(180deg, rgba(175, 121, 16, 0.38), rgba(74, 55, 10, 0.96));
+    animation: slideUp 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
     border-radius: 16px;
     padding: 24px;
-    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5), 0 0 30px rgba(0, 242, 255, 0.2);
+    border: 1px solid rgba(246, 196, 83, 0.34);
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5), 0 0 30px rgba(246, 196, 83, 0.18);
     position: relative;
     overflow: hidden;
 }
 
-.ai-overlay-t1-card::before {
+.stage-overlay-critical-card::before {
     content: "";
     position: absolute;
     inset: 0;
-    background: rgba(0, 0, 0, 0.82);
+    background: rgba(16, 11, 3, 0.84);
     z-index: 0;
 }
 
-.ai-overlay-t1-card > * {
+.stage-overlay-critical-card > * {
     position: relative;
     z-index: 1;
 }
 
-/* T2: Contextual Panel (Floating in Stage Column) */
 .stage-column {
-    position: relative; /* Anchor for T2 absolute positioning */
+    position: relative;
 }
 
-.ai-overlay-t2 {
+.stage-overlay-contextual-floating {
     position: absolute;
     top: 16px;
     right: 16px;
     width: 260px;
     z-index: 500;
-    background: linear-gradient(-45deg, #00f2ff, #7b2ff7, #00f2ff);
-    background-size: 400% 400%;
-    animation: ai-gradient 15s ease infinite, slideInRight 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+    background:
+        radial-gradient(circle at top right, rgba(110, 170, 255, 0.32), transparent 48%),
+        linear-gradient(180deg, rgba(63, 113, 195, 0.78), rgba(26, 49, 87, 0.96));
+    animation: slideInRight 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) both;
     border-radius: 12px;
-    padding: 1px; /* Border effect */
+    padding: 1px;
+    border: 1px solid rgba(110, 170, 255, 0.28);
     box-shadow: 0 10px 25px rgba(0, 0, 0, 0.3);
 }
 
-.ai-overlay-t2__inner {
-    background: rgba(0, 0, 0, 0.85);
+.stage-overlay-contextual-floating__inner {
+    background: rgba(9, 18, 32, 0.88);
     backdrop-filter: blur(12px);
     border-radius: 11px;
     padding: 14px;
     height: 100%;
 }
 
-.ai-overlay-t2__dismiss {
+.stage-overlay-contextual-floating__dismiss {
     background: transparent;
     border: none;
     color: rgba(255, 255, 255, 0.5);
@@ -2778,7 +2884,7 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
     transition: color 0.2s;
 }
 
-.ai-overlay-t2__dismiss:hover {
+.stage-overlay-contextual-floating__dismiss:hover {
     color: #ffffff;
 }
 
@@ -2798,9 +2904,8 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
     border-top-color: rgba(0, 212, 255, 0.3) !important;
 }
 
-/* Responsive: T2 collapse on mobile */
 @media (max-width: 600px) {
-    .ai-overlay-t2 {
+    .stage-overlay-contextual-floating {
         position: fixed;
         top: auto;
         bottom: 20px;
@@ -4209,15 +4314,15 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
     letter-spacing: 0.04em;
 }
 
-.ai-overlay-t2__cta.btn {
-    color: #00f2ff !important;
+.stage-overlay-contextual-floating__cta.btn {
+    color: #7cc1ff !important;
     text-decoration: none !important;
     font-size: 0.75rem;
     font-weight: 600;
 }
 
-.ai-overlay-t2__cta.btn:hover {
-    color: #ffffff !important;
+.stage-overlay-contextual-floating__cta.btn:hover {
+    color: #d6e8ff !important;
     text-decoration: none !important;
 }
 
@@ -4276,6 +4381,12 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
     position: relative;
     transition: background 0.2s, transform 0.2s;
     cursor: pointer;
+    color: #eef4fa;
+}
+
+.insight-inbox-item div,
+.insight-inbox-item span {
+    color: inherit;
 }
 
 .insight-inbox-item:hover {
@@ -4283,12 +4394,20 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
     transform: translateY(-2px);
 }
 
-.insight-inbox-item--t1 {
-    border-left: 4px solid #ff4d4d !important;
+.insight-inbox-item--critical {
+    border-left: 4px solid #f6c453 !important;
 }
 
-.insight-inbox-item--t2 {
-    border-left: 4px solid #00f2ff !important;
+.insight-inbox-item--prominent {
+    border-left: 4px solid #59d487 !important;
+}
+
+.insight-inbox-item--contextual {
+    border-left: 4px solid #6eb2ff !important;
+}
+
+.insight-inbox-item--micro {
+    border-left: 4px solid #b576ff !important;
 }
 
 .insight-inbox-timestamp {
@@ -4301,6 +4420,12 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
 .insight-inbox-item__cta.btn {
     color: rgba(83, 228, 255, 0.9) !important;
     text-decoration: none !important;
+    font-size: 0.74rem;
+    font-weight: 700;
+}
+
+.insight-inbox-item__cta:not(.btn) {
+    color: rgba(188, 208, 226, 0.88);
     font-size: 0.74rem;
     font-weight: 700;
 }
@@ -4337,8 +4462,18 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
     right: -4px;
     background-color: #ff4d4d !important;
     border-radius: 50% !important;
-    padding: 0.25em 0.5em !important;
+    width: 18px;
+    height: 18px;
+    min-width: 18px;
+    min-height: 18px;
+    padding: 0 !important;
+    display: inline-flex !important;
+    align-items: center;
+    justify-content: center;
     font-size: 0.6rem !important;
+    line-height: 1 !important;
+    text-align: center;
+    font-weight: 700;
     border: 2px solid #1a1a1a;
 }
 

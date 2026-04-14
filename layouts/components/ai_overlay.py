@@ -1,26 +1,28 @@
-# ABOUTME: Overlay components for the 3-tier Career Intelligence overlay system.
-# ABOUTME: Provides render_t1_overlay (modal) and render_t2_overlay (floating panel) using OverlaySignal dataclass.
+# ABOUTME: Overlay components for tiered stage-intelligence surfaces rendered in the portal stage column.
+# ABOUTME: Provides shared critical and contextual presentation builders that consume the normalized overlay contract.
 
+from typing import Any, Mapping
 from dash import html
 import dash_bootstrap_components as dbc
 
-from utils.career_intelligence import OverlaySignal
+def _overlay_value(signal: Mapping[str, Any], key: str, default: str = "") -> str:
+    return str(signal.get(key) or default)
 
 
-def render_t1_overlay(signal: OverlaySignal) -> html.Div:
+def render_critical_overlay(signal: Mapping[str, Any]) -> html.Div:
     """
-    Renders the T1 Critical Alert overlay.
+    Renders the shared critical overlay surface.
 
     Layout: fixed full-viewport backdrop → centered card with animated gradient,
     title, body text, and two buttons ("Entendido" dismiss + cta_label action).
     Initially shown; hidden via callback on dismiss.
     """
     return html.Div(
-        id="ai-overlay-t1-backdrop",
-        className="ai-overlay-t1-backdrop",
+        id="stage-overlay-critical-backdrop",
+        className="stage-overlay-critical-backdrop",
         children=[
             html.Div(
-                className="ai-overlay-t1-card",
+                className="stage-overlay-critical-card",
                 children=[
                     # Header row
                     html.Div(
@@ -28,14 +30,14 @@ def render_t1_overlay(signal: OverlaySignal) -> html.Div:
                         children=[
                             html.I(
                                 className="bi bi-stars me-2",
-                                style={"fontSize": "1.2rem", "color": "#00f2ff"},
+                                style={"fontSize": "1.2rem", "color": "#f6c453"},
                             ),
                             html.Span(
-                                "Inteligencia de Carrera",
+                                f"Stage Intelligence · {_overlay_value(signal, 'stage', 'career').title()}",
                                 style={
                                     "fontSize": "0.75rem",
                                     "fontWeight": "600",
-                                    "color": "#00f2ff",
+                                    "color": "#f6c453",
                                     "textTransform": "uppercase",
                                     "letterSpacing": "1px",
                                 },
@@ -44,13 +46,13 @@ def render_t1_overlay(signal: OverlaySignal) -> html.Div:
                     ),
                     # Title
                     html.H5(
-                        signal.title,
+                        _overlay_value(signal, "title"),
                         className="mb-2 fw-bold",
                         style={"color": "#ffffff"},
                     ),
                     # Body
                     html.P(
-                        signal.body,
+                        _overlay_value(signal, "body"),
                         className="mb-4",
                         style={"color": "rgba(255,255,255,0.85)", "fontSize": "0.9rem", "lineHeight": "1.6"},
                     ),
@@ -59,11 +61,11 @@ def render_t1_overlay(signal: OverlaySignal) -> html.Div:
                         className="d-flex gap-2",
                         children=[
                             dbc.Button(
-                                signal.cta_label,
+                                _overlay_value(signal, "cta_label", "Ver análisis"),
                                 id={
-                                    "type": "ai-overlay-t1-btn",
+                                    "type": "stage-overlay-critical-btn",
                                     "action": "cta",
-                                    "evidence_key": signal.evidence_key or "career_arc",
+                                    "evidence_key": _overlay_value(signal, "evidence_key", "career_arc"),
                                 },
                                 color="primary",
                                 size="sm",
@@ -72,7 +74,7 @@ def render_t1_overlay(signal: OverlaySignal) -> html.Div:
                             ),
                             dbc.Button(
                                 "Entendido",
-                                id={"type": "ai-overlay-t1-btn", "action": "dismiss", "evidence_key": ""},
+                                id={"type": "stage-overlay-critical-btn", "action": "dismiss", "evidence_key": ""},
                                 color="outline-light",
                                 size="sm",
                                 className="flex-shrink-0",
@@ -86,34 +88,34 @@ def render_t1_overlay(signal: OverlaySignal) -> html.Div:
     )
 
 
-def render_t2_overlay(signal: OverlaySignal, signal_index: int = 0) -> html.Div:
+def render_contextual_overlay(signal: Mapping[str, Any], signal_index: int = 0) -> html.Div:
     """
-    Renders a T2 Contextual Panel overlay card.
+    Renders the shared contextual panel overlay card.
 
     Layout: absolute-positioned card floating over the stage column,
     with a dismiss [×] button, title, body text, and optional CTA link.
 
     Parameters
     ----------
-    signal       : OverlaySignal to render.
+    signal       : Shared overlay contract item to render.
     signal_index : 0-based index in the visible queue (used for stagger delay).
     """
     stagger_delay = f"{signal_index * 400}ms"
-    dismiss_id = {"type": "ai-overlay-t2-dismiss", "index": signal_index}
+    dismiss_id = {"type": "stage-overlay-contextual-dismiss", "index": signal_index}
 
     return html.Div(
-        className="ai-overlay-t2",
+        className="stage-overlay-contextual-floating",
         style={"animationDelay": stagger_delay},
         children=[
             html.Div(
-                className="ai-overlay-t2__inner",
+                className="stage-overlay-contextual-floating__inner",
                 children=[
                     # Top row: title + dismiss button
                     html.Div(
                         className="d-flex align-items-start justify-content-between mb-2",
                         children=[
                             html.Span(
-                                signal.title,
+                                _overlay_value(signal, "title"),
                                 style={
                                     "fontWeight": "700",
                                     "fontSize": "0.82rem",
@@ -127,14 +129,14 @@ def render_t2_overlay(signal: OverlaySignal, signal_index: int = 0) -> html.Div:
                                 "×",
                                 id=dismiss_id,
                                 n_clicks=0,
-                                className="ai-overlay-t2__dismiss",
+                                className="stage-overlay-contextual-floating__dismiss",
                                 title="Cerrar",
                             ),
                         ],
                     ),
                     # Body
                     html.P(
-                        signal.body,
+                        _overlay_value(signal, "body"),
                         style={
                             "fontSize": "0.78rem",
                             "color": "rgba(255,255,255,0.80)",
@@ -145,18 +147,18 @@ def render_t2_overlay(signal: OverlaySignal, signal_index: int = 0) -> html.Div:
                     # CTA link
                     dbc.Button(
                         [
-                            signal.cta_label,
+                            _overlay_value(signal, "cta_label", "Ver análisis"),
                             html.I(className="bi bi-arrow-right ms-1", style={"fontSize": "0.7rem"}),
                         ],
                         id={
-                            "type": "ai-overlay-t2-cta",
+                            "type": "stage-overlay-contextual-cta",
                             "index": signal_index,
-                            "evidence_key": signal.evidence_key or "career_arc",
+                            "evidence_key": _overlay_value(signal, "evidence_key", "career_arc"),
                         },
                         color="link",
-                        className="p-0 ai-overlay-t2__cta",
+                        className="p-0 stage-overlay-contextual-floating__cta",
                         n_clicks=0,
-                    ) if signal.cta_label else None,
+                    ) if _overlay_value(signal, "cta_label") else None,
                 ],
             ),
         ],

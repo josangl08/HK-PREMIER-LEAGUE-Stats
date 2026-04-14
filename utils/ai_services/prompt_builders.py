@@ -233,3 +233,115 @@ def build_evidence_explanation_prompt(
         "- Avoid analyst words like trajectory, volatility, profile separation, or percentile unless absolutely necessary.\n"
         "- Do not repeat the card body word-for-word.\n"
     )
+
+
+def build_season_tool_selection_prompt(
+    *,
+    player_name: str,
+    season: str,
+    available_tools: Iterable[Dict[str, Any]],
+    max_tools: int = 4,
+) -> str:
+    """Build a strict JSON prompt for choosing which Season tools to inspect."""
+    tools_json = json.dumps(list(available_tools), ensure_ascii=True)
+    return (
+        "Role:\n"
+        "You are a senior football performance analyst specializing in season-level player evaluation. "
+        "You work like a skeptical specialist who looks for patterns, tensions, milestones, and curiosities inside one season. "
+        "You do not invent facts, and you do not inspect tools unless they can materially improve the analysis.\n"
+        "Context:\n"
+        f"Player: {player_name or 'Unknown player'}.\n"
+        f"Season: {season or 'Unknown season'}.\n"
+        f"Available tools JSON: {tools_json}\n"
+        "Standards:\n"
+        "- Choose only the tools most likely to reveal non-trivial discoveries.\n"
+        "- Prefer breadth only when it helps compare conflicting signals.\n"
+        "- Be explicit about why each selected tool matters.\n"
+        "- If the brief is too thin, identify the most critical data gaps.\n"
+        "Negative constraints:\n"
+        "- Do not select every tool by default.\n"
+        "- Do not repeat the tool descriptions verbatim.\n"
+        "- Do not use generic reasons like 'for more context' without saying what context.\n"
+        "- Do not ask for data outside the available tool catalog.\n"
+        "Few-shot examples:\n"
+        "Good example: {\"selected_tools\": [\"recent_form\", \"season_profile\", \"previous_season\"], "
+        "\"selection_rationale\": [\"recent_form can reveal momentum shifts against the season baseline\", "
+        "\"season_profile can reveal whether the role identity has a clear edge or limiting gap\", "
+        "\"previous_season can confirm whether this season is a continuation or a break from prior level\"], "
+        "\"data_gaps\": []}\n"
+        "Bad example: {\"selected_tools\": [\"season_profile\", \"season_performance\", \"competition_split\", \"previous_season\", \"recent_form\", \"season_signals\"], "
+        "\"selection_rationale\": [\"need all data\"], \"data_gaps\": []}\n"
+        "Why bad: it ignores prioritization and gives no analytical reason for the selection.\n"
+        "Output contract:\n"
+        f"Return JSON only with this exact shape: {{\"selected_tools\": [str], \"selection_rationale\": [str], \"data_gaps\": [str]}}.\n"
+        f"Select at least 2 tools and at most {int(max_tools)} tools.\n"
+        "Clarifying behavior:\n"
+        "If critical information is missing, do not ask questions. Instead, choose the best available tools and list the missing items in `data_gaps`."
+    )
+
+
+def build_season_discovery_synthesis_prompt(
+    *,
+    player_name: str,
+    season: str,
+    selected_tools: Iterable[str],
+    tool_outputs: Dict[str, Any],
+    session_memory: Dict[str, Any] | None = None,
+) -> str:
+    """Build a strict JSON prompt for season-stage discovery synthesis."""
+    tool_names_json = json.dumps(list(selected_tools), ensure_ascii=True)
+    tool_outputs_json = json.dumps(tool_outputs or {}, ensure_ascii=True)
+    session_json = json.dumps(session_memory or {}, ensure_ascii=True)
+    return (
+        "Role:\n"
+        "You are a senior football season analyst working inside a player-intelligence platform. "
+        "Your job is to inspect the selected season tools and extract the most valuable discoveries from this stage only. "
+        "You think in patterns, tensions, milestones, curiosities, warnings, and opportunities. "
+        "You are direct, evidence-bound, and skeptical of generic narratives.\n"
+        "Context:\n"
+        f"Player: {player_name or 'Unknown player'}.\n"
+        f"Season: {season or 'Unknown season'}.\n"
+        f"Selected tools JSON: {tool_names_json}\n"
+        f"Tool outputs JSON: {tool_outputs_json}\n"
+        f"Session memory JSON: {session_json}\n"
+        "Standards:\n"
+        "- Use only the provided tool outputs.\n"
+        "- Separate facts from interpretation implicitly by keeping claims traceable to visible data.\n"
+        "- Prefer discoveries that are new, material, and relevant to this season.\n"
+        "- Name tradeoffs, tensions, or caveats when the evidence conflicts.\n"
+        "- Keep the language plain and specific.\n"
+        "Negative constraints:\n"
+        "- Do not summarize the prompt before answering.\n"
+        "- Do not produce generic football cliches.\n"
+        "- Do not use abstract filler such as trajectory, leverage, game-changer, or delve.\n"
+        "- Do not restate every tool; only surface discoveries that matter.\n"
+        "- Do not emit more than 4 discoveries.\n"
+        "- Do not mark a discovery critical unless the evidence is exceptionally strong.\n"
+        "- Do not reuse a recent novelty key from session memory unless the new evidence is materially stronger.\n"
+        "Few-shot examples:\n"
+        "Good example discovery: "
+        "{\"discovery_id\": \"season-pattern-1\", \"stage\": \"season\", \"type\": \"pattern\", "
+        "\"title\": \"Recent output is running ahead of the wider season baseline\", "
+        "\"body\": \"The last 5-match window is outperforming the earlier phase of the season, which suggests a real momentum change rather than stable output.\", "
+        "\"priority\": 0.74, \"confidence\": 0.7, \"evidence_keys\": [\"recent_form_context\"], "
+        "\"novelty_key\": \"recent-form-upswing\", \"anchor\": \"recent_form_context\", \"presentation_hint\": \"prominent\", "
+        "\"cta_label\": \"View insight\"}\n"
+        "Bad example discovery: "
+        "{\"title\": \"Great season\", \"body\": \"The player is showing strong trajectory and important value.\", \"priority\": 0.9}\n"
+        "Why bad: generic, unsupported, vague, and missing evidence linkage.\n"
+        "Output contract:\n"
+        "Return JSON only with this exact shape: "
+        "{\"stage\": \"season\", \"scope\": {\"player_id\": str, \"season\": str, \"stage\": \"season\"}, "
+        "\"summary\": str, \"confidence\": \"low|medium|high\", "
+        "\"discoveries\": ["
+        "{\"discovery_id\": str, \"stage\": \"season\", \"type\": \"pattern|milestone|curiosity|warning|opportunity|summary\", "
+        "\"title\": str, \"body\": str, \"priority\": float, \"confidence\": float, "
+        "\"evidence_keys\": [str], \"novelty_key\": str, \"anchor\": str, "
+        "\"presentation_hint\": \"critical|prominent|contextual|micro\", \"cta_label\": str, "
+        "\"supporting_artifacts\": [str], \"metadata\": {}}"
+        "], "
+        "\"supporting_artifacts\": [str], "
+        "\"debug\": {\"data_gaps\": [str], \"used_tools\": [str], \"llm_generated\": true}}.\n"
+        "Clarifying behavior:\n"
+        "If the information is too weak for a strong discovery, return fewer discoveries, lower confidence, and record the missing information in `debug.data_gaps` instead of inventing."
+    )

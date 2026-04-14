@@ -112,8 +112,10 @@ def build_season_stage_analysis(artifacts: Mapping[str, Mapping[str, Any]] | Non
     profile_clarity = (profile_payload.get("profile_clarity") or {}).get("label") or "Low-confidence profile"
     top_strengths = profile_payload.get("top_strengths") or []
     top_gaps = profile_payload.get("top_gaps") or []
-    strongest_metric = str((top_strengths[0] or {}).get("feature") or (top_strengths[0] or {}).get("metric") or "")
-    gap_metric = str((top_gaps[0] or {}).get("feature") or (top_gaps[0] or {}).get("metric") or "")
+    primary_strength = dict(top_strengths[0] or {}) if top_strengths else {}
+    primary_gap = dict(top_gaps[0] or {}) if top_gaps else {}
+    strongest_metric = str(primary_strength.get("feature") or primary_strength.get("metric") or "")
+    gap_metric = str(primary_gap.get("feature") or primary_gap.get("metric") or "")
     trend = _describe_recent_trend(recent_payload)
 
     key_points = []
@@ -173,4 +175,3 @@ def build_season_stage_analysis(artifacts: Mapping[str, Mapping[str, Any]] | Non
     )
     logger.debug("Season agent analysis payload=%s", result)
     return result
-

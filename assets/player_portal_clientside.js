@@ -1,7 +1,8 @@
 // Mutate the existing dash_clientside object in place — never replace it with a new reference.
 // Object.assign({}, ...) creates a new object and breaks any cached dc reference inside dash_renderer.
 window.dash_clientside = window.dash_clientside || {};
-window.dash_clientside.playerPortal = {
+window.dash_clientside.playerPortal = window.dash_clientside.playerPortal || {};
+Object.assign(window.dash_clientside.playerPortal, {
     scrollYearNavigator: function(children, selected_year) {
         if (!children || children.length === 0) return null;
         var targetYear = selected_year ? selected_year.toString() : new Date().getFullYear().toString();
@@ -269,30 +270,4 @@ window.dash_clientside.playerPortal = {
         });
         return [newStore, styles];
     },
-
-    observeCareerArc: function(stage_content) {
-        if (!stage_content) return window.dash_clientside.no_update;
-        setTimeout(function() {
-            var careerArc = document.querySelector(".career-arc-section, [id*=\"career-arc\"]");
-            if (!careerArc) return;
-            if (careerArc._t2ObserverRegistered) return;
-            careerArc._t2ObserverRegistered = true;
-
-            var observer = new IntersectionObserver(function(entries) {
-                entries.forEach(function(entry) {
-                    if (entry.intersectionRatio >= 0.5) {
-                        var store = document.getElementById("t2-overlay-queue");
-                        if (store && !store._careerTrajectoryQueued) {
-                            store._careerTrajectoryQueued = true;
-                            var event = new CustomEvent("career-arc-visible");
-                            document.dispatchEvent(event);
-                        }
-                    }
-                });
-            }, {threshold: 0.5});
-
-            observer.observe(careerArc);
-        }, 300);
-        return window.dash_clientside.no_update;
-    }
-};
+});

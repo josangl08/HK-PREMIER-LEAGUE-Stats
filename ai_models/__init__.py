@@ -3,7 +3,7 @@
 
 """
 AI Models package for HK Premier League Stats.
-Provides predictors, clustering, similarity, and agentic AI capabilities.
+Provides predictors, clustering, similarity, and model-registry helpers.
 """
 
 # Lazy import to avoid heavy dependency loading at the top level

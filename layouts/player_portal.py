@@ -99,10 +99,8 @@ def _build_stage_column() -> html.Div:
                 ),
             ),
             html.Div(id="stage-decision-nodes"),
-            # ── T1 overlay: initially hidden, shown by portal-load callback ──────
-            html.Div(id="ai-overlay-t1-container", style={"display": "none"}),
-            # ── T2 overlays: absolute-positioned cards over stage column ─────────
-            html.Div(id="ai-overlay-t2-container"),
+            html.Div(id="stage-overlay-critical-container", style={"display": "none"}),
+            html.Div(id="stage-overlay-contextual-container"),
         ],
     )
 
@@ -130,7 +128,6 @@ def create_player_portal_layout(user_role: str = "player") -> html.Div:
             dcc.Store(id="card-expand-store", data={}),
             dcc.Store(id="timeline-pagination-store", storage_type="memory"),
             dcc.Store(id="stage-lucide-refresh-dummy"),
-            dcc.Store(id="career-arc-observer-dummy"),
             dcc.Store(id="portal-overlay-store", storage_type="memory", data={"type": "none"}),
             dcc.Store(id="card-editor-state", storage_type="memory"),
             # Stores the player photo album — session only (never share between players)
@@ -142,10 +139,9 @@ def create_player_portal_layout(user_role: str = "player") -> html.Div:
             dcc.Store(id="season-umap-context-store", storage_type="memory"),
             # Loading color system: pre-flight store for stage dot type (ui/data/ai)
             dcc.Store(id="stage-loading-type-sync-dummy"),
-            # Career Intelligence overlay stores
             dcc.Store(id="insight-session-state", storage_type="local"),
-            dcc.Store(id="t2-overlay-queue", storage_type="session"),
-            dcc.Store(id="t1-signal-store", storage_type="session"),
+            dcc.Store(id="stage-overlay-queue-store", storage_type="session"),
+            dcc.Store(id="stage-overlay-primary-store", storage_type="session"),
             # Polls sync status for newly registered players (stops after data is ready)
             dcc.Interval(id="sync-poll-interval", interval=8000, n_intervals=0, max_intervals=30, disabled=True),
             # AI Card Studio polling interval moved to card_editor.py for portability

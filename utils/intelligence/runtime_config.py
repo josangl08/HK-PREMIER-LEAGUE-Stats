@@ -51,6 +51,8 @@ def get_intelligence_runtime_config() -> Dict[str, Any]:
         "persistence_enabled": _read_bool_env("INTELLIGENCE_PERSISTENCE_ENABLED", True),
         "derived_writes_enabled": _read_bool_env("INTELLIGENCE_DERIVED_WRITES_ENABLED", True),
         "debug_logging_enabled": _read_bool_env("INTELLIGENCE_DEBUG_LOGGING_ENABLED", False),
+        "season_agent_llm_enabled": _read_bool_env("INTELLIGENCE_SEASON_AGENT_LLM_ENABLED", False),
+        "season_agent_max_tools": int(os.getenv("INTELLIGENCE_SEASON_AGENT_MAX_TOOLS", "4")),
         "artifact_max_entries": int(os.getenv("INTELLIGENCE_ARTIFACT_MAX_ENTRIES", "500")),
         "artifact_max_age_hours": int(os.getenv("INTELLIGENCE_ARTIFACT_MAX_AGE_HOURS", "168")),
         "session_memory_max_entries": int(os.getenv("INTELLIGENCE_SESSION_MEMORY_MAX_ENTRIES", "500")),

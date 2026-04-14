@@ -26,6 +26,7 @@ from utils.intelligence.freshness_manager import (
 )
 from utils.intelligence.versioning import (
     ARTIFACT_SCHEMA_VERSION,
+    OVERLAY_SURFACE_VERSION,
     PROMPT_TEMPLATE_VERSION,
     ROLE_TAXONOMY_VERSION,
     SIGNAL_RULES_VERSION,
@@ -393,6 +394,21 @@ def build_season_overlay_candidates_payload(
     """Build the overlay-candidate artifact payload."""
     safe_candidates = deepcopy(candidates or [])
     safe_selected = deepcopy(selected_candidate) if selected_candidate else None
+    if safe_selected:
+        selected_signal_id = str(safe_selected.get("signal_id") or "")
+        matching_index = next(
+            (
+                idx for idx, candidate in enumerate(safe_candidates)
+                if str(candidate.get("signal_id") or "") == selected_signal_id and selected_signal_id
+            ),
+            None,
+        )
+        if matching_index is None:
+            safe_candidates.insert(0, deepcopy(safe_selected))
+        else:
+            merged_candidate = dict(safe_candidates[matching_index])
+            merged_candidate.update({key: value for key, value in safe_selected.items() if value not in (None, "")})
+            safe_candidates[matching_index] = merged_candidate
     return {
         "candidates": safe_candidates,
         "candidate_count": len(safe_candidates),
@@ -474,6 +490,8 @@ def build_season_artifact_fingerprint_inputs(
     }
     if dependency_fingerprint_map:
         inputs["dependency_fingerprints"] = dict(sorted(dependency_fingerprint_map.items()))
+    if artifact_type == SEASON_OVERLAY_CANDIDATES_ARTIFACT:
+        inputs["overlay_surface_version"] = OVERLAY_SURFACE_VERSION
     return inputs
 
 

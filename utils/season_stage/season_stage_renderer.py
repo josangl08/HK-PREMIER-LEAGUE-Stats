@@ -9,6 +9,7 @@ from typing import Dict
 from dash import html
 
 from utils.agents.intelligence_orchestrator import orchestrate_season_intelligence
+from utils.intelligence.overlay_surface import choose_primary_overlay_candidate
 from utils.season_stage.season_components import (
     render_season_intelligence_debug,
     render_season_competition_split,
@@ -57,8 +58,25 @@ def render_season_stage(payload: Dict) -> html.Div:
         logger.exception("Season stage intelligence orchestration failed: %s", exc)
         intelligence_payload = None
 
+    overlay_surface = dict((intelligence_payload or {}).get("overlay_surface") or {})
+    dismissed_overlay_keys = {
+        str(key).strip()
+        for key in list(payload.get("_dismissed_overlay_keys") or [])
+        if str(key).strip()
+    }
+    visible_overlay_candidate = dict(overlay_surface.get("primary_candidate") or {})
+    if dismissed_overlay_keys:
+        visible_candidates = [
+            dict(candidate)
+            for candidate in list(overlay_surface.get("candidates") or [])
+            if str(candidate.get("signal_id") or "") not in dismissed_overlay_keys
+            and str(candidate.get("evidence_key") or "") not in dismissed_overlay_keys
+            and str(candidate.get("title") or "") not in dismissed_overlay_keys
+        ]
+        visible_overlay_candidate = dict(choose_primary_overlay_candidate(visible_candidates) or {})
+
     worth_noticing_node = render_worth_noticing_block(
-        (intelligence_payload or {}).get("worth_noticing"),
+        visible_overlay_candidate or None,
         debug_meta=(intelligence_payload or {}).get("debug") or {},
     )
     debug_meta = dict((intelligence_payload or {}).get("debug") or {})
@@ -93,10 +111,10 @@ def render_season_stage(payload: Dict) -> html.Div:
     return html.Div(
         [
             debug_node,
+            worth_noticing_node,
             html.Div(
                 [
                     render_season_header(context),
-                    worth_noticing_node,
                     html.Div(
                         render_season_competition_split(
                             context.get("competition_split") or [],

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 from utils.ai_services.evidence_router import normalize_evidence_key
+from utils.intelligence.discovery_contracts import StageAnalysis, coerce_stage_analysis
 
 
 ALLOWED_CONFIDENCE_LEVELS = ("low", "medium", "high")
@@ -60,6 +61,15 @@ class EvidenceExplanationPayload:
     confidence: str
     llm_generated: bool = False
     source_model: str = ""
+
+
+@dataclass(frozen=True)
+class SeasonToolPlanPayload:
+    """Structured tool-selection contract for the season agentic discovery runtime."""
+
+    selected_tools: tuple[str, ...]
+    selection_rationale: tuple[str, ...]
+    data_gaps: tuple[str, ...]
 
 
 def normalize_confidence(value: Any, default: str = "medium") -> str:
@@ -226,6 +236,69 @@ def validate_evidence_explanation_payload(raw_payload: Any) -> bool:
             bool(payload.what_to_watch),
         ]
     )
+
+
+def coerce_season_tool_plan(raw_payload: Any) -> Optional[SeasonToolPlanPayload]:
+    """Convert dict-like tool-plan payloads into the structured season tool-plan contract."""
+    if isinstance(raw_payload, SeasonToolPlanPayload):
+        return raw_payload
+    if not isinstance(raw_payload, dict):
+        return None
+    selected_tools = tuple(
+        str(item).strip()
+        for item in list(raw_payload.get("selected_tools") or [])
+        if str(item).strip()
+    )
+    selection_rationale = tuple(
+        str(item).strip()
+        for item in list(raw_payload.get("selection_rationale") or [])
+        if str(item).strip()
+    )
+    data_gaps = tuple(
+        str(item).strip()
+        for item in list(raw_payload.get("data_gaps") or [])
+        if str(item).strip()
+    )
+    return SeasonToolPlanPayload(
+        selected_tools=selected_tools,
+        selection_rationale=selection_rationale,
+        data_gaps=data_gaps,
+    )
+
+
+def validate_season_tool_plan(raw_payload: Any, *, max_tools: int = 4) -> bool:
+    """Return True only when the season tool plan is valid and usefully constrained."""
+    payload = coerce_season_tool_plan(raw_payload)
+    if payload is None:
+        return False
+    if not payload.selected_tools:
+        return False
+    if len(payload.selected_tools) > int(max_tools):
+        return False
+    if len(set(payload.selected_tools)) != len(payload.selected_tools):
+        return False
+    if len(payload.selection_rationale) < len(payload.selected_tools):
+        return False
+    return True
+
+
+def validate_season_stage_analysis_payload(raw_payload: Any) -> bool:
+    """Return True only when a season AI response matches the shared stage-analysis contract and season rules."""
+    payload = coerce_stage_analysis(raw_payload)
+    if payload is None or payload.stage != "season":
+        return False
+    if payload.confidence not in ALLOWED_CONFIDENCE_LEVELS:
+        return False
+    if len(payload.discoveries) > 4:
+        return False
+    for discovery in payload.discoveries:
+        if discovery.stage != "season":
+            return False
+        if not discovery.title or not discovery.body:
+            return False
+        if not discovery.evidence_keys and not discovery.anchor:
+            return False
+    return True
 
 
 def build_fallback_insight_payload(

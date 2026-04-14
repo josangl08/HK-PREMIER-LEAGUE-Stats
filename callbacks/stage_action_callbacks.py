@@ -12,7 +12,6 @@ from dash import Input, Output, State, dcc, html, no_update
 from flask_login import current_user
 
 # Project
-from callbacks.agent_callbacks import _run_agent_with_timeout
 from layouts.prematch_card import create_prematch_card
 from utils.ical_export import build_ical_bytes
 from utils.stage_helpers import get_projection_figure, render_image_gallery
@@ -73,63 +72,6 @@ def generate_card_callback(n_clicks, context):
     except Exception as exc:
         logger.error(f"generate_card error: {exc}")
         return dbc.Alert("No se pudo generar la card.", color="warning"), no_update
-
-
-def caption_ai_callback(n_clicks, context):
-    """Invokes the LangGraph agent to generate a social media caption for the match."""
-    if not n_clicks or not context:
-        return no_update
-    if context.get("type") != "post-match":
-        return no_update
-    payload = context.get("payload", {})
-    player_stats = payload.get("player_stats") or {}
-    basic = player_stats.get("basic_info", {})
-    player_name = basic.get("name") or payload.get("player_name", "el jugador")
-    home = payload.get("home_team", "")
-    away = payload.get("away_team", "")
-    match_label = f"{home} vs {away}" if home and away else "el partido"
-    query = (
-        f"Genera un caption de redes sociales en español para {player_name} "
-        f"tras el partido {match_label}. Máximo 280 caracteres. Incluye emojis."
-    )
-    agent_result = _run_agent_with_timeout(query, flow="player_analysis")
-    if agent_result.get("timeout") or agent_result.get("error"):
-        caption_text = f"¡Gran actuación de {player_name}! 💪⚽ #HKPremierLeague"
-    else:
-        caption_text = agent_result.get(
-            "output", f"¡Gran actuación de {player_name}! 💪⚽ #HKPremierLeague"
-        )
-    return dbc.Card(
-        [
-            dbc.CardHeader(
-                [
-                    html.I(className="bi bi-pencil-square me-2"),
-                    html.Span("Caption AI", className="fw-semibold"),
-                ],
-                className="border-0 py-2",
-            ),
-            dbc.CardBody(
-                [
-                    html.P(
-                        caption_text,
-                        id="caption-text-content",
-                        className="mb-3",
-                    ),
-                    dcc.Clipboard(
-                        target_id="caption-text-content",
-                        title="Copiar",
-                        style={"display": "inline-block"},
-                        className="btn btn-sm btn-outline-secondary",
-                    ),
-                ]
-            ),
-        ],
-        className="border-0 shadow-sm",
-        color="dark",
-        outline=True,
-    )
-
-
 
 def show_proyectar_callback(n_clicks, context):
     """Renders the season performance projection chart in the Stage."""

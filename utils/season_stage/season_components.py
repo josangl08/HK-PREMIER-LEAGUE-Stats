@@ -254,12 +254,47 @@ def render_worth_noticing_block(
     anchor = str(curated_insight.get("anchor") or "")
     served_from = str((debug_meta.get("served_from") or {}).get("overlay") or "")
     confidence = curated_insight.get("confidence")
+    evidence = dict(curated_insight.get("evidence") or {})
 
-    meta_bits = [badge_label.replace("_", " ")]
+    anchor_label_map = {
+        "season_profile_context": "Role profile",
+        "recent_form_context": "Recent form",
+        "competition_split_context": "Competition split",
+        "previous_season_context": "Season comparison",
+        "season_performance_context": "Season output",
+    }
+    anchor_label = anchor_label_map.get(
+        anchor,
+        anchor.replace("_", " ") if anchor else "Season intelligence",
+    )
+    status_label = {
+        "artifact": "Still the clearest signal",
+        "session_memory": "Held for continuity",
+        "inline": "New this visit",
+    }.get(served_from, "Contextual signal")
+
+    meta_bits = [badge_label.replace("_", " "), anchor_label]
     if confidence is not None:
         meta_bits.append(f"confidence {float(confidence):.2f}")
-    if served_from:
-        meta_bits.append(served_from)
+
+    evidence_summary = ""
+    if evidence.get("metric"):
+        evidence_summary = f"Focus: {evidence.get('metric')}"
+    elif evidence.get("competition"):
+        evidence_summary = f"Focus: {evidence.get('competition')}"
+    elif evidence.get("current_pos_group") and evidence.get("previous_pos_group"):
+        evidence_summary = (
+            f"Focus: {evidence.get('previous_pos_group')} -> {evidence.get('current_pos_group')}"
+        )
+    elif anchor:
+        evidence_summary = f"Focus: {anchor_label}"
+
+    tooltip_bits = [status_label]
+    if anchor_label:
+        tooltip_bits.append(anchor_label)
+    if evidence_summary and evidence_summary != f"Focus: {anchor_label}":
+        tooltip_bits.append(evidence_summary)
+    meta_tooltip = " | ".join(bit for bit in tooltip_bits if bit)
 
     return html.Div(
         [
@@ -275,7 +310,26 @@ def render_worth_noticing_block(
                         ],
                         className="season-worth-noticing__heading",
                     ),
-                    html.Div(" · ".join(meta_bits), className="season-worth-noticing__meta"),
+                    html.Div(
+                        " · ".join(meta_bits),
+                        className="season-worth-noticing__meta",
+                        title=meta_tooltip,
+                    ),
+                    html.Button(
+                        "×",
+                        id={
+                            "type": "stage-overlay-prominent-dismiss",
+                            "signal_id": str(curated_insight.get("signal_id") or ""),
+                            "evidence_key": str(curated_insight.get("evidence_key") or curated_insight.get("signal_id") or ""),
+                            "title": str(curated_insight.get("title") or ""),
+                            "body": str(curated_insight.get("body") or ""),
+                            "anchor": anchor,
+                            "tier": "prominent",
+                        },
+                        n_clicks=0,
+                        className="season-worth-noticing__dismiss",
+                        title="Cerrar",
+                    ),
                 ],
                 className="season-worth-noticing__top",
             ),
@@ -283,21 +337,12 @@ def render_worth_noticing_block(
                 str(curated_insight.get("body") or ""),
                 className="season-worth-noticing__body mb-0",
             ),
-            html.Div(
-                [
-                    html.Span(
-                        f"Anchor: {anchor.replace('_', ' ')}" if anchor else "Anchor: season intelligence",
-                        className="season-worth-noticing__chip",
-                    ),
-                    html.Span(
-                        str(curated_insight.get("signal_id") or ""),
-                        className="season-worth-noticing__chip season-worth-noticing__chip--muted",
-                    ),
-                ],
-                className="season-worth-noticing__footer",
-            ),
         ],
-        className="season-stage-panel season-worth-noticing",
+        className="season-stage-panel season-worth-noticing season-worth-noticing--full-width",
+        **{
+            "data-signal-id": str(curated_insight.get("signal_id") or ""),
+            "data-overlay-source": served_from or "unknown",
+        },
     )
 
 

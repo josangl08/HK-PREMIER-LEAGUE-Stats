@@ -8,13 +8,17 @@ from typing import Any, Dict, List, Mapping
 
 from utils.agents.season_agent import build_season_stage_analysis
 from utils.agents.signal_agent import curate_signals
+from utils.agents.stage_agents.season_agent import SeasonStageAgent
 from utils.insights.season_signals import build_season_signals
 from utils.intelligence.artifact_registry import ArtifactRegistry
+from utils.intelligence.discovery_contracts import coerce_stage_analysis, serialize_stage_analysis
+from utils.intelligence.discovery_overlay_mapper import build_overlay_candidates_from_analysis
 from utils.intelligence.runtime_config import get_intelligence_runtime_config
 from utils.intelligence.session_memory import (
     get_season_session_memory,
     put_season_session_memory,
 )
+from utils.intelligence.overlay_surface import resolve_stage_overlay_surface
 from utils.season_stage.season_intelligence import (
     RECENT_FORM_CONTEXT_ARTIFACT,
     SEASON_ARTIFACT_DEPENDENCIES,
@@ -27,7 +31,6 @@ from utils.season_stage.season_intelligence import (
     build_season_artifact_record,
     build_season_overlay_candidates_payload,
     build_season_signals_payload,
-    build_season_stage_analysis_payload,
     get_season_intelligence_state,
 )
 
@@ -40,6 +43,22 @@ _BASE_SEASON_ARTIFACTS = [
     "previous_season_context",
     RECENT_FORM_CONTEXT_ARTIFACT,
 ]
+
+
+def _is_viable_season_overlay_candidate(candidate: Mapping[str, Any] | None) -> bool:
+    """Return whether a season overlay candidate is usable for UI and session memory."""
+    candidate = candidate or {}
+    title = str(candidate.get("title") or "").strip()
+    body = str(candidate.get("body") or "").strip()
+    signal_id = str(candidate.get("signal_id") or "").strip()
+
+    if not signal_id:
+        return False
+    if title.lower() == "stage intelligence":
+        return False
+    if not title and not body:
+        return False
+    return True
 
 
 def _is_fresh(artifact_state: Mapping[str, Any] | None) -> bool:
@@ -216,6 +235,24 @@ def orchestrate_season_intelligence(
     session_memory = get_season_session_memory(player_id=player_id, season=season) or {}
     persisted_session_memory = False
     write_failures: List[Dict[str, str]] = []
+    current_memory_candidate = dict(session_memory.get("current_candidate") or {})
+    if current_memory_candidate and not _is_viable_season_overlay_candidate(current_memory_candidate):
+        memory_result = _sync_session_memory(
+            player_id=player_id,
+            season=season,
+            current_candidate=None,
+            existing_memory=session_memory,
+        )
+        session_memory = memory_result["memory"]
+        persisted_session_memory = memory_result["persisted"]
+        if memory_result["failure"]:
+            write_failures.append({"target": "session_memory", "error": memory_result["failure"]})
+        logger.info(
+            "Season session memory cleared stale candidate player_id=%s season=%s signal_id=%s",
+            player_id,
+            season,
+            str(current_memory_candidate.get("signal_id") or ""),
+        )
     logger.info(
         "Season intelligence runtime config player_id=%s season=%s artifacts_root=%s session_memory_root=%s persistence_enabled=%s derived_writes_enabled=%s",
         player_id,
@@ -235,8 +272,18 @@ def orchestrate_season_intelligence(
     )
 
     stage_analysis_payload = None
+    shared_stage_analysis = None
     signals_payload = None
     overlay_payload = None
+    overlay_surface = {
+        "stage": "season",
+        "candidates": [],
+        "candidate_count": 0,
+        "primary_candidate": None,
+        "visible_primary": None,
+        "deferred_candidates": [],
+        "inbox_entries": [],
+    }
     worth_noticing = None
     served_from = {
         "analysis": "fallback",
@@ -273,10 +320,19 @@ def orchestrate_season_intelligence(
     stored_analysis = (artifact_states.get(SEASON_STAGE_ANALYSIS_ARTIFACT) or {}).get("artifact")
     if _is_fresh(artifact_states.get(SEASON_STAGE_ANALYSIS_ARTIFACT)) and stored_analysis:
         stage_analysis_payload = dict((stored_analysis.get("payload") or {}))
+        coerced_analysis = coerce_stage_analysis(stage_analysis_payload)
+        if coerced_analysis is not None:
+            shared_stage_analysis = serialize_stage_analysis(coerced_analysis)
         served_from["analysis"] = "artifact"
     elif base_ready:
-        inline_analysis = build_season_stage_analysis(runtime_artifacts)
-        stage_analysis_payload = build_season_stage_analysis_payload(inline_analysis)
+        shared_stage_analysis = serialize_stage_analysis(
+            SeasonStageAgent().analyze(
+                scope={"player_id": player_id, "season": season, "stage": "season"},
+                artifacts=runtime_artifacts,
+                session_memory=session_memory,
+            )
+        )
+        stage_analysis_payload = shared_stage_analysis
         persisted_analysis = _persist_runtime_artifact(
             SEASON_STAGE_ANALYSIS_ARTIFACT,
             stage_analysis_payload,
@@ -299,9 +355,10 @@ def orchestrate_season_intelligence(
     stored_overlay = (artifact_states.get(SEASON_OVERLAY_CANDIDATES_ARTIFACT) or {}).get("artifact")
     if _is_fresh(artifact_states.get(SEASON_OVERLAY_CANDIDATES_ARTIFACT)) and stored_overlay:
         overlay_payload = dict((stored_overlay.get("payload") or {}))
-        worth_noticing = overlay_payload.get("selected_candidate")
-        served_from["overlay"] = "artifact"
-        if worth_noticing:
+        overlay_surface = resolve_stage_overlay_surface("season", overlay_payload)
+        worth_noticing = overlay_surface.get("primary_candidate")
+        if _is_viable_season_overlay_candidate(worth_noticing):
+            served_from["overlay"] = "artifact"
             memory_result = _sync_session_memory(
                 player_id=player_id,
                 season=season,
@@ -321,6 +378,56 @@ def orchestrate_season_intelligence(
                 str(worth_noticing.get("signal_id") or ""),
                 str(worth_noticing.get("novelty_key") or ""),
             )
+        else:
+            worth_noticing = None
+            overlay_surface["primary_candidate"] = None
+            overlay_surface["visible_primary"] = None
+            logger.info(
+                "Season orchestrator ignored stale overlay candidate player_id=%s season=%s",
+                player_id,
+                season,
+            )
+            if signals_payload and (signals_payload.get("signals") or []):
+                rebuilt_candidate = curate_signals(
+                    signals_payload.get("signals") or [],
+                    session_state=session_state,
+                    session_memory=session_memory,
+                )
+                overlay_payload = build_season_overlay_candidates_payload(
+                    signals_payload.get("signals") or [],
+                    selected_candidate=rebuilt_candidate,
+                )
+                overlay_surface = resolve_stage_overlay_surface("season", overlay_payload)
+                worth_noticing = overlay_surface.get("primary_candidate")
+                if _is_viable_season_overlay_candidate(worth_noticing):
+                    persisted_overlay = _persist_runtime_artifact(
+                        SEASON_OVERLAY_CANDIDATES_ARTIFACT,
+                        overlay_payload,
+                        player_id=player_id,
+                        season=season,
+                        base_payloads=base_payloads,
+                        dependency_artifacts=runtime_artifacts,
+                        registry=active_registry,
+                        runtime_config=runtime_config,
+                    )
+                    runtime_artifacts[SEASON_OVERLAY_CANDIDATES_ARTIFACT] = persisted_overlay["artifact"]
+                    if persisted_overlay["persisted"]:
+                        persisted_artifacts.append(SEASON_OVERLAY_CANDIDATES_ARTIFACT)
+                    elif persisted_overlay["failure"]:
+                        write_failures.append(
+                            {"target": SEASON_OVERLAY_CANDIDATES_ARTIFACT, "error": persisted_overlay["failure"]}
+                        )
+                    served_from["overlay"] = "inline"
+                    memory_result = _sync_session_memory(
+                        player_id=player_id,
+                        season=season,
+                        current_candidate=worth_noticing,
+                        existing_memory=session_memory,
+                    )
+                    session_memory = memory_result["memory"]
+                    persisted_session_memory = memory_result["persisted"]
+                    if memory_result["failure"]:
+                        write_failures.append({"target": "session_memory", "error": memory_result["failure"]})
     elif signals_payload and (signals_payload.get("signals") or []):
         next_candidate = curate_signals(
             signals_payload.get("signals") or [],
@@ -328,6 +435,8 @@ def orchestrate_season_intelligence(
             session_memory=session_memory,
         )
         current_candidate = dict(session_memory.get("current_candidate") or {})
+        if current_candidate and not _is_viable_season_overlay_candidate(current_candidate):
+            current_candidate = {}
         worth_noticing = next_candidate
         if not worth_noticing and current_candidate:
             worth_noticing = current_candidate
@@ -362,6 +471,12 @@ def orchestrate_season_intelligence(
             signals_payload.get("signals") or [],
             selected_candidate=worth_noticing,
         )
+        overlay_surface = resolve_stage_overlay_surface("season", overlay_payload)
+        worth_noticing = overlay_surface.get("primary_candidate")
+        if not _is_viable_season_overlay_candidate(worth_noticing):
+            worth_noticing = None
+            overlay_surface["primary_candidate"] = None
+            overlay_surface["visible_primary"] = None
         persisted_overlay = _persist_runtime_artifact(
             SEASON_OVERLAY_CANDIDATES_ARTIFACT,
             overlay_payload,
@@ -418,6 +533,23 @@ def orchestrate_season_intelligence(
     elif not stage_analysis_payload and not signals_payload:
         fallback_reason = "no_intelligence_payload_available"
 
+    if shared_stage_analysis is None:
+        shared_stage_analysis = serialize_stage_analysis(
+            SeasonStageAgent().analyze(
+                scope={"player_id": player_id, "season": season, "stage": "season"},
+                artifacts=runtime_artifacts,
+                session_memory=session_memory,
+            )
+        )
+    if not stage_analysis_payload:
+        stage_analysis_payload = shared_stage_analysis
+    shared_overlay_payload = build_overlay_candidates_from_analysis(shared_stage_analysis)
+    shared_overlay_surface = resolve_stage_overlay_surface("season", shared_overlay_payload)
+    if shared_overlay_surface.get("candidate_count"):
+        overlay_payload = shared_overlay_payload
+        overlay_surface = shared_overlay_surface
+        worth_noticing = overlay_surface.get("primary_candidate")
+
     result = {
         "available": bool(stage_analysis_payload or worth_noticing or signals_payload),
         "mode": mode,
@@ -425,9 +557,11 @@ def orchestrate_season_intelligence(
         "background_refresh_required": background_refresh_required,
         "refresh_plan": refresh_plan,
         "stage_analysis": stage_analysis_payload,
+        "shared_stage_analysis": shared_stage_analysis,
         "signals": signals_payload,
         "worth_noticing": worth_noticing,
         "overlay_candidates": overlay_payload,
+        "overlay_surface": overlay_surface,
         "debug": {
             "scope": state.get("scope") or {},
             "served_from": served_from,
@@ -446,6 +580,7 @@ def orchestrate_season_intelligence(
                 "derived_writes_enabled": bool(runtime_config.get("derived_writes_enabled")),
             },
             "write_failures": write_failures,
+            "overlay_surface": overlay_surface,
             "freshness": (state.get("debug") or {}).get("freshness") or {},
             "artifact_keys": (state.get("debug") or {}).get("artifact_keys") or {},
             "expected_fingerprints": (state.get("debug") or {}).get("expected_fingerprints") or {},
