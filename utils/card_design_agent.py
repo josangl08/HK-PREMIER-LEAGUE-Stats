@@ -189,9 +189,9 @@ def _build_editorial_brief(editorial_decision: Dict[str, Any]) -> str:
             lines.append(f"    #{stat.get('priority', '?')}  {stat['label']}  →  {stat['value']}")
     else:
         lines.append("- STATS: none")
-    visual = editorial_decision.get("supporting_visual") or {}
-    if visual.get("type", "none") != "none":
-        lines.append(f"- SUPPORTING VISUAL: {visual.get('type')}")
+    # Supporting visual (radar/sparkline/heatmap) intentionally omitted:
+    # Gemini cannot render data-accurate charts — any chart it adds would be decorative.
+    # The stats listed above are sufficient for the design.
     # Caption is for social media, explicitly NOT for the card design
     if editorial_decision.get("caption"):
         lines.append(f"- CAPTION (social media only, do NOT render on card): {editorial_decision['caption']}")
@@ -328,13 +328,23 @@ def performance_editor_node(state: AgentState) -> AgentState:
         )
         return {**state, "editorial_decision": decision}
 
-    # Post-match: user manually selected stats (2nd design attempt override)
+    # Post-match: user manually selected stats override (any non-empty selection takes priority)
     forced = state.get("forced_stats")
-    if forced and len(forced) >= 4:
-        result_score = str(stats.get("score") or intel.get("result") or "").strip()
+    if forced and len(forced) >= 1:
+        _forced_player = str((state.get("player_profile") or {}).get("name") or "Player")
+        _forced_comp = str(intel.get("competition") or "").strip()
+        _forced_home = str((intel.get("home") or {}).get("name") or "").strip()
+        _forced_away = str((intel.get("away") or {}).get("name") or "").strip()
+        _forced_team = str((state.get("match_payload") or {}).get("team") or "").strip()
+        _forced_opponent = _forced_away if _forced_home == _forced_team else _forced_home
+        _forced_sub_parts = []
+        if _forced_opponent:
+            _forced_sub_parts.append(f"vs {_forced_opponent}")
+        if _forced_comp:
+            _forced_sub_parts.append(_forced_comp)
         decision = _build_editorial_decision(
-            headline=result_score or "FULL TIME",
-            subheadline=str(intel.get("competition") or "").strip(),
+            headline=_forced_player,
+            subheadline=" · ".join(_forced_sub_parts[:2]),
             story_angle="user_selected",
             selected_stats=forced,
             supporting_visual={"type": "none", "reason": "User-selected stats override."},
@@ -596,11 +606,11 @@ def art_director_node(state: AgentState) -> AgentState:
         f"Accent colors (never as background fill): {', '.join(colors.get('accents',[]))}.\n\n"
         f"LAYOUT ELEMENTS — RENDER ALL:\n"
         f"  PLAYER NAME: '{player_name}' — largest, most dominant text on the card.\n"
-        f"  MATCHUP ROW: [HOME TEAM BADGE] {_matchup} [AWAY TEAM BADGE]\n"
-        f"    → The two team badges flank the score (or 'vs') in the center. Compact secondary row.\n"
+        f"  MATCHUP ROW: [HOME TEAM BADGE]  {_matchup}  [AWAY TEAM BADGE]\n"
+        f"    → Team badges flank the score (or 'vs') in the center. Compact secondary row.\n"
+        f"    → DATE '{intel['date']}' sits directly below or beside the matchup row as part of the same match-info block.\n"
         f"  COMPETITION: '{_comp_label}' — {_comp_badge_rule}\n"
         f"    → Competition badge or text: small, placed in a corner or alongside the competition name.\n"
-        f"  DATE: '{intel['date']}' — integrate with design intent (bottom strip, corner tag, or inline with match info).\n"
     )
 
     if is_post:

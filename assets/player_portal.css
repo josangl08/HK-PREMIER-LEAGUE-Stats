@@ -4591,13 +4591,27 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
     --Dash-Text-Strong:             rgba(255, 255, 255, 0.85);
     --Dash-Text-Weak:               rgba(255, 255, 255, 0.45);
 }
-/* Kill Bootstrap form validation red on hidden inputs */
+/* Kill ALL Bootstrap / Dash validation red — wrapper, inputs, pseudo-states */
+.card-studio-stats-dropdown,
+.card-studio-stats-dropdown:has(.is-invalid),
+.card-studio-stats-dropdown.is-invalid {
+    background: transparent !important;
+    border-color: rgba(255, 255, 255, 0.12) !important;
+    box-shadow: none !important;
+}
 .card-studio-stats-dropdown input,
 .card-studio-stats-dropdown select {
     background: transparent !important;
     border: none !important;
     box-shadow: none !important;
     outline: none !important;
+}
+/* Dash 4 error/invalid state overrides */
+.card-studio-stats-dropdown [data-invalid],
+.card-studio-stats-dropdown [aria-invalid="true"] {
+    border-color: rgba(0, 242, 255, 0.4) !important;
+    box-shadow: none !important;
+    background: transparent !important;
 }
 /* Trigger (closed state) */
 .card-studio-stats-dropdown .dash-dropdown {

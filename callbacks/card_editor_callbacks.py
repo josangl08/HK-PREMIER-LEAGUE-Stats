@@ -952,7 +952,17 @@ def register_card_editor_callbacks(app):
                 match_payload["card_type"] = state.get("card_type", "pre-match")
                 profile = _get_player_profile(player_id)
 
-                forced = state.get("selected_stats_manual") or []
+                # Decode JSON-encoded stat strings back to dicts for the agent
+                _raw_forced = state.get("selected_stats_manual") or []
+                forced = []
+                for item in _raw_forced:
+                    if isinstance(item, str):
+                        try:
+                            forced.append(json.loads(item))
+                        except (ValueError, TypeError):
+                            pass
+                    elif isinstance(item, dict):
+                        forced.append(item)  # backward compat
 
                 # Progress callback to update global state
                 def on_progress(p):
@@ -1695,7 +1705,8 @@ def _get_available_stats_options(milestones_data, milestone_id):
     for label, val in stats_dict.items():
         if val in [0, "0", "0'", "—", None, False]:
             continue  # Hide empty / zero stats
+        # Dash 4 requires value to be string/number/boolean — encode stat dict as JSON string
         options.append(
-            {"label": f"{label}: {val}", "value": {"label": label, "value": str(val)}}
+            {"label": f"{label}: {val}", "value": json.dumps({"label": label, "value": str(val)})}
         )
     return options

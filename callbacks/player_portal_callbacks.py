@@ -2707,6 +2707,8 @@ def register_player_portal_callbacks(app):
                     store_reuse_enabled,
                 )
                 return no_update
+            from utils.agents.career_intelligence_orchestrator import orchestrate_career_intelligence
+
             orchestration = orchestrate_career_intelligence(
                 data,
                 force_refresh=not persistence_enabled,

@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Mapping
 
+from utils.agents.orchestration_runtime import collect_fresh_payload_artifacts
 from utils.agents.season_agent import build_season_stage_analysis
 from utils.agents.signal_agent import curate_signals
 from utils.insights.season_signals import build_season_signals
@@ -37,22 +38,6 @@ _DERIVED_EXECUTION_ORDER = [
     SEASON_STAGE_ANALYSIS_ARTIFACT,
     SEASON_OVERLAY_CANDIDATES_ARTIFACT,
 ]
-
-
-def _is_fresh(artifact_state: Mapping[str, Any] | None) -> bool:
-    """Return whether an artifact-state entry is fresh."""
-    return str(((artifact_state or {}).get("freshness") or {}).get("status") or "") == "fresh"
-
-
-def _collect_fresh_payload_artifacts(
-    artifact_states: Mapping[str, Mapping[str, Any]],
-) -> Dict[str, Dict[str, Any]]:
-    """Return fresh artifact envelopes keyed by artifact type."""
-    fresh_artifacts: Dict[str, Dict[str, Any]] = {}
-    for artifact_type, state in artifact_states.items():
-        if _is_fresh(state) and state.get("artifact"):
-            fresh_artifacts[artifact_type] = dict(state["artifact"])
-    return fresh_artifacts
 
 
 def _expand_requested_derived_artifacts(
@@ -135,7 +120,7 @@ def execute_season_refresh(
     artifact_states = state.get("artifacts") or {}
     requested_artifacts = list(refresh_plan or state.get("refresh_plan") or [])
     requested_derived = _expand_requested_derived_artifacts(requested_artifacts)
-    fresh_artifacts = _collect_fresh_payload_artifacts(artifact_states)
+    fresh_artifacts = collect_fresh_payload_artifacts(artifact_states)
     runtime_artifacts = dict(fresh_artifacts)
     player_id = str((state.get("scope") or {}).get("player_id") or "")
     season = str((state.get("scope") or {}).get("season") or "")

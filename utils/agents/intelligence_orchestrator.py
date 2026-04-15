@@ -6,6 +6,11 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Mapping
 
+from utils.agents.orchestration_runtime import (
+    collect_fresh_payload_artifacts,
+    is_fresh_artifact_state,
+    sync_session_memory_with_graceful_failure,
+)
 from utils.agents.season_agent import build_season_stage_analysis
 from utils.agents.signal_agent import curate_signals
 from utils.agents.stage_agents.season_agent import SeasonStageAgent
@@ -59,20 +64,6 @@ def _is_viable_season_overlay_candidate(candidate: Mapping[str, Any] | None) -> 
     if not title and not body:
         return False
     return True
-
-
-def _is_fresh(artifact_state: Mapping[str, Any] | None) -> bool:
-    """Return whether an artifact-state entry is fresh."""
-    return str(((artifact_state or {}).get("freshness") or {}).get("status") or "") == "fresh"
-
-
-def _collect_fresh_payload_artifacts(artifact_states: Mapping[str, Mapping[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    """Return fresh artifact envelopes keyed by artifact type."""
-    fresh_artifacts: Dict[str, Dict[str, Any]] = {}
-    for artifact_type, state in artifact_states.items():
-        if _is_fresh(state) and state.get("artifact"):
-            fresh_artifacts[artifact_type] = dict(state["artifact"])
-    return fresh_artifacts
 
 
 def _persist_runtime_artifact(
@@ -186,31 +177,22 @@ def _sync_session_memory(
     existing_memory: Mapping[str, Any] | None,
 ) -> Dict[str, Any]:
     """Persist session memory with graceful degradation on failure."""
-    try:
-        stored_memory = _build_updated_session_memory(
+    return sync_session_memory_with_graceful_failure(
+        persist_fn=lambda: _build_updated_session_memory(
             player_id=player_id,
             season=season,
             current_candidate=current_candidate,
             existing_memory=existing_memory,
-        )
-        return {
-            "memory": stored_memory,
-            "persisted": True,
-            "failure": None,
-        }
-    except Exception as exc:
-        logger.exception(
-            "Season session memory persistence failed player_id=%s season=%s signal_id=%s: %s",
+        ),
+        logger=logger,
+        log_message="Season session memory persistence failed player_id=%s season=%s signal_id=%s: %s",
+        log_args=(
             player_id,
             season,
             str((current_candidate or {}).get("signal_id") or ""),
-            exc,
-        )
-        return {
-            "memory": dict(existing_memory or {}),
-            "persisted": False,
-            "failure": str(exc),
-        }
+        ),
+        existing_memory=existing_memory,
+    )
 
 
 def orchestrate_season_intelligence(
@@ -225,7 +207,7 @@ def orchestrate_season_intelligence(
     state = get_season_intelligence_state(stage_payload, registry=active_registry)
     artifact_states = state.get("artifacts") or {}
     refresh_plan = list(state.get("refresh_plan") or [])
-    fresh_artifacts = _collect_fresh_payload_artifacts(artifact_states)
+    fresh_artifacts = collect_fresh_payload_artifacts(artifact_states)
     runtime_artifacts = dict(fresh_artifacts)
     persisted_artifacts: List[str] = []
     player_id = str((state.get("scope") or {}).get("player_id") or "")
@@ -292,7 +274,7 @@ def orchestrate_season_intelligence(
     }
 
     stored_signals = (artifact_states.get(SEASON_SIGNALS_ARTIFACT) or {}).get("artifact")
-    if _is_fresh(artifact_states.get(SEASON_SIGNALS_ARTIFACT)) and stored_signals:
+    if is_fresh_artifact_state(artifact_states.get(SEASON_SIGNALS_ARTIFACT)) and stored_signals:
         signals_payload = dict((stored_signals.get("payload") or {}))
         served_from["signals"] = "artifact"
     elif base_ready:
@@ -318,7 +300,7 @@ def orchestrate_season_intelligence(
         served_from["signals"] = "inline"
 
     stored_analysis = (artifact_states.get(SEASON_STAGE_ANALYSIS_ARTIFACT) or {}).get("artifact")
-    if _is_fresh(artifact_states.get(SEASON_STAGE_ANALYSIS_ARTIFACT)) and stored_analysis:
+    if is_fresh_artifact_state(artifact_states.get(SEASON_STAGE_ANALYSIS_ARTIFACT)) and stored_analysis:
         stage_analysis_payload = dict((stored_analysis.get("payload") or {}))
         coerced_analysis = coerce_stage_analysis(stage_analysis_payload)
         if coerced_analysis is not None:
@@ -362,7 +344,10 @@ def orchestrate_season_intelligence(
             overlay_surface = shared_overlay_surface
             worth_noticing = shared_primary_candidate
             served_from["overlay"] = f"analysis_{served_from['analysis']}"
-            if not (_is_fresh(artifact_states.get(SEASON_OVERLAY_CANDIDATES_ARTIFACT)) and stored_overlay):
+            if not (
+                is_fresh_artifact_state(artifact_states.get(SEASON_OVERLAY_CANDIDATES_ARTIFACT))
+                and stored_overlay
+            ):
                 persisted_overlay = _persist_runtime_artifact(
                     SEASON_OVERLAY_CANDIDATES_ARTIFACT,
                     overlay_payload,
@@ -391,7 +376,11 @@ def orchestrate_season_intelligence(
             if memory_result["failure"]:
                 write_failures.append({"target": "session_memory", "error": memory_result["failure"]})
 
-    if worth_noticing is None and _is_fresh(artifact_states.get(SEASON_OVERLAY_CANDIDATES_ARTIFACT)) and stored_overlay:
+    if (
+        worth_noticing is None
+        and is_fresh_artifact_state(artifact_states.get(SEASON_OVERLAY_CANDIDATES_ARTIFACT))
+        and stored_overlay
+    ):
         overlay_payload = dict((stored_overlay.get("payload") or {}))
         overlay_surface = resolve_stage_overlay_surface("season", overlay_payload)
         worth_noticing = overlay_surface.get("primary_candidate")
