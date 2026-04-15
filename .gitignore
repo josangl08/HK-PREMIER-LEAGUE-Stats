@@ -2,6 +2,8 @@
 __pycache__/
 *.py[cod]
 *$py.class
+cache/
+cookies.json
 
 # C extensions
 *.so
@@ -49,7 +51,9 @@ coverage.xml
 *.py,cover
 .hypothesis/
 .pytest_cache/
+.pytest_cache/**
 cover/
+tests/
 
 # Translations
 *.mo
@@ -110,6 +114,9 @@ celerybeat.pid
 
 # SageMath parsed files
 *.sage.py
+
+# Secrets / credentials
+data/proxies.txt
 
 # Environments
 .env
@@ -178,16 +185,19 @@ reports/
 # Archivos de configuración sensibles
 .env
 secrets.json
+client_secret.json
 
 # Datos temporales y de prueba
 temp/
 tmp/
+*.csv
 data/archive/
 data/database.db
 data/database.db-wal
 data/database.db-shm
-data/fixtures/fixtures.json
-
+*.db-wal
+*.db-shm
+data/historical_records/*.json
 
 # Archivos IDE específicos
 .vscode/
@@ -217,26 +227,41 @@ DS_Store
 .QUICK_START.md
 .DESARROLLO.md
 .setup.py
-AGENTS.md
 
-# Assets locales y referencias
+# Fixtures
+data/fixtures/fixtures.json
+
+# Team Media & Photos
+assets/team_media/*
+assets/team_jersey/
 assets/team_logos/
 assets/team_media/
-assets/team_jersey/
+assets/templates
 assets/design_references/
 assets/design_trends/
+data/player_cards/*
+!data/player_cards/.gitkeep
+!data/player_cards/README.md
+storage/
+runtime/intelligence_artifacts/
+runtime/intelligence_session_memory/
+htmlcov/
+logo_plintel.png
+logo.png
+
 
 # .claude
 .claude/
 CLAUDE.md
 GEMINI.md
+AGENTS.md
 .mcp.json
 .github/
 
 # Entornos virtuales personalizados
 venv_HKS/
 
-# Tests y documentación (ignorado temporalmente)
+# Tests y documentación
 tests/
 docs/
 openspec/
@@ -255,3 +280,12 @@ models/**/*.pkl
 !models/registry.json
 
 data/users.json
+
+# Workspace and Automation
+*.code-workspace
+scripts/scheduled_jobs.sh
+temp_hkfa.html
+
+
+scripts/
+reports/

@@ -29,17 +29,46 @@ _COMPETITION_BADGE_STYLE = {
 
 def _logo_or_initial(team_name: str, logo_url: str | None) -> html.Div:
     """Return an Img from local assets if the file exists, else a styled initial badge."""
+    
+    # 1. Intentar resolver por nombre de equipo (estandarizado)
+    if team_name:
+        # Normalización base
+        normalized = team_name.lower().replace(" ", "_").replace("-", "_").replace(".", "")
+        
+        # Casos especiales (IDs de la base de datos vs archivos de logos)
+        special_cases = {
+            "north_district": "north_dt",
+            "north_dt": "north_dt"
+        }
+        normalized = special_cases.get(normalized, normalized)
+
+        for ext in ("png", "svg"):
+            local_file = f"{normalized}.{ext}"
+            if (_ASSETS_LOGOS / local_file).exists():
+                return html.Img(
+                    src=f"/assets/team_logos/{local_file}",
+                    style={"width": "64px", "height": "64px", "objectFit": "contain"},
+                    title=team_name,
+                )
+
+    # 2. Fallback: Intentar ver si el archivo de la URL existe localmente
     if logo_url:
-        slug = logo_url.split("/")[-1]  # e.g. kitchee.png
-        local_path = _ASSETS_LOGOS / slug
-        if local_path.exists():
+        slug = logo_url.split("/")[-1]
+        if (_ASSETS_LOGOS / slug).exists():
+            return html.Img(
+                src=f"/assets/team_logos/{slug}",
+                style={"width": "64px", "height": "64px", "objectFit": "contain"},
+                title=team_name,
+            )
+        # 3. Si no existe localmente, pero es una URL remota, cargarla
+        elif logo_url.startswith("http"):
             return html.Img(
                 src=logo_url,
                 style={"width": "64px", "height": "64px", "objectFit": "contain"},
                 title=team_name,
             )
 
-    # Fallback: initial letter badge
+    # 4. Fallback final: badge con inicial
     initial = (team_name or "?")[0].upper()
     return html.Div(
         initial,
@@ -98,7 +127,7 @@ def create_prematch_card(fixture: dict | None) -> html.Div:
         className="btn btn-sm btn-outline-danger mt-3 w-100",
     ) if streaming_url else None
 
-    return html.Div(
+    return html.Div([
         dbc.Card(
             dbc.CardBody([
                 # Competition badge

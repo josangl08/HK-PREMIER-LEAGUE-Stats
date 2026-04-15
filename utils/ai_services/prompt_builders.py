@@ -1,0 +1,672 @@
+# ABOUTME: Prompt builders for shared AI synthesis paths that start from structured domain payloads.
+# ABOUTME: Preserves evidence handles and field constraints so LLM output can be validated before UI rendering.
+
+from __future__ import annotations
+
+import json
+from typing import Any, Dict, Iterable, List
+
+from utils.ai_services.evidence_router import normalize_evidence_key
+
+
+def _summarize_payloads(payloads: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    summarized: List[Dict[str, Any]] = []
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        summarized.append(
+            {
+                "label": str(payload.get("label") or payload.get("title") or "").strip(),
+                "body": str(payload.get("body") or "").strip(),
+                "support": str(payload.get("support") or "").strip(),
+                "confidence": str(payload.get("confidence") or "medium").strip().lower(),
+                "evidence_key": normalize_evidence_key(payload.get("evidence_key") or ""),
+                "emphasis": str(payload.get("emphasis") or "neutral").strip().lower(),
+                "framing_hint": str(metadata.get("framing_hint") or "").strip().lower(),
+            }
+        )
+    return summarized
+
+
+def build_insight_synthesis_prompt(
+    *,
+    domain_name: str,
+    player_name: str,
+    deterministic_payloads: Iterable[Dict[str, Any]],
+    extra_context: Dict[str, Any] | None = None,
+    instruction: str = "",
+) -> str:
+    """Builds a strict JSON-first prompt for insight synthesis from structured payloads."""
+    payload_summary = _summarize_payloads(deterministic_payloads)
+    context_json = json.dumps(extra_context or {}, ensure_ascii=True)
+    payload_json = json.dumps(payload_summary, ensure_ascii=True)
+    instruction_text = instruction.strip() or (
+        "Refine the deterministic payloads without inventing evidence, preserving the same evidence_key values."
+    )
+
+    return (
+        f"You are synthesizing football insight payloads for the {domain_name} surface.\n"
+        f"Player: {player_name or 'Unknown player'}.\n"
+        f"Instructions: {instruction_text}\n"
+        f"Context JSON: {context_json}\n"
+        f"Deterministic payloads JSON: {payload_json}\n"
+        "Return JSON only as a list of objects with fields "
+        "`label`, `body`, `support`, `confidence`, `evidence_key`, and `emphasis`.\n"
+        "Do not invent new evidence keys. Keep confidence within low|medium|high."
+    )
+
+
+def build_career_narrative_prompt(
+    *,
+    player_name: str,
+    position_group: str,
+    primary_metric: str,
+    brief_stats: str,
+    form_trend: Dict[str, Any] | None = None,
+    transferability: Dict[str, Any] | None = None,
+) -> str:
+    """Builds the lightweight career narrative prompt used outside the dashboard card contract."""
+    trend = form_trend or {}
+    transfer = transferability or {}
+    metric_label = primary_metric.split(",")[0].strip()
+    return (
+        "Football scout context.\n"
+        f"Player: {player_name} ({position_group or 'Unknown role'}).\n"
+        f"Last 5-match form trend: {trend.get('trend', 'stable')} (slope {trend.get('slope', 0.0):+.3f}).\n"
+        f"Transferability score: {round(float(transfer.get('score', 0) or 0) * 100)}% ({transfer.get('label', '')}).\n"
+        f"Recent {metric_label} history: {brief_stats}.\n"
+        "Return a JSON object only with fields "
+        "`title`, `body`, `tier`, `cta_label`, and `urgency`.\n"
+        "The `body` must be exactly 2 sentences for a professional scout, focused on development trajectory and transfer potential."
+    )
+
+
+def build_career_dashboard_synthesis_prompt(
+    *,
+    player_name: str,
+    career_thesis: Dict[str, Any],
+    signals: Iterable[Dict[str, Any]],
+    levers: Iterable[Dict[str, Any]],
+    outlook: Dict[str, Any],
+    context: Dict[str, Any] | None = None,
+) -> str:
+    """Builds a strict JSON prompt for structured career-dashboard synthesis."""
+    thesis_json = json.dumps(career_thesis or {}, ensure_ascii=True)
+    signals_json = json.dumps(_summarize_payloads(signals), ensure_ascii=True)
+    levers_json = json.dumps(_summarize_payloads(levers), ensure_ascii=True)
+    outlook_json = json.dumps(outlook or {}, ensure_ascii=True)
+    context_json = json.dumps(context or {}, ensure_ascii=True)
+
+    return (
+        "You are refining a football career dashboard for player-facing UI.\n"
+        f"Player: {player_name or 'Unknown player'}.\n"
+        f"Context JSON: {context_json}\n"
+        f"Career thesis JSON: {thesis_json}\n"
+        f"Signals JSON: {signals_json}\n"
+        f"Levers JSON: {levers_json}\n"
+        f"Outlook JSON: {outlook_json}\n"
+        "Return JSON only with this exact top-level shape: "
+        "{\"career_thesis\": {\"label\": str, \"body\": str, \"support\": str, \"explanation\": str, "
+        "\"drivers\": [{\"label\": str, \"value\": str, \"tone\": str, \"evidence_key\": str}], "
+        "\"risks\": [{\"label\": str, \"value\": str, \"tone\": str, \"evidence_key\": str}]}, "
+        "\"signals\": ["
+        "{\"label\": str, \"body\": str, \"support\": str, \"confidence\": str, \"evidence_key\": str, \"emphasis\": str}"
+        "], "
+        "\"levers\": ["
+        "{\"label\": str, \"body\": str, \"support\": str, \"confidence\": str, \"evidence_key\": str, \"emphasis\": str}"
+        "], "
+        "\"outlook\": {\"label\": str, \"body\": str, \"support\": str, \"evidence_key\": str}}.\n"
+        "Preserve the existing evidence_key values and keep the same number and order of signals and levers.\n"
+        "Do not invent metrics or factual claims beyond the provided support text.\n"
+        "Keep confidence within low|medium|high and emphasis within neutral|positive|warning.\n"
+        "The explanation must be direct and player-facing, and every driver/risk must include a concrete value or trend.\n"
+        "Writing rules:\n"
+        "- Do not lightly paraphrase the deterministic copy.\n"
+        "- Each rewritten signal must materially differ in wording and framing from the deterministic input.\n"
+        "- Make every signal feel specific to this player and this case, not reusable for many players.\n"
+        "- Use the concrete career scale already present in the support text whenever possible.\n"
+        "- Avoid generic phrases like 'real weight', 'competitive value', 'current trend', or 'career momentum' unless you make them specific with surrounding context.\n"
+        "- Vary sentence openings and structure across signals.\n"
+        "- For career value signals, anchor the wording in the actual size of the player's body of work.\n"
+        "- For phase signals, explain what this phase means for this player now, not just what age band they are in.\n"
+        "- For recent signals, explicitly connect the short-term change to the wider career arc.\n"
+        "- Avoid report-like phrases such as 'competitive settings', 'threatens to undermine progress', or 'throughout the rest of the season'.\n"
+        "- Avoid inflated phrases like 'defying the typical decline', 'significant influence on the pitch', 'plenty to offer', or 'maintain your current standing'.\n"
+        "- Keep the language natural, concise, and non-technical.\n"
+        "- Use simple everyday English that any player can understand quickly.\n"
+        "- Prefer words like level, minutes, performance, trust, starts, rhythm, and next step over abstract career language.\n"
+        "- If a sentence can be explained with level, minutes, form, or role, choose that wording.\n"
+        "- Prefer short, plain words over abstract or polished analyst vocabulary.\n"
+        "- Avoid sounding corporate, academic, dramatic, or overly editorial.\n"
+        "- Do not use words like 'tenure', 'trajectory', 'volatility', 'substance', 'contraction', or 'campaign' unless absolutely necessary.\n"
+        "- Write like a smart human explaining the situation clearly, not like a report template.\n"
+        "- Do not reuse stock phrases such as 'solid foundation', 'flash in the pan', 'red flag', 'at this stage', 'built a body of work', or 'proving you belong'.\n"
+        "Block-specific rules:\n"
+        "- career_thesis: do not reuse the fallback body structure; explain the main career story in a fresh way that sounds personal to this player.\n"
+        "- career_thesis: the explanation should connect the strongest drivers and risks into one readable thought, not just restate labels.\n"
+        "- career_thesis: avoid broad prestige language and say plainly what is still strong, what is slipping, or why this phase is unusual.\n"
+        "- career_thesis: when the player is older, explain the challenge in simple terms such as keeping this level, these minutes, or this rhythm going.\n"
+        "- signals: each signal should feel like a specific reading of this player's situation, not a reusable dashboard label with new numbers.\n"
+        "- signals: avoid starting multiple signals with 'Your...' unless it is the clearest option.\n"
+        "- signals: every body must include at least one concrete anchor from this case, such as age, seasons tracked, latest season, last 5 matches, career minutes, goals, assists, or momentum.\n"
+        "- signals: do not put all the specificity into the support line while leaving the body generic.\n"
+        "- signals: titles should feel natural and specific, not generic category labels like 'Career Value' or 'Age and Impact' unless no better option is possible.\n"
+        "- signals: use framing_hint when provided to vary the angle of the message. recognition should sound like earned credit, warning should sound like a clear concern, tension should highlight a contradiction, checkpoint should sound like a moment to pay attention, and opportunity should sound like a realistic opening.\n"
+        "- signals: vary the framing between signals instead of using the same narrative pattern three times.\n"
+        "- signals: if one signal already talks about the player's long history, the next positive signal should focus on the current phase or role, not repeat the same idea.\n"
+        "- levers: explain what the player should focus on in simple football language, not percentile or analyst language.\n"
+        "- levers: the body should explain the football action itself, while the support line should explain the evidence behind it.\n"
+        "- levers: keep outcome language in the unlock metadata, not in the body or support.\n"
+        "- outlook: say what the next period means for this player in plain terms, and avoid repeating the thesis wording.\n"
+        "- outlook: avoid generic motivational language; be concrete about whether the player should steady their level, push on, or hold their current ground."
+    )
+
+
+def build_career_progression_assessment_prompt(
+    *,
+    player_name: str,
+    features: Dict[str, Any],
+) -> str:
+    """Builds a strict JSON prompt for guarded career progression assessment."""
+    features_json = json.dumps(features or {}, ensure_ascii=True)
+    return (
+        "You are evaluating football career progression from a closed deterministic feature set.\n"
+        f"Player: {player_name or 'Unknown player'}.\n"
+        f"Features JSON: {features_json}\n"
+        "Return JSON only with this exact shape: "
+        "{\"recommended_phase\": str, \"phase_hypothesis\": str, \"phase_adjustment\": str, "
+        "\"momentum_adjustment\": int, \"confidence\": str, \"context_patterns\": [str], "
+        "\"supporting_factors\": [str], \"blockers\": [str], \"risk_flags\": [str], "
+        "\"next_condition\": str, \"contradictions\": [str], \"insight_flags\": [str], "
+        "\"rationale\": str}.\n"
+        "Rules:\n"
+        "- recommended_phase must be one of Ambitious|Keep Pushing|Maintain Consistency|Find Consistency.\n"
+        "- phase_hypothesis must be one of development|building|peak|post-peak|unknown.\n"
+        "- phase_adjustment must be one of none|lean_forward|lean_backward.\n"
+        "- momentum_adjustment must be -1, 0, or 1.\n"
+        "- confidence must be low|medium|high.\n"
+        "- Use only factors visible in the provided feature JSON.\n"
+        "- Do not invent external context, injuries, contracts, or future events.\n"
+        "- Keep context_patterns, supporting_factors, blockers, risk_flags, and contradictions concise tokens, not sentences.\n"
+        "- next_condition must be one short sentence about what would move the player to a stronger recommendation.\n"
+        "- When late_peak_candidate is true, you may keep the player closer to peak rather than post-peak if the deterministic context still looks highly competitive.\n"
+        "- Use rationale to explain whether the deterministic baseline should be kept or lightly adjusted."
+    )
+
+
+def build_evidence_explanation_prompt(
+    *,
+    player_name: str,
+    evidence_key: str,
+    card_context: Dict[str, Any],
+    evidence_facts: Dict[str, Any],
+    career_summary: Dict[str, Any],
+) -> str:
+    """Builds a strict JSON prompt for evidence-modal explanation tied to one evidence view."""
+    card_context_json = json.dumps(card_context or {}, ensure_ascii=True)
+    evidence_json = json.dumps(evidence_facts or {}, ensure_ascii=True)
+    summary_json = json.dumps(career_summary or {}, ensure_ascii=True)
+    return (
+        "You are explaining one football evidence view for a player-facing dashboard modal.\n"
+        f"Player: {player_name or 'Unknown player'}.\n"
+        f"Evidence key: {normalize_evidence_key(evidence_key)}.\n"
+        f"Card context JSON: {card_context_json}\n"
+        f"Career summary JSON: {summary_json}\n"
+        f"Evidence facts JSON: {evidence_json}\n"
+        "Task:\n"
+        "- Explain what this evidence view shows in simple player-friendly language.\n"
+        "- Explain why it matters.\n"
+        "- Explain what the player should watch next.\n"
+        "- Use only the supplied context.\n"
+        "- Do not invent facts, causes, injuries, contracts, or tactical explanations not visible in the data.\n"
+        "- Keep every claim traceable to the supplied evidence facts.\n"
+        "- Keep the wording short, plain, and non-technical.\n"
+        "Return JSON only with this exact shape: "
+        "{\"evidence_key\": str, \"headline\": str, \"what_this_shows\": str, "
+        "\"why_it_matters\": str, \"what_to_watch\": str, \"confidence\": str}.\n"
+        "Rules:\n"
+        "- confidence must be low|medium|high.\n"
+        "- evidence_key must stay unchanged.\n"
+        "- headline must be short and direct.\n"
+        "- Each field after headline must be 1 sentence maximum.\n"
+        "- Avoid analyst words like trajectory, volatility, profile separation, or percentile unless absolutely necessary.\n"
+        "- Do not repeat the card body word-for-word.\n"
+    )
+
+
+def build_season_tool_selection_prompt(
+    *,
+    player_name: str,
+    season: str,
+    available_tools: Iterable[Dict[str, Any]],
+    core_tools: Iterable[str] | None = None,
+    max_tools: int = 3,
+) -> str:
+    """Build a strict JSON prompt for choosing which Season tools to inspect."""
+    tools_json = json.dumps(list(available_tools), ensure_ascii=True)
+    core_tools_json = json.dumps(list(core_tools or []), ensure_ascii=True)
+    return (
+        "Role:\n"
+        "You are a senior football performance analyst specializing in season-level player evaluation. "
+        "You work like a skeptical specialist who looks for patterns, tensions, milestones, and curiosities inside one season. "
+        "You do not invent facts, and you do not inspect tools unless they can materially improve the analysis.\n"
+        "Context:\n"
+        f"Player: {player_name or 'Unknown player'}.\n"
+        f"Season: {season or 'Unknown season'}.\n"
+        f"Core tools always included JSON: {core_tools_json}\n"
+        f"Available tools JSON: {tools_json}\n"
+        "Standards:\n"
+        "- Choose only the extra tools most likely to reveal non-trivial discoveries.\n"
+        "- Prefer the minimum extra tool set that gives strong analytical coverage.\n"
+        "Negative constraints:\n"
+        "- Do not explain your choices.\n"
+        "- Do not include rationale, commentary, markdown, or prose outside the JSON object.\n"
+        "- Do not select tools that are already included in the core tool list.\n"
+        "- Do not ask for data outside the available tool catalog.\n"
+        "Few-shot examples:\n"
+        "Good example: {\"selected_tools\": [\"recent_form\", \"season_profile\", \"previous_season\"]}\n"
+        "Bad example: {\"selected_tools\": [\"season_performance\", \"session_memory\", \"competition_split\", \"previous_season\", \"recent_form\"]}\n"
+        "Why bad: it includes core tools and too many extra tools.\n"
+        "Output contract:\n"
+        f"Return JSON only with this exact shape: {{\"selected_tools\": [str]}}.\n"
+        f"Select at least 1 tool and at most {int(max_tools)} extra tools.\n"
+        "Clarifying behavior:\n"
+        "If information is weak, still return the best small tool set. Do not ask questions."
+    )
+
+
+def build_season_discovery_synthesis_prompt(
+    *,
+    player_name: str,
+    season: str,
+    selected_tools: Iterable[str],
+    tool_outputs: Dict[str, Any],
+    session_memory: Dict[str, Any] | None = None,
+    model_profile: str = "flash",
+) -> str:
+    """Build a strict JSON prompt for season-stage discovery synthesis."""
+    tool_names_json = json.dumps(list(selected_tools), ensure_ascii=True)
+    tool_outputs_json = json.dumps(tool_outputs or {}, ensure_ascii=True)
+    session_json = json.dumps(session_memory or {}, ensure_ascii=True)
+    normalized_profile = str(model_profile or "flash").strip().lower()
+    if normalized_profile == "flash":
+        return (
+            "Role:\n"
+            "You are a senior football season analyst working inside a player-intelligence platform. "
+            "Extract the two most valuable season discoveries from the provided tools for a small overlay-first UI. "
+            "Write like a smart analyst speaking clearly to the player, not like a scouting report.\n"
+            "Context:\n"
+            f"Player: {player_name or 'Unknown player'}.\n"
+            f"Season: {season or 'Unknown season'}.\n"
+            f"Selected tools JSON: {tool_names_json}\n"
+            f"Tool outputs JSON: {tool_outputs_json}\n"
+            f"Session memory JSON: {session_json}\n"
+            "Standards:\n"
+            "- Use only the provided tool outputs.\n"
+            "- Prefer material patterns, tensions, or milestones.\n"
+            "- Keep claims traceable to visible evidence.\n"
+            "- Make the first discovery the clearest overlay candidate.\n"
+            "- If you add more discoveries, make each one materially different from the others.\n"
+            "- Use the full surface scale when justified: critical for urgent role risk, prominent for major next-step leverage, contextual for useful supporting guidance, and micro for minor but still actionable observations.\n"
+            "- Use natural player-facing English.\n"
+            "Negative constraints:\n"
+            "- Do not return more than 4 discoveries.\n"
+            "- Do not include markdown or text outside the JSON object.\n"
+            "- Do not invent scope, tools, or evidence beyond the input.\n"
+            "- Do not use generic football cliches.\n"
+            "- Do not make multiple discoveries about the same tension with different wording.\n"
+            "- Do not label every valid discovery prominent; use contextual or micro when the point is real but less urgent.\n"
+            "- Keep titles short, ideally 3 to 6 words.\n"
+            "- Keep each body to 1 or 2 sentences only.\n"
+            "- Avoid cold statistical phrasing like '100% decline', 'terminal point for attacks', or 'zero output' unless absolutely necessary.\n"
+            "- Prefer natural wording such as 'has stalled', 'has cooled', 'has not turned into end product lately', or 'is being used more as...'.\n"
+            "Output contract:\n"
+            "Return JSON only with this exact shape: "
+            "{\"summary\": str, \"confidence\": \"low|medium|high\", "
+            "\"discoveries\": ["
+            "{\"discovery_id\": str, \"type\": \"pattern|milestone|curiosity|warning|opportunity|summary\", "
+            "\"title\": str, \"body\": str, \"priority\": float, \"confidence\": float, "
+            "\"evidence_keys\": [str], \"novelty_key\": str, \"anchor\": str, "
+            "\"presentation_hint\": \"critical|prominent|contextual|micro\", \"cta_label\": str}"
+            "]"
+            "}.\n"
+            "Clarifying behavior:\n"
+            "If evidence is weak, return fewer discoveries and lower confidence instead of inventing."
+        )
+    return (
+        "Role:\n"
+        "You are a senior football season analyst working inside a player-intelligence platform. "
+        "Your job is to inspect the selected season tools and extract the most valuable discoveries from this stage only. "
+        "You think in patterns, tensions, milestones, curiosities, warnings, and opportunities. "
+        "You are direct, evidence-bound, and skeptical of generic narratives.\n"
+        "Context:\n"
+        f"Player: {player_name or 'Unknown player'}.\n"
+        f"Season: {season or 'Unknown season'}.\n"
+        f"Selected tools JSON: {tool_names_json}\n"
+        f"Tool outputs JSON: {tool_outputs_json}\n"
+        f"Session memory JSON: {session_json}\n"
+        "Standards:\n"
+        "- Use only the provided tool outputs.\n"
+        "- Separate facts from interpretation implicitly by keeping claims traceable to visible data.\n"
+        "- Prefer discoveries that are new, material, and relevant to this season.\n"
+        "- Name tradeoffs, tensions, or caveats when the evidence conflicts.\n"
+        "- Keep the language plain and specific.\n"
+        "- Make the discoveries distinct from each other rather than repeating one angle twice.\n"
+        "- Write in a direct player-facing tone, not in cold scouting jargon.\n"
+        "Negative constraints:\n"
+        "- Do not summarize the prompt before answering.\n"
+        "- Do not produce generic football cliches.\n"
+        "- Do not use abstract filler such as trajectory, leverage, game-changer, or delve.\n"
+        "- Do not restate every tool; only surface discoveries that matter.\n"
+        "- Do not emit more than 4 discoveries.\n"
+        "- Do not mark a discovery critical unless the evidence is exceptionally strong.\n"
+        "- Do not reuse a recent novelty key from session memory unless the new evidence is materially stronger.\n"
+        "- Avoid producing two discoveries that are both versions of the same role/profile mismatch.\n"
+        "- Avoid phrases like '100% decline', 'terminal point', 'trajectory', or 'profile separation' unless there is no simpler wording.\n"
+        "Few-shot examples:\n"
+        "Good example discovery: "
+        "{\"discovery_id\": \"season-pattern-1\", \"stage\": \"season\", \"type\": \"pattern\", "
+        "\"title\": \"Recent output is running ahead of the wider season baseline\", "
+        "\"body\": \"The last 5-match window is outperforming the earlier phase of the season, which suggests a real momentum change rather than stable output.\", "
+        "\"priority\": 0.74, \"confidence\": 0.7, \"evidence_keys\": [\"recent_form_context\"], "
+        "\"novelty_key\": \"recent-form-upswing\", \"anchor\": \"recent_form_context\", \"presentation_hint\": \"prominent\", "
+        "\"cta_label\": \"View insight\"}\n"
+        "Bad example discovery: "
+        "{\"title\": \"Great season\", \"body\": \"The player is showing strong trajectory and important value.\", \"priority\": 0.9}\n"
+        "Why bad: generic, unsupported, vague, and missing evidence linkage.\n"
+        "Output contract:\n"
+        "Return JSON only with this exact shape: "
+        "{\"stage\": \"season\", \"scope\": {\"player_id\": str, \"season\": str, \"stage\": \"season\"}, "
+        "\"summary\": str, \"confidence\": \"low|medium|high\", "
+        "\"discoveries\": ["
+        "{\"discovery_id\": str, \"stage\": \"season\", \"type\": \"pattern|milestone|curiosity|warning|opportunity|summary\", "
+        "\"title\": str, \"body\": str, \"priority\": float, \"confidence\": float, "
+        "\"evidence_keys\": [str], \"novelty_key\": str, \"anchor\": str, "
+        "\"presentation_hint\": \"critical|prominent|contextual|micro\", \"cta_label\": str, "
+        "\"supporting_artifacts\": [str], \"metadata\": {}}"
+        "], "
+        "\"supporting_artifacts\": [str], "
+        "\"debug\": {\"data_gaps\": [str], \"used_tools\": [str], \"llm_generated\": true}}.\n"
+        "Clarifying behavior:\n"
+        "If the information is too weak for a strong discovery, return fewer discoveries, lower confidence, and record the missing information in `debug.data_gaps` instead of inventing."
+    )
+
+
+def build_prematch_tool_selection_prompt(
+    *,
+    player_name: str,
+    opponent: str,
+    available_tools: Iterable[Dict[str, Any]],
+    core_tools: Iterable[str] | None = None,
+    max_tools: int = 3,
+) -> str:
+    """Build a strict JSON prompt for choosing which Prematch tools to inspect."""
+    tools_json = json.dumps(list(available_tools), ensure_ascii=True)
+    core_tools_json = json.dumps(list(core_tools or []), ensure_ascii=True)
+    return (
+        "Role:\n"
+        "You are a senior football match analyst preparing one player for one upcoming game. "
+        "You focus on the direct duel, the opponent's main threat, and the clearest tactical windows. "
+        "You understand that the likely direct rival may be more or less certain depending on the matchup confidence in the tools.\n"
+        "Context:\n"
+        f"Player: {player_name or 'Unknown player'}.\n"
+        f"Opponent: {opponent or 'Unknown opponent'}.\n"
+        f"Core tools always included JSON: {core_tools_json}\n"
+        f"Available tools JSON: {tools_json}\n"
+        "Standards:\n"
+        "- Choose only the extra tools most likely to improve the tactical read for this fixture.\n"
+        "- Prefer the smallest extra tool set that still gives a strong match-specific view.\n"
+        "- If rival_profiles is available, use it when the likely direct rival or matchup certainty matters.\n"
+        "Negative constraints:\n"
+        "- Do not explain your choices.\n"
+        "- Do not include rationale, markdown, or text outside the JSON object.\n"
+        "- Do not select tools that are already core tools.\n"
+        "- Do not ask for more data.\n"
+        "Few-shot examples:\n"
+        "Good example: {\"selected_tools\": [\"rival_profiles\", \"opponent_threat\", \"head_to_head\"]}\n"
+        "Bad example: {\"selected_tools\": [\"fixture_context\", \"recent_form\", \"session_memory\", \"deterministic_baseline\", \"rival_profiles\"]}\n"
+        "Why bad: it repeats core tools and tries to inspect too much.\n"
+        "Output contract:\n"
+        f"Return JSON only with this exact shape: {{\"selected_tools\": [str]}}.\n"
+        f"Select at least 1 tool and at most {int(max_tools)} extra tools.\n"
+        "Clarifying behavior:\n"
+        "If information is thin, still return the best small tool set. Do not ask questions."
+    )
+
+
+def build_career_tool_selection_prompt(
+    *,
+    player_name: str,
+    available_tools: Iterable[Dict[str, Any]],
+    core_tools: Iterable[str] | None = None,
+    max_tools: int = 3,
+) -> str:
+    """Build a strict JSON prompt for choosing which Career tools to inspect."""
+    tools_json = json.dumps(list(available_tools), ensure_ascii=True)
+    core_tools_json = json.dumps(list(core_tools or []), ensure_ascii=True)
+    return (
+        "Role:\n"
+        "You are a senior football career analyst specializing in player progression, trust, role growth, and next-step readiness.\n"
+        "Context:\n"
+        f"Player: {player_name or 'Unknown player'}.\n"
+        f"Core tools always included JSON: {core_tools_json}\n"
+        f"Available tools JSON: {tools_json}\n"
+        "Standards:\n"
+        "- Choose only the extra tools most likely to reveal meaningful career patterns, tensions, or levers.\n"
+        "- Prefer the smallest extra tool set that still gives a strong player-specific read.\n"
+        "Negative constraints:\n"
+        "- Do not explain your choices.\n"
+        "- Do not include rationale, markdown, or prose outside the JSON object.\n"
+        "- Do not select tools that are already core tools.\n"
+        "- Do not ask for more data.\n"
+        "Few-shot examples:\n"
+        "Good example: {\"selected_tools\": [\"signals_context\", \"priorities_context\"]}\n"
+        "Bad example: {\"selected_tools\": [\"phase_context\", \"dashboard_brief\", \"session_memory\", \"signals_context\"]}\n"
+        "Why bad: it repeats core tools and uses more than needed.\n"
+        "Output contract:\n"
+        f"Return JSON only with this exact shape: {{\"selected_tools\": [str]}}.\n"
+        f"Select at least 1 tool and at most {int(max_tools)} extra tools.\n"
+        "Clarifying behavior:\n"
+        "If information is thin, still return the best small tool set. Do not ask questions."
+    )
+
+
+def build_career_discovery_synthesis_prompt(
+    *,
+    player_name: str,
+    selected_tools: Iterable[str],
+    tool_outputs: Dict[str, Any],
+    session_memory: Dict[str, Any] | None = None,
+    model_profile: str = "flash",
+) -> str:
+    """Build a strict JSON prompt for career-stage discovery synthesis."""
+    tool_names_json = json.dumps(list(selected_tools), ensure_ascii=True)
+    tool_outputs_json = json.dumps(tool_outputs or {}, ensure_ascii=True)
+    session_json = json.dumps(session_memory or {}, ensure_ascii=True)
+    normalized_profile = str(model_profile or "flash").strip().lower()
+    if normalized_profile == "flash":
+        return (
+            "Role:\n"
+            "You are a senior football career analyst speaking directly to the player. "
+            "Extract the clearest career-level discoveries from the provided tools for a small overlay-first UI.\n"
+            "Context:\n"
+            f"Player: {player_name or 'Unknown player'}.\n"
+            f"Selected tools JSON: {tool_names_json}\n"
+            f"Tool outputs JSON: {tool_outputs_json}\n"
+            f"Session memory JSON: {session_json}\n"
+            "Standards:\n"
+            "- Use only the provided tool outputs.\n"
+            "- Make the first discovery the clearest career takeaway right now.\n"
+            "- If you add a second discovery, make it materially different from the first.\n"
+            "- Write in short, natural player-facing English.\n"
+            "Negative constraints:\n"
+            "- Do not return more than 2 discoveries.\n"
+            "- Do not include markdown or text outside the JSON object.\n"
+            "- Do not repeat the same career tension twice.\n"
+            "- Do not use abstract analyst terms when plain player language is clearer.\n"
+            "- Keep titles short, ideally 3 to 6 words.\n"
+            "Output contract:\n"
+            "Return JSON only with this exact shape: "
+            "{\"summary\": str, \"confidence\": \"low|medium|high\", "
+            "\"discoveries\": ["
+            "{\"discovery_id\": str, \"type\": \"opportunity|warning|pattern|milestone|summary\", "
+            "\"title\": str, \"body\": str, \"priority\": float, \"confidence\": float, "
+            "\"evidence_keys\": [str], \"novelty_key\": str, \"anchor\": str, "
+            "\"presentation_hint\": \"critical|prominent|contextual|micro\", \"cta_label\": str}"
+            "]"
+            "}.\n"
+            "Clarifying behavior:\n"
+            "If the context is weak, return one lower-confidence discovery rather than inventing detail."
+        )
+    return (
+        "Role:\n"
+        "You are a senior football career analyst. "
+        "Turn the provided career tools into clear discoveries about progression, trust, role, and next-step readiness.\n"
+        "Context:\n"
+        f"Player: {player_name or 'Unknown player'}.\n"
+        f"Selected tools JSON: {tool_names_json}\n"
+        f"Tool outputs JSON: {tool_outputs_json}\n"
+        f"Session memory JSON: {session_json}\n"
+        "Standards:\n"
+        "- Use only the provided tool outputs.\n"
+        "- Prefer player-specific progression patterns, tensions, and milestones.\n"
+        "- Keep every claim traceable to visible data.\n"
+        "- Make discoveries distinct from each other.\n"
+        "- Use the full surface scale when justified: critical for urgent role risk, prominent for major next-step leverage, contextual for useful supporting guidance, and micro for smaller but actionable observations.\n"
+        "- Write directly to the player in plain English.\n"
+        "Negative constraints:\n"
+        "- Do not summarize the prompt before answering.\n"
+        "- Do not produce generic motivation or filler.\n"
+        "- Do not emit more than 4 discoveries.\n"
+        "- Do not mark a discovery critical unless the evidence is exceptionally strong.\n"
+        "- Do not label every valid discovery prominent; use contextual or micro when the point is real but less urgent.\n"
+        "- Do not repeat a recent novelty key from session memory unless the new evidence is materially stronger.\n"
+        "- Do not include stage, scope, supporting_artifacts, or debug in the response.\n"
+        "- Do not return nested metadata objects.\n"
+        "Output contract:\n"
+        "Return JSON only with this exact shape: "
+        "{\"summary\": str, \"confidence\": \"low|medium|high\", \"discoveries\": ["
+        "{\"discovery_id\": str, "
+        "\"type\": \"opportunity|warning|pattern|milestone|summary\", "
+        "\"title\": str, \"body\": str, \"priority\": float, \"confidence\": float, "
+        "\"evidence_keys\": [str], \"novelty_key\": str, \"anchor\": str, "
+        "\"presentation_hint\": \"critical|prominent|contextual|micro\", \"cta_label\": str}"
+        "]}.\n"
+        "Clarifying behavior:\n"
+        "If the context is weak, return one lower-confidence discovery rather than inventing detail."
+    )
+
+
+def build_prematch_discovery_synthesis_prompt(
+    *,
+    player_name: str,
+    opponent: str,
+    selected_tools: Iterable[str],
+    tool_outputs: Dict[str, Any],
+    session_memory: Dict[str, Any] | None = None,
+    model_profile: str = "flash",
+) -> str:
+    """Build a strict JSON prompt for prematch-stage discovery synthesis."""
+    tool_names_json = json.dumps(list(selected_tools), ensure_ascii=True)
+    tool_outputs_json = json.dumps(tool_outputs or {}, ensure_ascii=True)
+    session_json = json.dumps(session_memory or {}, ensure_ascii=True)
+    normalized_profile = str(model_profile or "flash").strip().lower()
+    if normalized_profile == "flash":
+        return (
+            "Role:\n"
+            "You are a senior football match analyst speaking directly to the player before kickoff. "
+            "Extract the clearest tactical guidance from the prematch tools for a small overlay-first UI. "
+            "Treat the likely direct rival as a strong clue, not a certainty, unless matchup confidence is high.\n"
+            "Context:\n"
+            f"Player: {player_name or 'Unknown player'}.\n"
+            f"Opponent: {opponent or 'Unknown opponent'}.\n"
+            f"Selected tools JSON: {tool_names_json}\n"
+            f"Tool outputs JSON: {tool_outputs_json}\n"
+            f"Session memory JSON: {session_json}\n"
+            "Standards:\n"
+            "- Use only the provided tool outputs.\n"
+            "- Make the first discovery the clearest plan for the next match.\n"
+            "- If you add a second discovery, make it materially different from the first.\n"
+            "- Write in short, natural player-facing English.\n"
+            "- If rival_profiles shows low or medium matchup confidence, say 'likely rival' or keep the wording conditional.\n"
+            "- Use opponent_threat to separate the direct duel from the opponent's main threat when they are not the same thing.\n"
+            "Negative constraints:\n"
+            "- Do not return more than 2 discoveries.\n"
+            "- Do not write scouting-report prose or long paragraphs.\n"
+            "- Do not include markdown or text outside the JSON object.\n"
+            "- Do not repeat the same tactical angle twice.\n"
+            "- Avoid stiff phrases like 'exploit their profile separation', 'target zones', or 'terminal actions'.\n"
+            "- Do not speak as if one rival is guaranteed when matchup confidence is not high.\n"
+            "- Prefer 'likely rival' over 'primary rival'.\n"
+            "- Prefer direct player language like 'do not give him time on the ball' over staff phrases like 'dictate the tempo'.\n"
+            "- Keep titles short, ideally 3 to 6 words.\n"
+            "Output contract:\n"
+            "Return JSON only with this exact shape: "
+            "{\"summary\": str, \"confidence\": \"low|medium|high\", "
+            "\"discoveries\": ["
+            "{\"discovery_id\": str, \"type\": \"tactical_plan|warning|opportunity|pattern|summary\", "
+            "\"title\": str, \"body\": str, \"priority\": float, \"confidence\": float, "
+            "\"evidence_keys\": [str], \"novelty_key\": str, \"anchor\": str, "
+            "\"presentation_hint\": \"critical|prominent|contextual|micro\", \"cta_label\": str}"
+            "]"
+            "}.\n"
+            "Clarifying behavior:\n"
+            "If the context is weak, return one lower-confidence discovery rather than inventing detail."
+        )
+    return (
+        "Role:\n"
+        "You are a senior football match analyst preparing one player for one upcoming game. "
+        "Your job is to turn prematch tools into clear tactical discoveries about the direct duel, the opponent threat, and the most useful attacking or defensive adjustment. "
+        "Treat the likely direct rival as a probability unless the matchup confidence is high.\n"
+        "Context:\n"
+        f"Player: {player_name or 'Unknown player'}.\n"
+        f"Opponent: {opponent or 'Unknown opponent'}.\n"
+        f"Selected tools JSON: {tool_names_json}\n"
+        f"Tool outputs JSON: {tool_outputs_json}\n"
+        f"Session memory JSON: {session_json}\n"
+        "Standards:\n"
+        "- Use only the provided tool outputs.\n"
+        "- Prefer clear tactical actions and concrete matchup cues.\n"
+        "- Keep every claim traceable to visible data.\n"
+        "- Make discoveries distinct from each other.\n"
+        "- Write directly to the player in plain English.\n"
+        "- If matchup confidence is not high, use cautious framing such as likely rival, likely lane, or if the duel lands there.\n"
+        "- Separate the direct rival from the opponent's broader danger when the threat tool points elsewhere.\n"
+        "Negative constraints:\n"
+        "- Do not summarize the prompt before answering.\n"
+        "- Do not produce generic motivation or filler.\n"
+        "- Do not use abstract analyst language when a football action is clearer.\n"
+        "- Do not emit more than 3 discoveries.\n"
+        "- Do not mark a discovery critical unless the evidence is exceptionally strong.\n"
+        "- Do not present a low-confidence matchup as if it is certain.\n"
+        "- Prefer 'likely rival' over 'primary rival'.\n"
+        "- Prefer direct player language like 'do not give him time on the ball' over staff phrases like 'dictate the tempo'.\n"
+        "- Do not repeat a recent novelty key from session memory unless the new evidence is materially stronger.\n"
+        "Few-shot examples:\n"
+        "Good example discovery: "
+        "{\"discovery_id\": \"prematch-plan-1\", \"stage\": \"prematch\", \"type\": \"tactical_plan\", "
+        "\"title\": \"Drive at the full-back\", "
+        "\"body\": \"Your likely direct rival defends well in duels but can still be exposed when the action turns and they have to recover toward their own goal.\", "
+        "\"priority\": 0.8, \"confidence\": 0.78, \"evidence_keys\": [\"prematch_rival_profiles_context\"], "
+        "\"novelty_key\": \"drive-full-back\", \"anchor\": \"prematch_rival_profiles_context\", "
+        "\"presentation_hint\": \"prominent\", \"cta_label\": \"Open preview\"}\n"
+        "Bad example discovery: "
+        "{\"title\": \"Big game\", \"body\": \"Stay focused and exploit their weaknesses.\", \"priority\": 0.9}\n"
+        "Why bad: vague, generic, unsupported, and not tactical enough.\n"
+        "Output contract:\n"
+        "Return JSON only with this exact shape: "
+        "{\"stage\": \"prematch\", \"scope\": {\"player_id\": str, \"fixture_id\": str, \"stage\": \"prematch\"}, "
+        "\"summary\": str, \"confidence\": \"low|medium|high\", "
+        "\"discoveries\": ["
+        "{\"discovery_id\": str, \"stage\": \"prematch\", \"type\": \"tactical_plan|warning|opportunity|pattern|summary\", "
+        "\"title\": str, \"body\": str, \"priority\": float, \"confidence\": float, "
+        "\"evidence_keys\": [str], \"novelty_key\": str, \"anchor\": str, "
+        "\"presentation_hint\": \"critical|prominent|contextual|micro\", \"cta_label\": str, "
+        "\"supporting_artifacts\": [str], \"metadata\": {}}"
+        "], "
+        "\"supporting_artifacts\": [str], "
+        "\"debug\": {\"data_gaps\": [str], \"used_tools\": [str], \"llm_generated\": true}}.\n"
+        "Clarifying behavior:\n"
+        "If the information is too weak for a strong tactical call, return fewer discoveries, lower confidence, and record the gap in `debug.data_gaps` instead of inventing."
+    )

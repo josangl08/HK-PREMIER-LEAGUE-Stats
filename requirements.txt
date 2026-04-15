@@ -5,9 +5,15 @@
 # Librerías centrales para la aplicación web y visualizaciones.
 dash[testing]==4.0.0
 dash-bootstrap-components==2.0.4
+dash-cytoscape>=1.0.0
 plotly==6.6.0
 Flask==3.0.3
 werkzeug==3.0.3
+
+# == Persistencia de Datos (SQLAlchemy) ==
+# Para el nuevo motor de base de datos (SQLite/PostgreSQL).
+SQLAlchemy==2.0.29
+psycopg2-binary==2.9.9 # Driver para PostgreSQL (Supabase)
 
 # == Autenticación y Sesiones ==
 # Manejo de logins y sesiones de usuario.
@@ -17,6 +23,7 @@ Flask-Login==0.6.3
 # Manipulación de datos y cálculos numéricos.
 pandas==2.2.2
 numpy==1.26.4
+pyarrow>=15.0  # Parquet serialization for processed DataFrame cache
 
 # == Extracción de Datos (Web Scraping) ==
 # Para obtener datos de fuentes web.
@@ -46,8 +53,10 @@ scikit-learn>=1.4
 umap-learn>=0.5.3
 sentence-transformers>=2.7
 rembg>=2.0
-langgraph>=0.1
-langchain-google-genai>=1.0
+google-genai>=0.3.0
+langgraph>=0.2.2
+langchain-google-genai>=2.0.1
+langchain-google-vertexai>=1.0
 
 # == Servidor de Producción ==
 # Servidor WSGI para despliegue en entornos de producción.
@@ -59,3 +68,5 @@ pytest==8.2.2
 pytest-cov==5.0.0
 requests-mock==1.12.1
 playwright==1.58.0
+playwright-stealth==2.0.3
+googlesearch-python

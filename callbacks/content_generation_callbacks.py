@@ -7,6 +7,7 @@ import logging
 import zipfile
 from io import BytesIO
 from datetime import date
+from pathlib import Path
 
 # Third-party
 import dash_bootstrap_components as dbc
@@ -66,6 +67,32 @@ def handle_photo_upload(contents, filename):
         return dbc.Alert(f"Error procesando imagen: {str(e)}", color="danger"), no_update
 
     return status, _build_cutout_gallery(player_id)
+
+
+@callback(
+    Output('player-cutouts-gallery', 'children', allow_duplicate=True),
+    Input({"type": "cutout-delete-btn", "index": ALL}, 'n_clicks'),
+    prevent_initial_call=True,
+)
+def delete_cutout(n_clicks_list):
+    """Delete the clicked cutout from disk and refresh the gallery."""
+    if not any(n_clicks_list):
+        return no_update
+
+    if not current_user.is_authenticated or current_user.role not in ('player', 'admin'):
+        return no_update
+
+    triggered = ctx.triggered_id
+    if not triggered or not isinstance(triggered, dict):
+        return no_update
+
+    filename = triggered.get("index")
+    if not filename:
+        return no_update
+
+    player_id = getattr(current_user, 'player_id', None) or current_user.username
+    _motor.delete_cutout(player_id, filename)
+    return _build_cutout_gallery(player_id)
 
 
 @callback(
@@ -209,7 +236,7 @@ def generate_batch(n_clicks, selected_players, fmt):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _build_cutout_gallery(player_id: str):
-    """Build a gallery of cutout thumbnails from cached PNGs."""
+    """Build a gallery of cutout thumbnails from cached PNGs, each with a delete button."""
     cutouts = _motor.get_cutouts(player_id)
     if not cutouts:
         return html.P(
@@ -220,17 +247,37 @@ def _build_cutout_gallery(player_id: str):
     thumbnails = []
     for path in cutouts:
         try:
+            filename = Path(path).name
             with open(path, 'rb') as f:
                 data = base64.b64encode(f.read()).decode()
             thumbnails.append(
-                html.Img(
-                    src=f"data:image/png;base64,{data}",
-                    style={
-                        "width": "80px", "height": "80px",
-                        "objectFit": "cover", "borderRadius": "8px",
-                        "border": "1px solid #ddd",
-                    },
-                )
+                html.Div([
+                    html.Img(
+                        src=f"data:image/png;base64,{data}",
+                        style={
+                            "width": "80px", "height": "80px",
+                            "objectFit": "cover", "borderRadius": "8px",
+                            "border": "1px solid #3A3A3C",
+                            "display": "block",
+                        },
+                    ),
+                    html.Button(
+                        html.I(className="bi bi-x"),
+                        id={"type": "cutout-delete-btn", "index": filename},
+                        n_clicks=0,
+                        title="Eliminar imagen",
+                        style={
+                            "position": "absolute", "top": "2px", "right": "2px",
+                            "width": "20px", "height": "20px",
+                            "padding": "0", "border": "none",
+                            "borderRadius": "50%",
+                            "background": "rgba(200,40,40,0.85)",
+                            "color": "#fff", "fontSize": "11px",
+                            "lineHeight": "1", "cursor": "pointer",
+                            "display": "flex", "alignItems": "center", "justifyContent": "center",
+                        },
+                    ),
+                ], style={"position": "relative", "display": "inline-block"})
             )
         except Exception:
             continue

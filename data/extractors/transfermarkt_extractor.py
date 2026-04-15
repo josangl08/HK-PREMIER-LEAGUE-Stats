@@ -1,817 +1,1519 @@
-# ABOUTME: Extractor for Transfermarkt data (team injuries and player match history).
-# ABOUTME: Provides get_match_history() for historical match stats per player/season.
+# ABOUTME: Extractor for Transfermarkt data (team injuries, player match history, and player photos).
+# ABOUTME: Provides get_match_history(), get_player_photo_url(), fetch_and_store_player_photo() with blob storage in DB.
 
+import random
 import requests
+import cloudscraper
 from bs4 import BeautifulSoup, Tag
 import pandas as pd
 import time
 import re
+import difflib
+import urllib.parse
+import os
 from datetime import datetime, timedelta
 import logging
 from typing import Dict, List, Optional, Tuple, Union, Sequence
-from bs4 import Tag
 from bs4.element import PageElement
 from pathlib import Path
-import json
+from requests.cookies import create_cookie
+
+from utils.proxy_manager import ProxyManager
+from utils.common import get_current_season
+
+# Known TM spellings for HKPL team IDs — used to boost club_score when our
+# internal name doesn't match TM's exact spelling.
+_TEAM_TM_ALIASES: dict[str, list[str]] = {
+    "eastern":           ["Eastern AA", "Eastern SC", "Eastern"],
+    "eastern_district":  ["Eastern District", "Eastern District AA", "Eastern Dt."],
+    "north_district":    ["North District", "North District AA", "North Dt."],
+    "southern_district": ["Southern District", "Southern District AA"],
+    "hong_kong_fc":      ["Hong Kong FC", "HKFC"],
+    "kowloon_city":      ["Kowloon City", "Kowloon City FC"],
+    "lee_man":           ["Lee Man", "Lee Man FC"],
+    "tai_po":            ["Tai Po", "Tai Po FC", "Wofoo Tai Po"],
+    "kitchee":           ["Kitchee", "Kitchee SC"],
+    "bc_rangers":        ["BC Rangers", "BC Rangers FC"],
+    "sham_shui_po":      ["Sham Shui Po", "Sham Shui Po AA"],
+    "yuen_long":         ["Yuen Long", "Yuen Long FC"],
+    "wong_tai_sin":      ["Wong Tai Sin", "Wong Tai Sin SA"],
+    "resources_capital": ["Resources Capital", "Resources Capital FC", "RCFC"],
+}
+
+# TM club IDs for HKPL teams — used to fetch squad pages directly when
+# name search fails to surface the player (common for low-profile players).
+_TEAM_TM_CLUB_IDS: dict[str, int] = {
+    "tai_po":            34329,   # Tai Po
+    "kitchee":           15979,   # Kitchee
+    "eastern":           15974,   # Eastern SC
+    "eastern_district":  48928,   # Eastern District
+    "north_district":    62534,   # North District
+    "southern_district": 36670,   # Southern District
+    "bc_rangers":        15976,   # Hong Kong Rangers (BC Rangers)
+    "kowloon_city":      36930,   # Kowloon City
+    "lee_man":           61336,   # Lee Man
+    "hong_kong_fc":      14413,   # Hong Kong Football Club
+    "sham_shui_po":      34332,   # Sham Shui Po
+    "yuen_long":         34397,   # Yuen Long
+    "resources_capital": 36935,   # Resources Capital
+}
+
+_USER_AGENTS = [
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+]
 
 class TransfermarktExtractor:
     """
-    Extractor de datos de Transfermarkt para lesiones de equipos de Hong Kong.
+    Extractor avanzado de Transfermarkt para rendimiento detallado de jugadores.
     """
-    
-    def __init__(self, cache_dir: str = "data/cache"):
-        """
-        Inicializa el extractor.
-        
-        Args:
-            cache_dir: Directorio para cache de datos
-        """
-        self.base_url = "https://www.transfermarkt.es"
-        self.league_url = f"{self.base_url}/hong-kong-premier-league/startseite/wettbewerb/HGKG/saison_id/2024"
-        
-        # Headers para evitar bloqueos
+
+    def __init__(self, cache_dir: str = "data/cache", proxy_manager: Optional[ProxyManager] = None):
+        self.base_url = "https://www.transfermarkt.com"
         self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
+            'User-Agent': random.choice(_USER_AGENTS),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
             'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
+            'DNT': '1',
             'Upgrade-Insecure-Requests': '1',
         }
-        
-        # Configuración de rate limiting mejorada
-        self.delay_between_requests = 3  # Aumentado para evitar bloqueos
+        self.delay_min = 10.0
+        self.delay_max = 20.0
+        self.request_count = 0
         self.last_request_time = 0
-        self.max_retries = 2  # Máximo intentos por petición
-        
-        # Cache
+        self.proxy_manager = proxy_manager or ProxyManager()
         self.cache_dir = Path(cache_dir)
-        self.cache_dir.mkdir(exist_ok=True, parents=True)
-        self.teams_cache_file = self.cache_dir / "transfermarkt_teams.json"
-        self.injuries_cache_file = self.cache_dir / "transfermarkt_injuries.json"
-        
-        # Configurar logging
+        self.competition_logos_dir = Path("assets/competition_logos")
+        self.team_logos_dir = Path("assets/team_logos")
         self.logger = logging.getLogger(__name__)
-        
-        # Lista de equipos conocidos para validación
-        self.known_teams = {
-            'Lee Man', 'Eastern', 'Kitchee', 'Rangers', 'Southern District',
-            'Tai Po', 'Kowloon City', 'North District', 'Hong Kong Football Club'
+        self.last_http_status: Optional[int] = None
+        self.last_block_type: Optional[str] = None
+        self.last_block_reason: Optional[str] = None
+        self.last_result_source: Optional[str] = None
+        self.last_cache_fresh: bool = False
+        self.session = cloudscraper.create_scraper(
+            browser={"browser": "chrome", "platform": "darwin", "mobile": False}
+        )
+        self.session.headers.update(self.headers)
+
+        # Whitelist ampliada: Todo lo que juegue un equipo de HK
+        self.ALLOWED_COMPETITIONS = {
+            "Hong Kong Premier League", "Hong Kong FA Cup", "Hong Kong Sapling Cup",
+            "Hong Kong Sapling Cup ('15-'25)", "Hong Kong Senior Challenge Shield",
+            "Hong Kong Community Cup", "HKPL", "HKFA Cup", "Senior Shield", "Sapling Cup",
+            "菁英盃", "足總盃", "銀牌", "香港超級聯賽", "Play-off", "Champions League",
+            "AFC Cup", "ACL Elite", "AFC Champions League Two", "Quali",
+            "Copa de la AFC", "Clasificación", "AFC Champions League", "ACL"
         }
-    
+
+    def _is_national_team_competition(self, comp_name: str | None) -> bool:
+        text = str(comp_name or "").lower()
+        national_tokens = [
+            "asian cup",
+            "world cup",
+            "qualification",
+            "qualifier",
+            "nations cup",
+            "friendly international",
+            "u17",
+            "u20",
+            "u23",
+            "u-17",
+            "u-20",
+            "u-23",
+        ]
+        return any(token in text for token in national_tokens)
+
+    def _filter_supported_match_history_result(self, result: Dict) -> Dict:
+        filtered_matches: List[Dict] = []
+        summary = {
+            "goals": 0,
+            "assists": 0,
+            "yellow_cards": 0,
+            "red_cards": 0,
+            "minutes_played": 0,
+            "total_matches": 0,
+            "own_goals": 0,
+        }
+
+        for match in result.get("matches", []):
+            competition = match.get("competition")
+            if self._is_national_team_competition(competition):
+                continue
+
+            filtered_matches.append(match)
+            if str(match.get("status") or "") != "Jugado":
+                continue
+
+            summary["goals"] += int(match.get("goals", 0) or 0)
+            summary["assists"] += int(match.get("assists", 0) or 0)
+            summary["yellow_cards"] += int(match.get("yellow_cards", 0) or 0)
+            summary["red_cards"] += int(match.get("red_cards", 0) or 0)
+            summary["minutes_played"] += int(match.get("minutes_played", 0) or 0)
+            summary["own_goals"] += int(match.get("own_goals", 0) or 0)
+            summary["total_matches"] += 1
+
+        return {"matches": filtered_matches, "summary": summary}
+
+    def _season_date_bounds(self, season_key: str) -> tuple[datetime, datetime]:
+        start_year = int(str(season_key).split("-")[0])
+        season_start = datetime(start_year, 7, 1)
+        season_end = datetime(start_year + 1, 6, 30, 23, 59, 59)
+        return season_start, season_end
+
+    def _read_db_cached_match_history(self, tm_player_id: str, season_key: str) -> List[Dict]:
+        try:
+            from sqlalchemy import select
+
+            from models.db_models import MatchHistory, Player
+            from utils.db_engine import SessionFactory
+
+            season_start, season_end = self._season_date_bounds(season_key)
+            with SessionFactory() as session:
+                player = session.execute(
+                    select(Player).where(Player.tm_id == int(tm_player_id))
+                ).scalars().first()
+                if not player:
+                    return []
+
+                rows = session.execute(
+                    select(MatchHistory)
+                    .where(
+                        MatchHistory.player_id == player.id,
+                        MatchHistory.date >= season_start,
+                        MatchHistory.date <= season_end,
+                    )
+                    .order_by(MatchHistory.date.desc())
+                ).scalars().all()
+
+                matches: List[Dict] = []
+                for row in rows:
+                    payload = dict(row.raw_data or {})
+                    payload.setdefault("date", row.date.strftime("%d/%m/%Y"))
+                    payload.setdefault("competition", row.competition_name)
+                    payload.setdefault("competition_logo", row.competition_logo)
+                    payload.setdefault("opponent", row.opponent)
+                    payload.setdefault("result", row.result)
+                    payload.setdefault("minutes_played", row.minutes_played or 0)
+                    payload.setdefault("goals", row.goals or 0)
+                    payload.setdefault("assists", row.assists or 0)
+                    payload.setdefault("yellow_cards", row.yellow_cards or 0)
+                    payload.setdefault("red_cards", row.red_cards or 0)
+                    payload.setdefault("position", row.position)
+                    payload.setdefault("status", row.status)
+                    matches.append(payload)
+                return matches
+        except Exception as exc:
+            self.logger.debug("Failed reading DB cached match history for %s (%s): %s", tm_player_id, season_key, exc)
+            return []
     def _wait_rate_limit(self):
-        """Aplica rate limiting entre requests."""
-        current_time = time.time()
-        elapsed = current_time - self.last_request_time
-        if elapsed < self.delay_between_requests:
-            time.sleep(self.delay_between_requests - elapsed)
+        self.request_count += 1
+        # Every 10 requests, take a longer break to look human.
+        if self.request_count % 10 == 0:
+            pause = random.uniform(20, 35)
+            self.logger.debug("Rate limit long pause: %.1fs after %d requests", pause, self.request_count)
+            time.sleep(pause)
+        else:
+            delay = random.uniform(self.delay_min, self.delay_max)
+            elapsed = time.time() - self.last_request_time
+            remaining = delay - elapsed
+            if remaining > 0:
+                time.sleep(remaining)
+        # Rotate User-Agent every 5 requests.
+        if self.request_count % 5 == 0:
+            self.session.headers.update({'User-Agent': random.choice(_USER_AGENTS)})
         self.last_request_time = time.time()
     
-    def _make_request(self, url: str, retries: int = 0) -> Optional[BeautifulSoup]:
-        """
-        Realiza una petición HTTP con manejo de errores y reintentos.
-        
-        Args:
-            url: URL a consultar
-            retries: Número de reintentos realizados
-            
-        Returns:
-            BeautifulSoup object o None si hay error
-        """
+    def _make_request(self, url: str) -> Optional[BeautifulSoup]:
+        proxy_url = self.proxy_manager.get_proxy() if self.proxy_manager.has_proxies else None
+        proxies = self.proxy_manager.as_requests_dict(proxy_url) if proxy_url else None
         try:
             self._wait_rate_limit()
-            self.logger.info(f"Solicitando: {url} (intento {retries + 1})")
-            
-            # Timeout más largo para peticiones complejas
-            response = requests.get(url, headers=self.headers, timeout=15)
+            self.logger.info("Scraping: %s%s", url, f" [proxy]" if proxy_url else "")
+            self.last_block_type = None
+            self.last_block_reason = None
+            self.last_result_source = "network"
+            self.last_cache_fresh = False
+            response = self.session.get(url, timeout=15, proxies=proxies)
+            self.last_http_status = response.status_code
+            self.last_request_time = time.time()
+            protection_reason = self._detect_protection_page(response.text)
+            if protection_reason:
+                self.last_block_type = "AWS_WAF_HUMAN_VERIFICATION"
+                self.last_block_reason = protection_reason
+                self.logger.warning("Transfermarkt protection page detected for %s: %s", url, protection_reason)
+                if proxy_url:
+                    self.proxy_manager.mark_failure(proxy_url)
+                return None
             response.raise_for_status()
-            
-            soup = BeautifulSoup(response.content, 'html.parser')
-            return soup
-            
-        except requests.Timeout as e:
-            if retries < self.max_retries:
-                self.logger.warning(f"Timeout en {url}, reintentando...")
-                time.sleep(5)  # Pausa extra antes de reintentar
-                return self._make_request(url, retries + 1)
-            else:
-                self.logger.error(f"Timeout final en {url}: {e}")
-                return None
-                
-        except requests.RequestException as e:
-            if retries < self.max_retries:
-                self.logger.warning(f"Error de red en {url}, reintentando...")
-                time.sleep(5)
-                return self._make_request(url, retries + 1)
-            else:
-                self.logger.error(f"Error final solicitando {url}: {e}")
-                return None
-                
-        except Exception as e:
-            self.logger.error(f"Error inesperado procesando {url}: {e}")
-            return None
-    
-    def extract_teams(self, force_refresh: bool = False) -> List[Dict]:
-        """
-        Extrae la lista de equipos de la liga
-        
-        Args:
-            force_refresh: Forzar actualización ignorando cache
-            
-        Returns:
-            Lista de diccionarios con información de equipos (sin duplicados)
-        """
-        # Verificar cache
-        if not force_refresh and self.teams_cache_file.exists():
-            try:
-                with open(self.teams_cache_file, 'r', encoding='utf-8') as f:
-                    cached_data = json.load(f)
-                    # Verificar si el cache es reciente (menos de 24 horas)
-                    cache_time = datetime.fromisoformat(cached_data.get('timestamp', '2000-01-01'))
-                    if datetime.now() - cache_time < timedelta(hours=24):
-                        self.logger.info("Usando equipos desde cache")
-                        return cached_data['teams']
-            except Exception as e:
-                self.logger.warning(f"Error leyendo cache de equipos: {e}")
-        
-        # Scraping de equipos
-        soup = self._make_request(self.league_url)
-        if not soup:
-            return []
-        
-        teams = []
-        seen_team_ids = set()  # Para evitar duplicados
-        
-        try:
-            # Estrategia 1: Buscar en la tabla principal
-            self.logger.info("Buscando equipos en tabla principal...")
-            
-            # Buscar tabla de clasificación o equipos
-            table = soup.find('table', {'class': 'items'})
-            if table and isinstance(table, Tag):
-                rows = table.find_all('tr') if isinstance(table, Tag) else []
-                for row in rows:
-                    if not isinstance(row, Tag):
-                        continue
-                    
-                    # Buscar células con enlaces de equipos
-                    cells = row.find_all('td') if isinstance(row, Tag) else []
-                    for cell in cells:
-                        links = cell.find_all('a', href=re.compile(r'/[^/]+/startseite/verein/\d+')) if isinstance(cell, Tag) else []
-                        for link in links:
-                            if isinstance(link, Tag):
-                                team_info = self._extract_team_from_link(link)
-                                if team_info and team_info['id'] not in seen_team_ids:
-                                    teams.append(team_info)
-                                    seen_team_ids.add(team_info['id'])
-            
-            # Estrategia 2: Buscar directamente todos los enlaces de equipos
-            if len(teams) < 8:  # Si no encontramos suficientes equipos
-                self.logger.info("Buscando equipos directamente en toda la página...")
-                team_links = soup.find_all('a', href=re.compile(r'/[^/]+/startseite/verein/\d+'))
-                
-                for link in team_links:
-                    team_info = self._extract_team_from_link(link)
-                    if team_info and team_info['id'] not in seen_team_ids:
-                        teams.append(team_info)
-                        seen_team_ids.add(team_info['id'])
-                        
-                        # Limitar a un número razonable de equipos
-                        if len(teams) >= 12:
-                            break
-            
-            # Filtrar equipos conocidos
-            filtered_teams = []
-            for team in teams:
-                # Verificar si es un equipo conocido o contiene palabras clave
-                team_name = team['name']
-                if (any(known in team_name for known in self.known_teams) or
-                    'hong kong' in team_name.lower() or
-                    'district' in team_name.lower() or
-                    'city' in team_name.lower()):
-                    filtered_teams.append(team)
-            
-            teams = filtered_teams if filtered_teams else teams
-                    
-        except Exception as e:
-            self.logger.error(f"Error extrayendo equipos: {e}")
-            return []
-        
-        # Guardar en cache
-        cache_data = {
-            'timestamp': datetime.now().isoformat(),
-            'teams': teams
-        }
-        
-        try:
-            with open(self.teams_cache_file, 'w', encoding='utf-8') as f:
-                json.dump(cache_data, f, ensure_ascii=False, indent=2)
-                self.logger.info(f"Equipos guardados en cache: {len(teams)}")
-        except Exception as e:
-            self.logger.warning(f"Error guardando cache de equipos: {e}")
-        
-        self.logger.info(f"Equipos extraídos (sin duplicados): {len(teams)}")
-        return teams
-    def _extract_team_from_link(self, link: Union[Tag, PageElement]) -> Optional[Dict]:
-        """
-        Extrae información de equipo desde un enlace.
-        
-        Args:
-            link: Tag o PageElement de enlace
-            link: Tag de enlace
-            
-        Returns:
-            Diccionario con información del equipo o None
-        """
-        try:
-            if not isinstance(link, Tag):
-                return None
-                
-            href = link.get('href', '')
-            title = link.get('title', '') or link.get_text(strip=True)
-            
-            if not href or not title:
-                return None
-            
-            # Extraer ID del equipo de la URL
-            match = re.search(r'/verein/(\d+)', str(href))
-            if not match:
-                return None
-            
-            team_id = match.group(1)
-            
-            # Crear nombre limpio para URL de lesiones
-            team_name_url = str(href).split('/')[1] if '/' in str(href) else f"team-{team_id}"
-            
-            team_info = {
-                'id': team_id,
-                'name': str(title).strip(),
-                'url_name': team_name_url,
-                'injuries_url': f"{self.base_url}/{team_name_url}/sperrenundverletzungen/verein/{team_id}/plus/1"
-            }
-            
-            self.logger.debug(f"Equipo extraído: {title} (ID: {team_id})")
-            return team_info
-            
-        except Exception as e:
-            self.logger.debug(f"Error extrayendo equipo de enlace: {e}")
-            return None
-    
-    def extract_team_injuries(self, team: Dict) -> List[Dict]:
-        """
-        Extrae las lesiones de un equipo específico - VERSIÓN MEJORADA.
-        
-        Args:
-            team: Diccionario con información del equipo
-            
-        Returns:
-            Lista de diccionarios con información de lesiones
-        """
-        soup = self._make_request(team['injuries_url'])
-        if not soup:
-            return []
-        
-        injuries = []
-        
-        try:
-            self.logger.info(f"URL de lesiones: {team['injuries_url']}")
-            
-            # Extraer la sección de lesiones
-            injuries_section = self._find_injuries_section(soup, team['name'])
-            if not injuries_section:
-                return []
-            
-            # Extraer la tabla de lesiones
-            injury_table = self._find_injury_table(injuries_section, team['name'])
-            if not injury_table:
-                return []
-            
-            # Extraer las filas válidas
-            valid_rows = self._extract_valid_rows(injury_table)
-            self.logger.info(f"Total de filas encontradas: {len(valid_rows)}")
-            
-            # Procesar filas válidas
-            for cells in valid_rows:
-                try:
-                    # Filter to ensure only Tag objects are passed
-                    valid_cells = [cell for cell in cells if isinstance(cell, Tag)]
-                    injury = self._parse_injury_row(valid_cells, team)
-                    if injury:
-                        injuries.append(injury)
-                        self.logger.info(f"Lesión extraída: {injury['player_name']} - {injury['injury_type']}")
-                
-                except Exception as e:
-                    self.logger.warning(f"Error procesando fila de lesión: {e}")
-                    continue
-            
-        except Exception as e:
-            self.logger.error(f"Error extrayendo lesiones de {team['name']}: {e}")
-        
-        self.logger.info(f"Lesiones extraídas de {team['name']}: {len(injuries)}")
-        return injuries
-
-    def _find_injuries_section(self, soup, team_name: str) -> Optional[Tag]:
-        """Encuentra la sección de lesiones en la página."""
-        try:
-            # Buscar todos los encabezados de sección
-            section_headers = soup.find_all('h2', {'class': 'content-box-headline'})
-            
-            # Buscar el encabezado de lesiones
-            for header in section_headers:
-                if 'Sanciones y lesiones' in header.get_text(strip=True):
-                    # Encontrar la sección completa
-                    return header.find_parent('div', {'class': 'box'})
-            
-            self.logger.warning(f"No se encontró sección de lesiones para {team_name}")
+            if proxy_url:
+                self.proxy_manager.mark_success(proxy_url)
+            return BeautifulSoup(response.content, 'html.parser')
+        except requests.HTTPError as e:
+            self.last_http_status = e.response.status_code if e.response is not None else None
+            self.logger.error("Error en %s: %s", url, e)
+            if proxy_url:
+                self.proxy_manager.mark_failure(proxy_url)
             return None
         except Exception as e:
-            self.logger.error(f"Error buscando sección de lesiones: {e}")
+            self.last_http_status = None
+            self.logger.error("Error en %s: %s", url, e)
+            if proxy_url:
+                self.proxy_manager.mark_failure(proxy_url)
             return None
 
-    def _find_injury_table(self, injuries_section: Tag, team_name: str) -> Optional[Tag]:
-        """Encuentra la tabla de lesiones dentro de la sección."""
-        try:
-            # Verificar si hay mensaje de "No hay datos"
-            empty_message = injuries_section.find('span', {'class': 'empty'})
-            if empty_message and "No hay datos" in empty_message.get_text(strip=True):
-                self.logger.info(f"No hay lesiones para {team_name}")
-                return None
-            
-            # Buscar tabla de lesiones dentro de la sección
-            injury_table = injuries_section.find('table', {'class': 'items'})
-            if not injury_table or not isinstance(injury_table, Tag):
-                self.logger.warning(f"No se encontró tabla de lesiones para {team_name}")
-                return None
-            
-            return injury_table if isinstance(injury_table, Tag) else None
-        except Exception as e:
-            self.logger.error(f"Error buscando tabla de lesiones: {e}")
+    def _detect_protection_page(self, html: str) -> Optional[str]:
+        text = (html or "").lower()
+        if not text:
             return None
-
-    def _extract_valid_rows(self, injury_table: Tag) -> List[List[Tag]]:
-        """Extrae las filas válidas de la tabla de lesiones."""
-        try:
-            rows = injury_table.find_all('tr')
-            self.logger.info(f"Filas en la tabla principal: {len(rows)}")
-            
-            # Verificar si hay encabezado
-            header_row = None
-            for row in rows:
-                if isinstance(row, Tag) and row.find('th') and len(row.find_all('th')) > 5:
-                    header_row = row
-                    break
-            
-            # Si no hay encabezado válido, puede no ser la tabla correcta
-            if not header_row:
-                self.logger.warning("No se encontró encabezado en la tabla")
-                return []
-            
-            valid_rows = []
-            # Procesar filas que no son encabezados
-            for row in rows:
-                if row == header_row or (isinstance(row, Tag) and row.find('th')):
-                    continue
-                    
-                # Verificar si es la fila de "Lesiones"
-                if isinstance(row, Tag) and row.find('td', {'class': 'extrarow'}) and "Lesiones" in row.get_text(strip=True):
-                    continue
-                
-                # Obtener todas las celdas
-                cells = row.find_all('td') if isinstance(row, Tag) else []
-                if len(cells) >= 7:  # Asegurar que hay suficientes celdas
-                    # Verificar que la primera celda tenga una tabla anidada con un jugador
-                    first_cell = cells[0]
-                    player_table = first_cell.find('table', {'class': 'inline-table'}) if isinstance(first_cell, Tag) else None
-                    if isinstance(player_table, Tag) and player_table.find('a'):
-                        valid_rows.append(cells)
-                        # Log para depuración
-                        if len(valid_rows) == 1:
-                            self.logger.info(f"Primera fila de datos - Celdas: {len(cells)}")
-            
-            return valid_rows
-        except Exception as e:
-            self.logger.error(f"Error extrayendo filas válidas: {e}")
-            return []
-    
-    def _parse_injury_row(self, cells: Sequence[Tag], team: Dict) -> Optional[Dict]:
-        """
-        Parsea una fila de lesión para extraer información.
         
-        Args:
-            cells: Lista de celdas de la fila
-            team: Información del equipo
-            
-        Returns:
-            Diccionario con información de la lesión o None
-        """
-        try:
-            # Extraer nombre del jugador y posición de la primera celda (columna 0)
-            player_cell = cells[0]
-            player_name = 'Desconocido'
-            position = 'Desconocida'
-            
-            if isinstance(player_cell, Tag):
-                # Buscar tabla anidada que contiene el nombre del jugador y posición
-                inline_table = player_cell.find('table', {'class': 'inline-table'})
-                if inline_table and isinstance(inline_table, Tag):
-                    # Buscar el enlace del jugador
-                    player_link = inline_table.find('a')
-                    if player_link and isinstance(player_link, Tag):
-                        player_name = player_link.get_text(strip=True) or 'Desconocido'
-                    
-                    position_cell = None
-
-                    # Encontrar la celda de posición (segunda fila, única celda)
-                    position_row = inline_table.find_all('tr')
-                    if len(position_row) > 1:
-                        second_row = position_row[1]
-                        if isinstance(second_row, Tag):
-                            position_cell = second_row.find('td')
-                        if position_cell:
-                            position = position_cell.get_text(strip=True) or 'Desconocida'
-            
-            # Extraer edad (columna 4)
-            age = self._parse_age(cells[4].get_text(strip=True)) if len(cells) > 4 else 0
-            
-            # Extraer motivo/tipo de lesión (columna 5)
-            injury_type = cells[5].get_text(strip=True) if len(cells) > 5 else 'Desconocida'
-            
-            # Extraer fecha desde (columna 6)
-            date_from = cells[6].get_text(strip=True) if len(cells) > 6 else ''
-            
-            # Extraer fecha hasta (columna 7)
-            date_until = cells[7].get_text(strip=True) if len(cells) > 7 else ''
-            
-            # Extraer encuentros no jugados (columna 8) - está dentro de un enlace
-            matches_missed = 0
-            if len(cells) > 8:
-                missed_link = cells[8].find('a')
-                if missed_link and isinstance(missed_link, Tag):
-                    matches_missed = self._parse_number(missed_link.get_text(strip=True))
-                else:
-                    matches_missed = self._parse_number(cells[8].get_text(strip=True))
-            
-            # Extraer días (columna 9)
-            days = self._parse_number(cells[9].get_text(strip=True)) if len(cells) > 9 else 0
-            
-            # Extraer valor de mercado (columna 10)
-            market_value = self._parse_market_value(cells[10].get_text(strip=True)) if len(cells) > 10 else 0
-            
-            # Crear registro de lesión
-            injury = {
-                'player_name': str(player_name).strip(),
-                'team': team['name'],
-                'team_id': team['id'],
-                'position': str(position).strip(),
-                'age': age,
-                'injury_type': injury_type,
-                'date_from': date_from,
-                'date_until': date_until,
-                'matches_missed': matches_missed,
-                'days': days,
-                'market_value': market_value,
-                'extracted_at': datetime.now().isoformat()
-            }
-            
-            return injury
-            
-        except Exception as e:
-            self.logger.warning(f"Error parseando fila de lesión: {e}")
-            return None
-    
-    # Métodos auxiliar
-    
-    def _parse_age(self, age_str: str) -> int:
-        """Convierte string de edad a entero."""
-        try:
-            # Buscar cualquier número en el string
-            numbers = re.findall(r'\d+', str(age_str))
-            if numbers:
-                age = int(numbers[0])
-                # Validar rango razonable
-                if 15 <= age <= 50:
-                    return age
-            return 0
-        except:
-            return 0
-    
-    def _parse_number(self, number_str: str) -> int:
-        """Convierte string a número entero."""
-        try:
-            numbers = re.findall(r'\d+', str(number_str))
-            return int(numbers[0]) if numbers else 0
-        except:
-            return 0
-    
-    def _parse_market_value(self, value_str: str) -> int:
-        """Convierte valor de mercado a entero (euros)."""
-        if not value_str:
-            return 0
+        # AWS WAF suele poner estos textos en el <title> o en encabezados h1/h2 muy específicos
+        # Evitamos falsos positivos buscando combinaciones más estrictas
+        if "human verification" in text and "awswaf" in text and "show details" in text:
+            return "Human Verification (AWS WAF challenge)"
         
-        try:
-            # Limpiar string
-            clean_value = str(value_str).lower().strip()
+        if "captcha" in text and "bot" in text and "verification" in text and len(text) < 5000:
+            # Las páginas de captcha suelen ser cortas (< 5KB). Una página real pesa > 100KB.
+            return "Captcha / bot challenge"
             
-            # Extraer números y multiplicadores
-            if 'mill' in clean_value:
-                numbers = re.findall(r'[\d,\.]+', clean_value)
-                if numbers:
-                    number = float(numbers[0].replace(',', '.'))
-                    return int(number * 1000000)
-                    
-            elif any(word in clean_value for word in ['mil', 'tsd', 'k']):
-                numbers = re.findall(r'[\d,\.]+', clean_value)
-                if numbers:
-                    number = float(numbers[0].replace(',', '.'))
-                    return int(number * 1000)
-            else:
-                # Valor directo
-                numbers = re.findall(r'\d+', clean_value)
-                return int(numbers[0]) if numbers else 0
-                
-        except:
-            return 0
-            
-        return 0  # Default return if no other path matches
-    
-    
-    def extract_all_injuries(self, force_refresh: bool = False) -> List[Dict]:
-        """
-        Extrae lesiones de todos los equipos de la liga.
-        -- DESACTIVADO TEMPORALMENTE --
-
-        Args:
-            force_refresh: Forzar actualización ignorando cache
-
-        Returns:
-            Lista vacía, ya que la funcionalidad está desactivada.
-        """
-        self.logger.info("La extracción de lesiones está desactivada. Saltando proceso.")
-        return []
-
-        # Código original comentado
-        #
-        # # 1. Verificar y usar caché si es posible
-        # if not force_refresh:
-        #     cached_data = self._try_load_from_cache()
-        #     if cached_data:
-        #         return cached_data
-        #
-        # # 2. Obtener lista de equipos
-        # teams = self.extract_teams(force_refresh=force_refresh)
-        # if not teams:
-        #     self.logger.error("No se pudieron obtener equipos")
-        #     return []
-        #
-        # # 3. Extraer lesiones de todos los equipos
-        # all_injuries, successful_teams = self._extract_injuries_from_teams(teams)
-        #
-        # # 4. Guardar en caché si hay datos
-        # if all_injuries:
-        #     self._save_injuries_to_cache(all_injuries, teams, successful_teams)
-        #
-        # self.logger.info(f"Extracción completada: {len(all_injuries)} lesiones de {successful_teams}/{len(teams)} equipos")
-        # return all_injuries
-
-    def _try_load_from_cache(self) -> Optional[List[Dict]]:
-        """Intenta cargar lesiones desde el caché."""
-        if self.injuries_cache_file.exists():
-            try:
-                with open(self.injuries_cache_file, 'r', encoding='utf-8') as f:
-                    cached_data = json.load(f)
-                    # Verificar si el cache es reciente (menos de 4 horas)
-                    cache_time = datetime.fromisoformat(cached_data.get('timestamp', '2000-01-01'))
-                    if datetime.now() - cache_time < timedelta(hours=4):
-                        self.logger.info(f"Usando lesiones desde cache: {len(cached_data['injuries'])} lesiones")
-                        return cached_data['injuries']
-            except Exception as e:
-                self.logger.warning(f"Error leyendo cache de lesiones: {e}")
         return None
 
-    def _extract_injuries_from_teams(self, teams: List[Dict]) -> Tuple[List[Dict], int]:
-        """Extrae lesiones de todos los equipos en la lista."""
-        all_injuries = []
-        successful_teams = 0
-        
-        # Extraer lesiones de cada equipo
-        for i, team in enumerate(teams, 1):
-            self.logger.info(f"Procesando equipo {i}/{len(teams)}: {team['name']}")
-            
-            try:
-                team_injuries = self.extract_team_injuries(team)
-                all_injuries.extend(team_injuries)
-                
-                if team_injuries:
-                    successful_teams += 1
-                    
-            except Exception as e:
-                self.logger.error(f"Error procesando equipo {team['name']}: {e}")
+    def load_cookie_jar(self, cookie_items: Sequence[Dict]) -> None:
+        if not cookie_items:
+            return
+        for item in cookie_items:
+            name = item.get("name")
+            value = item.get("value")
+            if not name or value is None:
                 continue
-            
-            # Pausa entre equipos
-            if i < len(teams):
-                time.sleep(2)
-        
-        return all_injuries, successful_teams
-
-    def _save_injuries_to_cache(self, injuries: List[Dict], teams: List[Dict], successful_teams: int):
-        """Guarda las lesiones en el caché."""
-        cache_data = {
-            'timestamp': datetime.now().isoformat(),
-            'total_teams': len(teams),
-            'successful_teams': successful_teams,
-            'total_injuries': len(injuries),
-            'injuries': injuries
-        }
-        
-        try:
-            with open(self.injuries_cache_file, 'w', encoding='utf-8') as f:
-                json.dump(cache_data, f, ensure_ascii=False, indent=2)
-                self.logger.info(f"Lesiones guardadas en cache: {len(injuries)}")
-        except Exception as e:
-            self.logger.warning(f"Error guardando cache de lesiones: {e}")
-    
-    def get_cache_info(self) -> Dict:
-        """Obtiene información sobre el cache."""
-        info = {
-            'teams_cache_exists': self.teams_cache_file.exists(),
-            'injuries_cache_exists': self.injuries_cache_file.exists(),
-            'teams_cache_size': 0,
-            'injuries_cache_size': 0,
-            'teams_cache_modified': None,
-            'injuries_cache_modified': None,
-            'teams_count': 0,
-            'injuries_count': 0
-        }
-        
-        # Información del cache de equipos
-        if info['teams_cache_exists']:
-            try:
-                stat = self.teams_cache_file.stat()
-                info['teams_cache_size'] = stat.st_size
-                info['teams_cache_modified'] = datetime.fromtimestamp(stat.st_mtime).isoformat()
-                
-                with open(self.teams_cache_file, 'r', encoding='utf-8') as f:
-                    teams_data = json.load(f)
-                    info['teams_count'] = len(teams_data.get('teams', []))
-            except:
-                pass
-        
-        # Información del cache de lesiones
-        if info['injuries_cache_exists']:
-            try:
-                stat = self.injuries_cache_file.stat()
-                info['injuries_cache_size'] = stat.st_size
-                info['injuries_cache_modified'] = datetime.fromtimestamp(stat.st_mtime).isoformat()
-                
-                with open(self.injuries_cache_file, 'r', encoding='utf-8') as f:
-                    injuries_data = json.load(f)
-                    info['injuries_count'] = len(injuries_data.get('injuries', []))
-            except:
-                pass
-        
-        return info
-    
-    def clear_cache(self):
-        """Limpia el cache de equipos y lesiones."""
-        cleared = []
-
-        if self.teams_cache_file.exists():
-            self.teams_cache_file.unlink()
-            cleared.append("equipos")
-
-        if self.injuries_cache_file.exists():
-            self.injuries_cache_file.unlink()
-            cleared.append("lesiones")
-
-        if cleared:
-            self.logger.info(f"Cache eliminado: {', '.join(cleared)}")
-        else:
-            self.logger.info("No había cache para eliminar")
-
-    # ------------------------------------------------------------------ #
-    # Match History                                                        #
-    # ------------------------------------------------------------------ #
+            domain = item.get("domain") or ".transfermarkt.com"
+            path = item.get("path") or "/"
+            secure = bool(item.get("secure", True))
+            cookie = create_cookie(name=name, value=value, domain=domain, path=path, secure=secure)
+            self.session.cookies.set_cookie(cookie)
 
     def get_match_history(self, player_id: str, season_id: str) -> List[Dict]:
         """
-        Returns the list of matches played by a player in a given season.
-
-        Each dict contains: date, opponent, competition, result,
-        minutes_played, goals.
-
-        Args:
-            player_id: Transfermarkt numeric player ID (string).
-            season_id: Season start year as string, e.g. "2023" for 2023-24.
-
-        Returns:
-            List of match dicts, or [] if data is unavailable.
-
-        Note:
-            player_id must be a valid Transfermarkt numeric ID.
-            Our internal Wyscout IDs are different; callers should map them
-            to TM IDs via a player-level configuration before calling this.
+        Obtiene el historial de partidos filtrando por equipo de HK o competición de HK.
+        Usa cache persistente para evitar scraping redundante (TTL diario para temporadas activas).
         """
-        cache_file = self.cache_dir / f"match_history_{player_id}_{season_id}.json"
+        season_key, tm_season_id = self._season_key(season_id)
+        force_network = os.getenv("TM_FORCE_NETWORK", "").strip().lower() in {"1", "true", "yes", "on"}
+        
+        is_completed = self._is_season_completed(season_key)
 
-        # ── File-based cache (24 h TTL) ───────────────────────────────────
-        if cache_file.exists():
-            try:
-                with open(cache_file, "r", encoding="utf-8") as f:
-                    cached = json.load(f)
-                cache_ts = datetime.fromisoformat(cached.get("timestamp", "2000-01-01"))
-                if datetime.now() - cache_ts < timedelta(hours=24):
-                    self.logger.info(
-                        f"Match history cache hit: player={player_id} season={season_id}"
-                    )
-                    return cached.get("matches", [])
-            except Exception as e:
-                self.logger.warning(f"Error reading match history cache: {e}")
+        if not force_network and is_completed:
+            cached_matches = self._read_db_cached_match_history(player_id, season_key)
+            if cached_matches:
+                self.last_result_source = "db_cache"
+                self.last_cache_fresh = True
+                self.last_http_status = 200
+                self.last_block_type = None
+                self.last_block_reason = None
+                self.logger.info(f"✓ Usando cache SQL de Transfermarkt para {player_id} ({season_key})")
+                return cached_matches
+        elif force_network:
+            self.logger.info("TM_FORCE_NETWORK active — bypassing cache for %s (%s).", player_id, season_key)
 
-        # ── Scrape ────────────────────────────────────────────────────────
-        url = (
-            f"{self.base_url}/x/leistungsdaten/spieler/{player_id}"
-            f"/plus/1?saison_id={season_id}"
-        )
+        # 2. Scraping detallado (vista ampliada plus/1) si no hay cache SQL válido
+        url = f"{self.base_url}/x/leistungsdatendetails/spieler/{player_id}/saison/{tm_season_id}/plus/1"
         soup = self._make_request(url)
         if not soup:
-            self.logger.warning(
-                f"Match history: no response for player={player_id} season={season_id}"
-            )
             return []
+        
+        result = self._parse_detailed_performance(soup)
+        result = self._filter_supported_match_history_result(result)
+            
+        return result.get("matches", [])
 
-        matches = self._parse_match_history_table(soup)
-
-        # ── Persist to cache ──────────────────────────────────────────────
+    def _download_competition_logo(self, comp_name: str, img_url: str) -> Optional[str]:
+        """Download competition logo from Transfermarkt CDN. Returns local web path or None."""
+        slug = re.sub(r"[^a-z0-9]", "_", comp_name.lower()).strip("_")
+        self.competition_logos_dir.mkdir(parents=True, exist_ok=True)
+        local_path = self.competition_logos_dir / f"{slug}.png"
+        if local_path.exists():
+            return f"/assets/competition_logos/{slug}.png"
         try:
-            with open(cache_file, "w", encoding="utf-8") as f:
-                json.dump(
-                    {"timestamp": datetime.now().isoformat(), "matches": matches},
-                    f,
-                    ensure_ascii=False,
-                    indent=2,
-                )
+            r = requests.get(img_url, headers=self.headers, timeout=10)
+            r.raise_for_status()
+            local_path.write_bytes(r.content)
+            self.logger.info(f"Downloaded competition logo: {comp_name} → {local_path.name}")
+            return f"/assets/competition_logos/{slug}.png"
         except Exception as e:
-            self.logger.warning(f"Error writing match history cache: {e}")
+            self.logger.warning(f"Failed to download logo for '{comp_name}': {e}")
+            return None
 
-        return matches
+    def _normalize_image_url(self, img_url: str) -> str:
+        if not img_url:
+            return img_url
+        if img_url.startswith("//"):
+            return f"https:{img_url}"
+        if img_url.startswith("/"):
+            return f"{self.base_url}{img_url}"
+        return img_url
 
-    def _parse_match_history_table(self, soup: BeautifulSoup) -> List[Dict]:
-        """
-        Parses the Transfermarkt match performance table.
-
-        Returns a list of dicts with keys:
-        date, opponent, competition, result, minutes_played, goals.
-        """
-        matches: List[Dict] = []
+    def _download_team_logo(self, team_name: str, img_url: str) -> Optional[str]:
+        """Download team crest from Transfermarkt CDN. Returns local web path or None."""
+        if not team_name or not img_url:
+            return None
+        slug = re.sub(r"[^a-z0-9]", "_", team_name.lower()).strip("_")
+        self.team_logos_dir.mkdir(parents=True, exist_ok=True)
+        local_path = self.team_logos_dir / f"tm_{slug}.png"
+        if local_path.exists():
+            return f"/assets/team_logos/{local_path.name}"
         try:
-            table = soup.find("table", {"class": "items"})
-            if not table or not isinstance(table, Tag):
-                return []
+            normalized_url = self._normalize_image_url(img_url)
+            r = requests.get(normalized_url, headers=self.headers, timeout=10)
+            r.raise_for_status()
+            local_path.write_bytes(r.content)
+            self.logger.info(f"Downloaded team logo: {team_name} → {local_path.name}")
+            return f"/assets/team_logos/{local_path.name}"
+        except Exception as e:
+            self.logger.warning(f"Failed to download team logo for '{team_name}': {e}")
+            return None
+
+    def _extract_team_logo_from_cells(self, cells: List[Tag], team_name: str, team_idx: int) -> Optional[str]:
+        """Best-effort crest extraction around the home/away team cells."""
+        candidate_indices = [team_idx, team_idx - 1, team_idx + 1]
+        for idx in candidate_indices:
+            if idx < 0 or idx >= len(cells):
+                continue
+            cell = cells[idx]
+            img = cell.find("img")
+            if not img:
+                continue
+            img_src = img.get("src") or img.get("data-src") or ""
+            if not img_src:
+                continue
+            img_class = " ".join(img.get("class") or [])
+            if "flaggenrahmen" in img_class:
+                continue
+            return self._download_team_logo(team_name, img_src)
+        return None
+
+    def _is_continental_competition(self, comp_name: str) -> bool:
+        text = str(comp_name or "").lower()
+        return any(token in text for token in ["afc", "champions league", "acl"])
+
+    def _extract_match_report_url(self, row: Tag) -> Optional[str]:
+        for link in row.find_all("a", href=True):
+            href = link.get("href") or ""
+            if any(token in href.lower() for token in ["/spielbericht/", "/spielbericht/index", "/index/spielbericht", "/bericht/index"]):
+                return self._normalize_image_url(href)
+        return None
+
+    def _normalize_team_text(self, team_name: str) -> str:
+        text = re.sub(r"\(\d+\.\)", "", str(team_name or "")).strip().lower()
+        text = re.sub(r"[^a-z0-9]+", " ", text).strip()
+        return text
+
+    def _team_logo_slug(self, team_name: str) -> str:
+        normalized = self._normalize_team_text(team_name)
+        return re.sub(r"[^a-z0-9]+", "_", normalized).strip("_")
+
+    def _download_resolved_team_logo(self, team_name: str, img_url: str) -> Optional[str]:
+        """Download a display-quality team crest using stable, canonical asset naming."""
+        if not team_name or not img_url:
+            return None
+        slug = self._team_logo_slug(team_name)
+        if not slug:
+            return None
+        self.team_logos_dir.mkdir(parents=True, exist_ok=True)
+        local_path = self.team_logos_dir / f"{slug}.png"
+        if local_path.exists():
+            return f"/assets/team_logos/{local_path.name}"
+        try:
+            normalized_url = self._normalize_image_url(img_url)
+            r = requests.get(normalized_url, headers=self.headers, timeout=12)
+            r.raise_for_status()
+            local_path.write_bytes(r.content)
+            self.logger.info(f"Downloaded resolved team logo: {team_name} → {local_path.name}")
+            return f"/assets/team_logos/{local_path.name}"
+        except Exception as e:
+            self.logger.warning(f"Failed to download resolved team logo for '{team_name}': {e}")
+            return None
+
+    def _extract_large_team_logo_from_report(self, soup: BeautifulSoup, team_name: str) -> Optional[str]:
+        target = self._normalize_team_text(team_name)
+        if not target:
+            return None
+        candidates: list[tuple[float, int, str]] = []
+        for img in soup.find_all("img"):
+            src = img.get("src") or img.get("data-src") or ""
+            if not src:
+                continue
+            img_class = " ".join(img.get("class") or [])
+            if "flaggenrahmen" in img_class:
+                continue
+            meta_parts = [
+                img.get("alt") or "",
+                img.get("title") or "",
+                img.find_parent("a").get_text(" ", strip=True) if img.find_parent("a") else "",
+                img.find_parent().get_text(" ", strip=True)[:120] if img.find_parent() else "",
+            ]
+            haystack = " ".join(meta_parts).strip().lower()
+            if not haystack:
+                continue
+            ratio = difflib.SequenceMatcher(None, target, self._normalize_team_text(haystack)).ratio()
+            if target in haystack:
+                ratio += 0.35
+            width = int(re.sub(r"[^\d]", "", str(img.get("width") or "")) or 0)
+            height = int(re.sub(r"[^\d]", "", str(img.get("height") or "")) or 0)
+            area = width * height
+            if ratio >= 0.45:
+                candidates.append((ratio, area, src))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return candidates[0][2]
+
+    def resolve_match_report_logos(
+        self,
+        match_report_url: str,
+        home_team: str,
+        away_team: str,
+    ) -> Dict[str, Optional[str]]:
+        """Resolve larger crests from the Transfermarkt match report page."""
+        if not match_report_url:
+            return {"home_logo": None, "away_logo": None}
+        soup = self._make_request(match_report_url)
+        if not soup:
+            return {"home_logo": None, "away_logo": None}
+        home_src = self._extract_large_team_logo_from_report(soup, home_team)
+        away_src = self._extract_large_team_logo_from_report(soup, away_team)
+        return {
+            "home_logo": self._download_resolved_team_logo(home_team, home_src) if home_src else None,
+            "away_logo": self._download_resolved_team_logo(away_team, away_src) if away_src else None,
+        }
+
+    def _parse_detailed_performance(self, soup: BeautifulSoup) -> Dict:
+        matches = []
+        summary = {"goals": 0, "assists": 0, "yellow_cards": 0, "red_cards": 0, "minutes_played": 0, "total_matches": 0, "own_goals": 0}
+
+        # En la vista detallada, los partidos están en 'boxes' por competición
+        boxes = soup.find_all("div", {"class": "box"})
+        for box in boxes:
+            header = box.find(["h2", "div"], {"class": ["content-box-headline", "table-header"]})
+            if not header: continue
+
+            comp_name = header.get_text(strip=True)
+            # Filtro: ¿Es una competición de HK o internacional asiática?
+            if not any(c.lower() in comp_name.lower() for c in self.ALLOWED_COMPETITIONS):
+                continue
+
+            # Extract and download competition logo from header image
+            comp_logo_url = None
+            logo_img = header.find("img")
+            if logo_img:
+                img_src = logo_img.get("src") or logo_img.get("data-src")
+                if img_src:
+                    comp_logo_url = self._download_competition_logo(comp_name, img_src)
+
+            table = box.find("table")
+            if not table: continue
 
             rows = table.find_all("tr")
             for row in rows:
-                if not isinstance(row, Tag):
-                    continue
                 cells = row.find_all("td")
-                if len(cells) < 6:
-                    continue
+                # Las filas de partido en vista 'plus/1' tienen muchas celdas
+                if len(cells) < 8: continue
+
                 try:
-                    date_text = cells[1].get_text(strip=True) if len(cells) > 1 else ""
-                    competition = cells[2].get_text(strip=True) if len(cells) > 2 else ""
+                    # Celda 0: Jornada / Ronda
+                    # Celda 1: Fecha
+                    date_txt = cells[1].get_text(strip=True)
+                    if not date_txt or len(date_txt) < 5: continue # Cabeceras o filas vacías
 
-                    # Opponent from a link inside the cell
-                    opp_cell = cells[3] if len(cells) > 3 else None
-                    opponent = ""
-                    if isinstance(opp_cell, Tag):
-                        opp_link = opp_cell.find("a")
-                        opponent = (
-                            opp_link.get_text(strip=True)
-                            if isinstance(opp_link, Tag)
-                            else opp_cell.get_text(strip=True)
-                        )
+                    # Identificar estado (Jugado vs No Jugado)
+                    status_text = ""
+                    is_played = True
 
-                    result = cells[4].get_text(strip=True) if len(cells) > 4 else ""
-                    minutes_text = cells[5].get_text(strip=True) if len(cells) > 5 else "0"
-                    minutes_played = self._parse_number(re.sub(r"[^\d]", "", minutes_text))
-                    goals = self._parse_number(cells[6].get_text(strip=True)) if len(cells) > 6 else 0
+                    potential_status = row.get_text()
+                    if "No convocado" in potential_status:
+                        status_text = "No convocado"
+                        is_played = False
+                    elif "En el banquillo" in potential_status:
+                        status_text = "En el banquillo"
+                        is_played = False
+                    elif "Lesión" in potential_status or "Lesionado" in potential_status:
+                        status_text = "Lesionado"
+                        is_played = False
+                    elif "Sancionado" in potential_status:
+                        status_text = "Sancionado"
+                        is_played = False
 
-                    if not date_text or not opponent:
+                    home = cells[3].get_text(strip=True)
+                    away = cells[5].get_text(strip=True)
+                    res = cells[6].get_text(strip=True)
+                    is_continental = self._is_continental_competition(comp_name)
+                    match_report_url = self._extract_match_report_url(row)
+                    match_entry = {
+                        "date": date_txt,
+                        "opponent": f"{home} vs {away}",
+                        "home_team": home,
+                        "away_team": away,
+                        "home_logo": None,
+                        "away_logo": None,
+                        "match_report_url": match_report_url,
+                        "logo_resolution_source": "transfermarkt_match_report" if is_continental else None,
+                        "logo_resolution_status": "pending" if is_continental else None,
+                        "competition": comp_name,
+                        "competition_logo": comp_logo_url,
+                        "result": res,
+                        "status": status_text if not is_played else "Jugado",
+                        "goals": 0, "assists": 0, "yellow_cards": 0, "red_cards": 0, "minutes_played": 0,
+                        "own_goals": 0, "subbed_in": None, "subbed_out": None
+                    }
+
+                    if is_played:
+                        # Vista 'plus/1' indices (0-based):
+                        # 7: Posición, 8: Goles, 9: Asistencias, 10: Propia puerta,
+                        # 11: TA, 12: TR Doble, 13: TR, 14: Entró, 15: Salió, 16: Minutos
+                        if len(cells) > 7: match_entry["position"] = cells[7].get_text(strip=True)
+                        if len(cells) > 8: match_entry["goals"] = self._parse_number(cells[8].get_text(strip=True))
+                        if len(cells) > 9: match_entry["assists"] = self._parse_number(cells[9].get_text(strip=True))
+                        if len(cells) > 10: match_entry["own_goals"] = self._parse_number(cells[10].get_text(strip=True))
+                        
+                        if len(cells) > 11: match_entry["yellow_cards"] = 1 if cells[11].get_text(strip=True) else 0
+                        if len(cells) > 13: 
+                            match_entry["red_cards"] = 1 if (cells[12].get_text(strip=True) or cells[13].get_text(strip=True)) else 0
+                        
+                        if len(cells) > 14:
+                            match_entry["subbed_in"] = self._parse_number(cells[14].get_text(strip=True).replace("'", "")) or None
+                        if len(cells) > 15:
+                            match_entry["subbed_out"] = self._parse_number(cells[15].get_text(strip=True).replace("'", "")) or None
+
+                        # Minutos (última celda siempre es minutos en esta vista)
+                        match_entry["minutes_played"] = self._parse_number(cells[-1].get_text(strip=True).replace("'", ""))
+                        
+                        # Actualizar sumario solo si jugó
+                        summary["goals"] += match_entry["goals"]
+                        summary["assists"] += match_entry["assists"]
+                        summary["own_goals"] += match_entry["own_goals"]
+                        summary["yellow_cards"] += match_entry["yellow_cards"]
+                        summary["red_cards"] += match_entry["red_cards"]
+                        summary["minutes_played"] += match_entry["minutes_played"]
+                        summary["total_matches"] += 1
+
+                    matches.append(match_entry)
+                except: continue
+
+        # Ordenar por fecha descendente
+        try:
+            matches.sort(key=lambda x: datetime.strptime(x["date"], "%d/%m/%Y") if '/' in x["date"] else x["date"], reverse=True)
+        except: pass
+        
+        return {"matches": matches, "summary": summary}
+
+    def _parse_number(self, txt: str) -> int:
+        try:
+            num = re.sub(r'[^\d]', '', txt)
+            return int(num) if num else 0
+        except: return 0
+
+    def _is_season_completed(self, season_id: str) -> bool:
+        try:
+            start_year = int(season_id.split('-')[0])
+            return datetime.now() > datetime(start_year + 1, 7, 31)
+        except: return False
+
+    def _season_key(self, season_id: str) -> tuple:
+        if '-' in season_id: return season_id, str(season_id.split('-')[0])
+        else:
+            s = int(season_id)
+            return f"{s}-{str(s+1)[-2:]}", str(s)
+
+    def get_player_photo_url(self, tm_player_id: str) -> Optional[str]:
+        """
+        Scrapes the profile photo URL for a player from Transfermarkt.
+        Returns the image URL or None if not found.
+        """
+        url = f"{self.base_url}/player/profil/spieler/{tm_player_id}"
+        soup = self._make_request(url)
+        if soup is None:
+            return None
+        try:
+            # 1. og:image meta tag — most reliable, layout-change-proof
+            og = soup.select_one('meta[property="og:image"]')
+            if og and og.get("content"):
+                return og["content"]
+
+            # 2. Fallback: any img whose src contains the portrait CDN path
+            for img in soup.find_all("img"):
+                src = img.get("src") or img.get("data-src") or ""
+                if "portrait" in src and "transfermarkt" in src:
+                    return src
+
+            # 3. Legacy selector (kept in case TM reverts to old markup)
+            img = soup.select_one(".data-header__profile-image img")
+            if img:
+                return img.get("src") or img.get("data-src")
+        except Exception as e:
+            self.logger.debug(f"get_player_photo_url error for {tm_player_id}: {e}")
+        return None
+
+    def get_player_full_profile(self, tm_player_id: str) -> Dict:
+        """
+        Scrapes a complete player profile from Transfermarkt in a single request.
+        Returns a dictionary with keys: height, foot, birth_country, position, age, birth_date.
+        """
+        url = f"{self.base_url}/player/profil/spieler/{tm_player_id}"
+        soup = self._make_request(url)
+        if soup is None:
+            return {}
+
+        details = {
+            "height": None,
+            "foot": None,
+            "birth_country": None,
+            "position": None,
+            "age": None,
+            "birth_date": None
+        }
+
+        try:
+            # Strategy A — og:description meta tag (layout-independent).
+            # TM typically includes: "... | Position: Centre-Forward | ..."
+            og_desc = soup.find("meta", property="og:description")
+            if og_desc and og_desc.get("content"):
+                desc = og_desc["content"]
+                m = re.search(
+                    r'(?:Posici[oó]n|Position)\s*[:\|]\s*([^|\n,]+)',
+                    desc, re.IGNORECASE
+                )
+                if m:
+                    details["position"] = m.group(1).strip()
+
+            # Strategy B — info-table spans (classic TM layout, may still appear)
+            if not details["position"]:
+                for row in soup.select("span.info-table__content--label"):
+                    label = row.get_text(strip=True).lower()
+                    value_el = row.find_next_sibling("span", class_="info-table__content--bold")
+                    if not value_el:
                         continue
+                    value = value_el.get_text(strip=True)
 
-                    matches.append({
-                        "date": date_text,
-                        "opponent": opponent,
-                        "competition": competition,
-                        "result": result,
-                        "minutes_played": minutes_played,
-                        "goals": goals,
-                    })
-                except Exception as row_exc:
-                    self.logger.debug(f"Skipping match row: {row_exc}")
-                    continue
+                    if "altura" in label or "height" in label:
+                        m = re.search(r"(\d)[,.](\d{2})", value)
+                        if m:
+                            details["height"] = int(m.group(1)) * 100 + int(m.group(2))
+                    elif "pie" in label or "foot" in label:
+                        details["foot"] = value.lower()
+                    elif "nacionalidad" in label or "citizenship" in label:
+                        img = value_el.find("img")
+                        details["birth_country"] = img.get("title") if img and img.get("title") else value
+                    elif "edad" in label or "age" in label:
+                        m = re.search(r"(\d+)", value)
+                        if m:
+                            details["age"] = int(m.group(1))
+                    elif "nacimiento" in label or "date of birth" in label:
+                        details["birth_date"] = value
+                    elif "posici" in label or "position" in label:
+                        details["position"] = value
+
+            # Strategy C — data-header label/value pairs (newer TM layout)
+            if not details["position"]:
+                _bad_sibling = re.compile(
+                    r'\b(selecci[oó]n|exjugador|internac|goles|agente|altura|pie:|nacimiento|fecha)\b',
+                    re.I,
+                )
+                for label_el in soup.find_all(
+                    True,
+                    class_=re.compile(r"data-header__(label|item)", re.I)
+                ):
+                    label_text = label_el.get_text(strip=True).lower()
+                    if "posici" in label_text or "position" in label_text:
+                        # Try extracting position directly from the label (e.g. "posición:centre-forward")
+                        m_label = re.search(
+                            r'm?posici[oó]n\s*:\s*'
+                            r'([A-Za-záéíóúüñÁÉÍÓÚÜÑ][A-Za-záéíóúüñÁÉÍÓÚÜÑ\s\-]{1,30}?)'
+                            r'(?=agente|altura|pie|nacimiento|ciudad|equipo|fecha|\s*$)',
+                            label_text, re.IGNORECASE
+                        )
+                        if m_label:
+                            details["position"] = m_label.group(1).strip().title()
+                            break
+                        # Fall back to next sibling, rejecting non-position values
+                        nxt = label_el.find_next_sibling()
+                        if nxt:
+                            val = nxt.get_text(strip=True)
+                            if not _bad_sibling.search(val) and ":" not in val:
+                                details["position"] = val
+                                break
+
+            # Strategy D — search page text for "Posición: <value>" pattern.
+            # The value must end before a newline, colon, pipe, or digit.
+            # This avoids grabbing national-team or other adjacent fields.
+            if not details["position"]:
+                page_text = soup.get_text("\n")
+                m = re.search(
+                    r'(?:Posici[oó]n|Main\s+position|Position)\s*:\s*'
+                    r'([A-Za-záéíóúüñÁÉÍÓÚÜÑ][A-Za-záéíóúüñÁÉÍÓÚÜÑ\s\-]{1,30}?)'
+                    r'(?=\s*[\n\|\:\d]|$)',
+                    page_text, re.IGNORECASE
+                )
+                if m:
+                    val = m.group(1).strip()
+                    # Reject if it looks like a section header or contains suspicious words
+                    if val and not re.search(r'\b(selecci[oó]n|exjugador|internac|goles)\b', val, re.I):
+                        details["position"] = val
+
+            # Strategy E — table th/td fallback
+            if not details["position"]:
+                for th in soup.find_all(["th", "dt"]):
+                    if re.search(r'posici[oó]n|position', th.get_text(), re.I):
+                        sib = th.find_next_sibling(["td", "dd"])
+                        if sib:
+                            details["position"] = sib.get_text(strip=True)
+                            break
 
         except Exception as e:
-            self.logger.error(f"Error parsing match history table: {e}")
+            self.logger.debug(f"get_player_full_profile error for tm_id={tm_player_id}: {e}")
 
-        return matches
+        return details
+
+    def get_player_main_position(self, tm_player_id: str) -> Optional[str]:
+        """Legacy wrapper for backward compatibility."""
+        profile = self.get_player_full_profile(tm_player_id)
+        return profile.get("position")
+
+    def get_player_injuries(self, tm_player_id: str) -> List[Dict]:
+        """
+        Scrapes the historical injuries list for a player from Transfermarkt.
+        Returns a list of dictionaries with keys: season, injury_type, date_from, date_until, days, matches_missed.
+        """
+        url = f"{self.base_url}/x/verletzungen/spieler/{tm_player_id}"
+        soup = self._make_request(url)
+        if soup is None:
+            return []
+
+        injuries = []
+        try:
+            # The injuries table is typically in a div with class 'box'
+            table = soup.select_one(".items") or soup.find("table")
+            if not table:
+                return []
+
+            rows = table.find_all("tr", class_=["odd", "even"])
+            for row in rows:
+                cells = row.find_all("td")
+                if len(cells) < 5:
+                    continue
+
+                # Indices (may vary slightly but usually):
+                # 0: Season, 1: Injury, 2: From, 3: Until, 4: Days, 5: Games missed
+                injury_entry = {
+                    "season": cells[0].get_text(strip=True),
+                    "injury_type": cells[1].get_text(strip=True),
+                    "date_from": cells[2].get_text(strip=True),
+                    "date_until": cells[3].get_text(strip=True),
+                    "days": cells[4].get_text(strip=True),
+                }
+                if len(cells) > 5:
+                    injury_entry["matches_missed"] = cells[5].get_text(strip=True)
+                
+                injuries.append(injury_entry)
+        except Exception as e:
+            self.logger.error(f"get_player_injuries error for tm_id={tm_player_id}: {e}")
+
+        return injuries
+
+    def get_team_injuries(self, tm_club_id: Union[str, int], season_id: Optional[str] = None) -> List[Dict]:
+        """
+        Scrapes current or historical injuries for a specific team with fuzzy column detection.
+        """
+        team_slug = "team"
+        for k, v in _TEAM_TM_CLUB_IDS.items():
+            if str(v) == str(tm_club_id):
+                team_slug = k.replace("_", "-")
+                break
+
+        url = f"{self.base_url}/{team_slug}/sperrenundverletzungen/verein/{tm_club_id}/plus/1"
+        if season_id:
+            year = season_id.split("-")[0] if "-" in season_id else season_id
+            url += f"?saison_id={year}"
+            
+        soup = self._make_request(url)
+        if soup is None:
+            return []
+
+        team_injuries = []
+        try:
+            # Buscar todos los contenedores 'box' que tienen una tabla y un encabezado
+            boxes = soup.find_all("div", class_="box")
+            if not boxes:
+                return []
+
+            for box in boxes:
+                # Verificar el encabezado de la caja para saber si es de lesiones
+                header = box.find(["h2", "div"], class_=["table-header", "content-box-headline"])
+                header_text = header.get_text(strip=True).lower() if header else ""
+                
+                # Solo procesar si el encabezado menciona lesiones (en inglés o alemán)
+                # Ignoramos "suspensions", "sperren", "sanciones"
+                if not any(word in header_text for word in ["injury", "verletzung", "lesion", "lesión"]):
+                    continue
+                
+                table = box.find("table", class_="items")
+                if not table:
+                    continue
+
+                rows = table.find_all("tr", class_=["odd", "even"])
+                for row in rows:
+                    cells = row.find_all("td")
+                    if len(cells) < 5: continue
+
+                    # --- INTELLIGENT COLUMN DETECTION ---
+                    # Instead of fixed indices, we scan the cells for patterns
+                    
+                    player_data = {"name": None, "tm_id": None}
+                    injury_type = None
+                    dates = [] # Collect any DD/MM/YYYY strings
+                    missed_matches = 0
+                    days_out = 0
+
+                    for i, cell in enumerate(cells):
+                        txt = cell.get_text(strip=True)
+                        
+                        # 1. Look for Player Name & ID (usually the cell with table.inline-table)
+                        if not player_data["name"] and cell.find("table", class_="inline-table"):
+                            a_link = cell.find("a", href=re.compile(r"/spieler/"))
+                            if a_link:
+                                player_data["name"] = a_link.get_text(strip=True)
+                                m = re.search(r"/spieler/(\d+)", a_link.get("href", ""))
+                                if m: player_data["tm_id"] = m.group(1)
+
+                        # 2. Look for Dates (format DD/MM/YYYY)
+                        date_matches = re.findall(r'(\d{1,2}/\d{1,2}/\d{2,4})', txt)
+                        if date_matches:
+                            dates.extend(date_matches)
+                        
+                        # 3. Look for Missed Matches (cell with a link to fixtures)
+                        if cell.find("a", href=re.compile(r"/spielplandatum/")):
+                            missed_matches = self._parse_number(txt)
+                            # FIX: In the provided HTML, 'Days' is the IMMEDIATE NEXT cell after 'Missed Matches'
+                            if i + 1 < len(cells):
+                                days_out = self._parse_number(cells[i+1].get_text(strip=True))
+                        
+                        # 4. If we haven't found injury_type yet, and it's a 'links' cell with text
+                        if not injury_type and "links" in (cell.get("class") or []) and len(txt) > 3:
+                            if not any(char.isdigit() for char in txt): # Injury text doesn't usually have digits
+                                injury_type = txt
+
+                    # Assign dates based on position (usually first is since, second is until)
+                    date_from = dates[0] if len(dates) > 0 else None
+                    date_until = dates[1] if len(dates) > 1 else None
+                    
+                    # Emergency fallback for days_out if it's still 0
+                    if days_out == 0 and len(cells) > 6:
+                        # Sometimes 'Days' is in cell index 6 or the one before 'rechts' (market value)
+                        # We'll take the highest number in the last 3 cells
+                        last_numeric_vals = [self._parse_number(c.get_text(strip=True)) for c in cells[-3:]]
+                        if last_numeric_vals: days_out = max(last_numeric_vals)
+
+                    if player_data["name"]:
+                        injury_data = {
+                            "player_name": player_data["name"],
+                            "tm_id": player_data["tm_id"],
+                            "injury_type": injury_type or "unknown injury",
+                            "date_from": date_from,
+                            "date_until": date_until,
+                            "missed_matches": missed_matches,
+                            "days_out": days_out,
+                            "season": season_id or get_current_season()
+                        }
+                        team_injuries.append(injury_data)
+                
+            self.logger.info(f"Extracted {len(team_injuries)} injuries for team {tm_club_id}")
+        except Exception as e:
+            self.logger.error(f"get_team_injuries error for club_id={tm_club_id}: {e}")
+
+        return team_injuries
+
+    def extract_all_injuries(self, league_id: str = "HKL1", force_refresh: bool = False, historical: bool = False) -> List[Dict]:
+        """
+        Scrapes current (and optionally historical) injuries by iterating over HKPL teams.
+        """
+        all_injuries = []
+        
+        # Decide which seasons to scrape
+        seasons_to_scrape = [get_current_season()]
+        if historical:
+            # We can expand this list to past years if needed
+            seasons_to_scrape = ["2024-25", "2023-24", "2022-23", "2021-22", "2020-21", "2019-20", "2018-19"]
+
+        for season in seasons_to_scrape:
+            self.logger.info(f"--- Starting scraping for season: {season} ---")
+            for team_key, tm_club_id in _TEAM_TM_CLUB_IDS.items():
+                self.logger.info(f"Scraping injuries for: {team_key} ({season})")
+                team_data = self.get_team_injuries(tm_club_id, season_id=season)
+                for entry in team_data:
+                    entry["team_key"] = team_key
+                    all_injuries.append(entry)
+                
+                # VERY LONG DELAY to simulate human reading time (15-40 seconds)
+                if len(_TEAM_TM_CLUB_IDS) > 1:
+                    wait_time = random.uniform(15, 40)
+                    self.logger.info(f"Human pause: {wait_time:.1f}s...")
+                    time.sleep(wait_time)
+                
+        self.logger.info(f"Extracted {len(all_injuries)} total injuries from team-specific pages.")
+        return all_injuries
+
+    def _search_player_in_squad(
+        self,
+        name: str,
+        tm_club_id: int,
+        birth_year: Optional[int] = None,
+    ) -> Optional[int]:
+        """
+        Fetches TM's squad page for a club and finds the player by name matching.
+        Used as a last-resort fallback when name-only search buries the player
+        behind higher-profile namesakes (common for HKPL players).
+        Returns tm_id or None.
+        """
+        import unicodedata as _ud
+
+        def _strip(s: str) -> str:
+            return "".join(
+                c for c in _ud.normalize("NFD", s.lower())
+                if _ud.category(c) != "Mn"
+            )
+
+        url = f"{self.base_url}/x/kader/verein/{tm_club_id}"
+        soup = self._make_request(url)
+        if soup is None:
+            return None
+
+        name_stripped = _strip(name)
+        # Build name alternatives (original order + reversed for East-Asian)
+        tokens = name.lower().split()
+        name_alts = [name.lower(), name_stripped]
+        if len(tokens) >= 2:
+            rev = " ".join(tokens[1:]) + " " + tokens[0]
+            name_alts += [rev, _strip(rev)]
+
+        # Detect abbreviated name pattern: "X. Surname" or "X. Middle Surname"
+        # Extract (initial, surname) for special abbreviated matching
+        _abbr_match = re.match(r"^([a-zA-Z])\.\s+(.+)$", name.strip())
+        abbr_initial: Optional[str] = _abbr_match.group(1).lower() if _abbr_match else None
+        abbr_surname: Optional[str] = _strip(_abbr_match.group(2)) if _abbr_match else None
+
+        best_id: Optional[int] = None
+        best_score = 0.0
+        best_via_initial: Optional[int] = None  # unambiguous initial+surname match
+
+        # Collect all squad members for initial-matching
+        initial_candidates: list[tuple[int, str]] = []
+
+        for a_tag in soup.find_all("a", href=re.compile(r"/profil/spieler/\d+")):
+            href = a_tag.get("href", "")
+            m = re.search(r"/spieler/(\d+)", href)
+            if not m:
+                continue
+            tm_id = int(m.group(1))
+            candidate_name = a_tag.get_text(strip=True)
+            if not candidate_name:
+                continue
+            cand_stripped = _strip(candidate_name)
+            score = max(
+                difflib.SequenceMatcher(None, alt, cand_stripped).ratio()
+                for alt in name_alts
+            )
+            if score > best_score:
+                best_score = score
+                best_id = tm_id
+
+            # Build list for initial-match pass
+            if abbr_initial:
+                initial_candidates.append((tm_id, candidate_name))
+
+        # Abbreviated name fallback: "X. Surname" → find TM players where
+        # surname matches and first name starts with X (unambiguous → 1 hit only)
+        if abbr_initial and abbr_surname and best_score < 0.80:
+            surname_matches: list[tuple[int, str, float]] = []
+            seen_ids: set[int] = set()
+            for tid, cname in initial_candidates:
+                if tid in seen_ids:
+                    continue
+                seen_ids.add(tid)
+                parts = cname.split()
+                if len(parts) < 2:
+                    continue
+                # TM names: either "Firstname Surname" or "Surname Firstname"
+                # Try both orderings: surname = last token or first token
+                cand_stripped = _strip(cname)
+                cand_parts_stripped = [_strip(p) for p in parts]
+                for i, possible_surname in enumerate(cand_parts_stripped):
+                    if difflib.SequenceMatcher(None, abbr_surname, possible_surname).ratio() >= 0.85:
+                        # Surname matches — check if any other part starts with abbr_initial
+                        other_parts = cand_parts_stripped[:i] + cand_parts_stripped[i+1:]
+                        if any(p.startswith(abbr_initial) for p in other_parts):
+                            surn_score = difflib.SequenceMatcher(None, abbr_surname, possible_surname).ratio()
+                            surname_matches.append((tid, cname, surn_score))
+                            break
+
+            if len(surname_matches) == 1:
+                # Exactly one unambiguous candidate — accept it
+                best_via_initial, cname_matched, surn_score = surname_matches[0]
+                self.logger.info(
+                    f"_search_player_in_squad: '{name}' → tm_id={best_via_initial} "
+                    f"(initial+surname match: '{cname_matched}', surname_score={surn_score:.3f})"
+                )
+                return best_via_initial
+            elif len(surname_matches) > 1:
+                self.logger.debug(
+                    f"_search_player_in_squad: '{name}' ambiguous initial+surname matches: "
+                    + ", ".join(f"{tid}:{cn}" for tid, cn, _ in surname_matches)
+                )
+
+        if best_id and best_score >= 0.80:
+            self.logger.info(
+                f"_search_player_in_squad: '{name}' → tm_id={best_id} "
+                f"(squad page club={tm_club_id}, name_score={best_score:.3f})"
+            )
+            return best_id
+
+        self.logger.debug(
+            f"_search_player_in_squad: no match for '{name}' in club={tm_club_id} "
+            f"(best={best_score:.3f})"
+        )
+        return None
+
+    def search_player_by_name(
+        self,
+        name: str,
+        team: str = "",
+        nationality: str = "",
+        birth_year: Optional[int] = None,
+        position: str = "",
+        team_id: str = "",
+    ) -> Optional[int]:
+        """
+        Searches Transfermarkt by player name and confirms the match using a
+        composite confidence score built from up to 4 signals:
+
+          name         (weight 0.40) — SequenceMatcher ratio on player name
+          club/team    (weight 0.35) — best ratio across known TM aliases for the team
+          nationality  (weight 0.15) — exact country substring match (0 or 1)
+          birth_year   (weight 0.10) — exact year match (0 or 1)
+
+        Only signals that can actually be extracted from TM's search results
+        contribute to the score — missing signals are not penalised.
+        Returns the tm_id (int) of the best candidate with score ≥ 0.65, or None.
+
+        Multi-fallback strategy (stops as soon as a confident match is found):
+          1. Search by full name (or last name if abbreviated "A. Smith")
+          2. Search by accent-stripped name (handles "Adrián" → "Adrian")
+          3. Search by reversed name order (handles "Chan Ka Ho" → "Ka Ho Chan")
+          4. Search by first token of hyphenated name ("Ku Ja-Ryong" → "Ku")
+        """
+        CONFIDENCE_THRESHOLD = 0.65
+
+        import unicodedata
+
+        # Squad-page fast path: when the team is a known HKPL club, search its
+        # TM squad page FIRST. This is the most reliable approach for low-profile
+        # players who rank below the top search results in the general name search.
+        if team_id and team_id in _TEAM_TM_CLUB_IDS:
+            squad_result = self._search_player_in_squad(
+                name, _TEAM_TM_CLUB_IDS[team_id], birth_year=birth_year
+            )
+            if squad_result:
+                return squad_result
+            self.logger.debug(
+                f"search_player_by_name: squad-page fast path found no match for '{name}' "
+                f"in {team_id} — continuing with name search."
+            )
+
+        # Resolve team aliases early — needed to build search attempts.
+        # (Full alias list is also rebuilt below for scoring.)
+        _team_hints: list[str] = []
+        if team:
+            _team_hints.append(team.strip())
+        if team_id and team_id in _TEAM_TM_ALIASES:
+            for _alias in _TEAM_TM_ALIASES[team_id]:
+                if _alias.lower() not in [t.lower() for t in _team_hints]:
+                    _team_hints.append(_alias)
+
+        # Accent-stripped name (used in several attempts below).
+        stripped = unicodedata.normalize("NFD", name)
+        stripped = "".join(c for c in stripped if unicodedata.category(c) != "Mn")
+
+        # Build the list of (search_term, is_abbrev) attempts to try in order.
+        # Strategy: specific (name+team) searches come FIRST.
+        # TM sorts results by market value, so a little-known HKPL player is buried
+        # behind higher-profile namesakes when searching by name alone. The combined
+        # query "Marcão Tai Po" typically surfaces the correct player immediately.
+        search_attempts: list[tuple[str, bool]] = []
+
+        # Attempts 1–2: name + team (most specific — run before name-only).
+        for _th in _team_hints[:2]:
+            _combined = f"{name} {_th}"
+            if _combined not in [a[0] for a in search_attempts]:
+                search_attempts.append((_combined, False))
+
+        # Attempt 3: full name only (or last name if abbreviated "A. Smith")
+        abbrev_match = re.match(r'^[A-Z]\.\s+(.+)$', name)
+        if abbrev_match:
+            search_attempts.append((abbrev_match.group(1), True))
+        else:
+            search_attempts.append((name, False))
+
+        # Attempt 4: accent-stripped name (e.g. "Adrián" → "Adrian")
+        if stripped != name:
+            stripped_abbrev = re.match(r'^[A-Z]\.\s+(.+)$', stripped)
+            if stripped_abbrev:
+                search_attempts.append((stripped_abbrev.group(1), True))
+            else:
+                search_attempts.append((stripped, False))
+
+        # Attempt 5: reversed token order for East-Asian names ("Chan Ka Ho" → "Ka Ho Chan")
+        tokens = name.split()
+        if len(tokens) >= 2:
+            reversed_name = " ".join(tokens[1:]) + " " + tokens[0]
+            if reversed_name not in [a[0] for a in search_attempts]:
+                search_attempts.append((reversed_name, False))
+
+        # Attempt 6: first token of hyphenated surname ("Ku Ja-Ryong" → "Ku")
+        if "-" in name:
+            first_token = name.split()[0]
+            if len(first_token) > 2 and first_token not in [a[0] for a in search_attempts]:
+                search_attempts.append((first_token, False))
+
+        # Resolve team aliases: build a list of lowercase TM-known club names.
+        team_aliases: list[str] = []
+        if team_id and team_id in _TEAM_TM_ALIASES:
+            team_aliases = [a.lower() for a in _TEAM_TM_ALIASES[team_id]]
+        if team:
+            team_aliases.insert(0, team.lower().strip())
+        # Deduplicate while preserving order
+        seen_aliases: set[str] = set()
+        unique_aliases: list[str] = []
+        for a in team_aliases:
+            if a not in seen_aliases:
+                seen_aliases.add(a)
+                unique_aliases.append(a)
+        team_aliases = unique_aliases
+
+        nat_lower = nationality.lower().strip()
+
+        for search_term, is_abbrev in search_attempts:
+            encoded = urllib.parse.quote(search_term)
+            url = f"{self.base_url}/schnellsuche/ergebnis/schnellsuche?query={encoded}"
+            soup = self._make_request(url)
+            if soup is None:
+                return None
+
+            # Handle TM redirect to a single player profile page
+            og_url = soup.find("meta", property="og:url")
+            if og_url and og_url.get("content"):
+                m_redirect = re.search(r"/spieler/(\d+)", og_url["content"])
+                if m_redirect:
+                    tm_id = int(m_redirect.group(1))
+                    self.logger.info(
+                        f"search_player_by_name: '{name}' → tm_id={tm_id} "
+                        f"(TM redirect, search='{search_term}')"
+                    )
+                    return tm_id
+
+            # Pre-scan: build tm_id → nationality by correlating portrait imgs
+            # (which embed tm_id in their URL) with the nearest subsequent
+            # flaggenrahmen img. This works regardless of table nesting depth.
+            tm_nat_map: dict[int, str] = {}
+            _last_portrait_id: Optional[int] = None
+            for _img in soup.find_all("img"):
+                _src = _img.get("src", "") or _img.get("data-src", "")
+                _m = re.search(r"/portrait/[^/]+/(\d+)-", _src)
+                if _m:
+                    _last_portrait_id = int(_m.group(1))
+                elif "flaggenrahmen" in (_img.get("class") or []) and _last_portrait_id:
+                    _title = _img.get("title", "") or _img.get("alt", "")
+                    if _title and len(_title) > 1 and _last_portrait_id not in tm_nat_map:
+                        tm_nat_map[_last_portrait_id] = _title
+                        _last_portrait_id = None  # consumed
+
+            # Each candidate: tm_id, player_name_text, club_text, nationality_text, birth_year_int
+            #
+            # TM search result HTML structure (as of 2025):
+            #   <tr class="odd/even">                         ← OUTER row (all signal columns)
+            #     <td>
+            #       <table class="inline-table">             ← inner table
+            #         <tr><td rowspan=2><img portrait/></td>
+            #             <td class="hauptlink"><a /profil/spieler/ID>Name</a></td></tr>
+            #         <tr><td><a /verein/ID>Club</a></td></tr>
+            #       </table>
+            #     </td>
+            #     <td class="zentriert">CB</td>              ← position
+            #     <td class="zentriert"><img tiny_wappen/></td> ← club logo
+            #     <td class="zentriert">37</td>              ← AGE ← this is what we extract
+            #     <td class="zentriert"><img flaggenrahmen/></td> ← nationality flag
+            #     <td class="rechts hauptlink">-</td>        ← market value
+            #     <td ...><a>Agent</a></td>                  ← agent
+            #   </tr>
+            #
+            # We must walk up from the <a> link to the OUTER <tr> to get age and nationality.
+            candidates: list[tuple] = []
+            seen_ids: set[int] = set()
+
+            for a_tag in soup.find_all("a", href=re.compile(r"/profil/spieler/\d+")):
+                href = a_tag.get("href", "")
+                m = re.search(r"/spieler/(\d+)", href)
+                if not m:
+                    continue
+                tm_id = int(m.group(1))
+                if tm_id in seen_ids:
+                    continue
+                seen_ids.add(tm_id)
+
+                player_text = a_tag.get_text(strip=True)
+
+                # Navigate to the outer <tr>: a_tag → inner tr → inline-table → outer td → outer tr
+                inline_table = a_tag.find_parent("table", class_="inline-table")
+                if inline_table:
+                    outer_tr = inline_table.find_parent("td") and inline_table.find_parent("td").find_parent("tr")
+                else:
+                    outer_tr = a_tag.find_parent("tr")
+                if not outer_tr:
+                    continue
+
+                # Club: prefer the text link from the inline-table (has full name).
+                club_text = ""
+                if inline_table:
+                    club_link = inline_table.find("a", href=re.compile(r"/(verein|startseite|club)/"))
+                    if club_link:
+                        club_text = club_link.get_text(strip=True)
+                if not club_text:
+                    club_link = outer_tr.find("a", href=re.compile(r"/(verein|startseite|club)/"))
+                    if club_link:
+                        club_text = club_link.get_text(strip=True)
+
+                # Nationality: flaggenrahmen img in the outer tr (or from pre-scan map).
+                nat_text = tm_nat_map.get(tm_id, "")
+                if not nat_text:
+                    flag_img = outer_tr.find("img", class_="flaggenrahmen")
+                    if flag_img:
+                        nat_text = flag_img.get("title", "") or flag_img.get("alt", "")
+
+                # Age → birth year: the outer tr has a plain-number <td class="zentriert">
+                # containing the player's age (e.g. "37"). Convert to approximate birth year.
+                cand_birth_year = None
+                for td in outer_tr.find_all("td", class_="zentriert"):
+                    td_text = td.get_text(strip=True)
+                    # Age cell is a bare integer 14–50; skip cells that contain links or imgs
+                    if td.find(["a", "img"]):
+                        continue
+                    age_m = re.fullmatch(r"([1-4]\d|50)", td_text)
+                    if age_m:
+                        cand_birth_year = datetime.now().year - int(age_m.group(1))
+                        break
+
+                candidates.append((tm_id, player_text, club_text, nat_text, cand_birth_year))
+
+            if not candidates:
+                self.logger.debug(f"search_player_by_name: no results for search='{search_term}'")
+                continue
+
+            name_lower = name.lower().strip()
+
+            # Build alternative name forms for East-Asian names stored as "Surname Given"
+            name_tokens = name_lower.split()
+            name_alternatives = [name_lower]
+            if len(name_tokens) >= 2:
+                western = " ".join(name_tokens[1:]) + " " + name_tokens[0]
+                western_hyphen = "-".join(name_tokens[1:]) + " " + name_tokens[0]
+                name_alternatives += [western, western_hyphen]
+            # Also include accent-stripped forms
+            name_alternatives_stripped = [
+                unicodedata.normalize("NFD", a)
+                for a in name_alternatives
+            ]
+            name_alternatives_stripped = [
+                "".join(c for c in a if unicodedata.category(c) != "Mn")
+                for a in name_alternatives_stripped
+            ]
+            all_name_forms = list(dict.fromkeys(name_alternatives + name_alternatives_stripped))
+
+            best_id: Optional[int] = None
+            best_score = 0.0
+
+            for tm_id, p_name, club, nat, by in candidates:
+                p_name_lower = p_name.lower().replace("-", " ")
+                name_score = max(
+                    difflib.SequenceMatcher(None, alt, p_name_lower).ratio()
+                    for alt in all_name_forms + [search_term.lower()]
+                )
+                # Abbreviated name: boost score if last name is a word-boundary match
+                if is_abbrev:
+                    last_name_lower = search_term.lower()
+                    if re.search(r'\b' + re.escape(last_name_lower) + r'\b', p_name_lower):
+                        name_score = max(name_score, 0.85)
+
+                w_name = 0.40
+                w_club = 0.35
+                w_nat  = 0.15
+                w_by   = 0.10
+
+                active_w     = w_name
+                active_score = w_name * name_score
+
+                if team_aliases and club:
+                    # Use the best-matching alias instead of raw team string
+                    club_lower = club.lower()
+                    club_score = max(
+                        difflib.SequenceMatcher(None, alias, club_lower).ratio()
+                        for alias in team_aliases
+                    )
+                    active_w     += w_club
+                    active_score += w_club * club_score
+
+                if nat_lower and nat:
+                    nat_cand = nat.lower()
+                    # Strip accents for comparison (handles España→espana, etc.)
+                    def _strip(s: str) -> str:
+                        import unicodedata as _ud
+                        return "".join(
+                            c for c in _ud.normalize("NFD", s)
+                            if _ud.category(c) != "Mn"
+                        )
+                    nat_lower_s = _strip(nat_lower)
+                    nat_cand_s  = _strip(nat_cand)
+                    # Substring match OR fuzzy ≥ 0.80 (catches Brazil/Brasil, etc.)
+                    nat_score = 1.0 if (
+                        nat_lower_s in nat_cand_s
+                        or nat_cand_s in nat_lower_s
+                        or difflib.SequenceMatcher(None, nat_lower_s, nat_cand_s).ratio() >= 0.80
+                    ) else 0.0
+                    active_w     += w_nat
+                    active_score += w_nat * nat_score
+
+                if birth_year and by is not None:
+                    # Allow ±1 year tolerance: age→birth_year conversion is imprecise
+                    # (depends on whether birthday has passed this year).
+                    by_score  = 1.0 if abs(birth_year - by) <= 1 else 0.0
+                    active_w     += w_by
+                    active_score += w_by * by_score
+
+                score = active_score / active_w
+
+                # Penalise candidates that provided no verifiable signals when
+                # we had hints available. A name-only match (active_w=0.40) while
+                # team/nationality hints were given suggests a retired/unknown player
+                # with no TM context — require a stricter threshold for those.
+                hints_provided = bool(team_aliases or nat_lower or birth_year)
+                name_only = active_w <= w_name + 0.001  # only name weight active
+                effective_threshold = (CONFIDENCE_THRESHOLD + 0.20) if (hints_provided and name_only) else CONFIDENCE_THRESHOLD
+
+                self.logger.debug(
+                    f"  candidate tm_id={tm_id} name='{p_name}' club='{club}' nat='{nat}' by={by} "
+                    f"→ score={score:.3f} (name={name_score:.2f} active_w={active_w:.2f} "
+                    f"thresh={effective_threshold:.2f})"
+                )
+
+                if score > best_score and score >= effective_threshold:
+                    best_score = score
+                    best_id = tm_id
+
+            if best_id and best_score >= CONFIDENCE_THRESHOLD:
+                # Ambiguity check: if the winner is name-only (active_w=0.40)
+                # and there are other name-only candidates with score ≥ 0.90,
+                # the name is too common to pick one confidently → skip.
+                winner_name_only = not any(
+                    (c[2] or c[3])  # club or nat present for winner
+                    for c in candidates if c[0] == best_id
+                )
+                if winner_name_only:
+                    rival_name_only_count = sum(
+                        1 for c in candidates
+                        if c[0] != best_id
+                        and not c[2]   # no club
+                        and not c[3]   # no nat
+                    )
+                    if rival_name_only_count >= 1:
+                        self.logger.info(
+                            f"search_player_by_name: '{name}' — ambiguous name-only match "
+                            f"(tm_id={best_id} competes with {rival_name_only_count} other "
+                            f"name-only candidates). Skipping."
+                        )
+                        continue  # try next fallback search
+
+                self.logger.info(
+                    f"search_player_by_name: '{name}' → tm_id={best_id} "
+                    f"(score={best_score:.3f}, search='{search_term}')"
+                )
+                return best_id
+
+            self.logger.debug(
+                f"search_player_by_name: no confident match for '{name}' "
+                f"with search='{search_term}' (best={best_score:.3f})"
+            )
+
+        # Squad-page fallback: all name searches failed (or were ambiguous).
+        # Fetch the club's TM squad page directly and match by name.
+        # This reliably finds low-profile HKPL players who rank below the top
+        # search results for common names.
+        if team_id and team_id in _TEAM_TM_CLUB_IDS:
+            tm_club_id = _TEAM_TM_CLUB_IDS[team_id]
+            self.logger.info(
+                f"search_player_by_name: trying squad-page fallback for '{name}' "
+                f"(club={team_id}, tm_club_id={tm_club_id})"
+            )
+            squad_result = self._search_player_in_squad(name, tm_club_id, birth_year=birth_year)
+            if squad_result:
+                return squad_result
+
+        self.logger.info(
+            f"search_player_by_name: all fallbacks exhausted for '{name}' "
+            f"(best score across attempts < {CONFIDENCE_THRESHOLD})"
+        )
+        return None
+
+    def fetch_and_store_player_photo(self, player_id: str, tm_player_id: str, session) -> bool:
+        """
+        Descarga la foto de perfil de Transfermarkt y la almacena como BLOB en la BD.
+        Crea o actualiza el registro PlayerPhoto con is_primary=True.
+        No escribe ningún archivo en disco.
+        Devuelve True si la foto se guardó correctamente, False en caso contrario.
+        """
+        from sqlalchemy import select
+        from models.db_models import PlayerPhoto
+
+        photo_url = self.get_player_photo_url(tm_player_id)
+        if not photo_url:
+            self.logger.warning(f"fetch_and_store_player_photo: no URL for tm_id={tm_player_id}")
+            return False
+
+        try:
+            resp = requests.get(photo_url, headers=self.headers, timeout=15)
+            resp.raise_for_status()
+            photo_bytes = resp.content
+        except Exception as e:
+            self.logger.warning(f"fetch_and_store_player_photo: download failed for {player_id}: {e}")
+            return False
+
+        try:
+            stmt = select(PlayerPhoto).where(
+                PlayerPhoto.player_id == player_id,
+                PlayerPhoto.is_primary == True,
+            )
+            record = session.execute(stmt).scalars().first()
+            if record:
+                record.photo_data = photo_bytes
+            else:
+                record = PlayerPhoto(
+                    player_id=player_id,
+                    photo_data=photo_bytes,
+                    is_primary=True,
+                )
+                session.add(record)
+            session.commit()
+            self.logger.info(f"fetch_and_store_player_photo: blob guardado para {player_id}")
+            return True
+        except Exception as e:
+            session.rollback()
+            self.logger.error(f"fetch_and_store_player_photo: DB error for {player_id}: {e}")
+            return False

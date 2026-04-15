@@ -1,13 +1,34 @@
+import re
+
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Optional, Union, Any
 import logging
+from datetime import datetime
 
 from data.aggregators.tactical_analyzer import TacticalAnalyzer
 from utils.efficiency_metrics import EfficiencyMetricsCalculator, PercentileRankingSystem
 from data.validators.advanced_metrics_validator import AdvancedMetricsValidator
+from models.db_models import MatchHistory, Player
+from utils.db_engine import SessionFactory
+from sqlalchemy import select
 
 logger = logging.getLogger(__name__)
+
+_TEAM_NAME_ALIASES = {
+    "north dt.": "north district",
+    "north district": "north district",
+    "eastern dist.": "eastern district",
+    "eastern district": "eastern district",
+    "hkfc": "hong kong football club",
+    "hong kong football club": "hong kong football club",
+}
+
+
+def _normalize_team_name_for_h2h(value: str) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"\s+", " ", text)
+    return _TEAM_NAME_ALIASES.get(text, text)
 
 class HongKongStatsAggregator:
     """
@@ -32,11 +53,11 @@ class HongKongStatsAggregator:
 
         # Definir métricas clave por posición
         self.position_metrics = {
-            'Goalkeeper': ['Clean sheets', 'Save rate, %', 'Conceded goals', 'xG against'],
-            'Defender': ['Defensive duels won, %', 'Aerial duels won, %', 'Interceptions per 90', 'Fouls per 90'],
-            'Midfielder': ['Accurate passes, %', 'Key passes per 90', 'Progressive passes per 90', 'Assists'],
-            'Winger': ['Successful dribbles, %', 'Crosses per 90', 'Assists', 'Goals'],
-            'Forward': ['Goals', 'xG', 'Goal conversion, %', 'Shots on target, %']
+            'Goalkeeper': ['Save rate, %', 'Clean sheets', 'Prevented goals per 90', 'xG against per 90'],
+            'Defender': ['Interceptions per 90', 'Defensive duels won, %', 'Aerial duels won, %', 'Shots blocked per 90'],
+            'Midfielder': ['Assists', 'xA', 'Key passes per 90', 'Accurate passes, %'],
+            'Winger': ['Goals', 'Assists', 'Dribbles per 90', 'Crosses per 90'],
+            'Forward': ['Goals', 'xG', 'Shots on target, %', 'Goal conversion, %']
         }
 
         # Métricas generales para todos los jugadores
@@ -1309,3 +1330,189 @@ class HongKongStatsAggregator:
     def get_available_players(self, team_name: Optional[str] = None) -> List[str]:
         """Retorna lista de jugadores disponibles."""
         return self.get_available_entities('players', team_name)
+
+
+# Wyscout player_id → Transfermarkt numeric ID (mirrors TM_ID_MAP in timeline_aggregator)
+_WYSCOUT_TO_TM: Dict[str, str] = {
+    "148891": "160182",  # José Ángel
+    "125040": "146608",  # Manuel Bleda
+    "355333": "339749",  # Felipe Sá
+}
+
+
+def get_season_summary(player_id: str, season: str) -> Dict:
+    """
+    Returns aggregated season stats for a player from SQL match_history.
+
+    Args:
+        player_id: Wyscout or TM player ID.
+        season: Season string, e.g. "2023-24".
+
+    Returns:
+        Dict with keys: season, pj, goals, assists, minutes,
+        by_competition (list of {competition, pj, goals, assists}).
+        Returns empty dict on error.
+    """
+    try:
+        start_year = int(str(season).split("-")[0])
+        season_start = datetime(start_year, 7, 1)
+        season_end = datetime(start_year + 1, 6, 30, 23, 59, 59)
+    except Exception:
+        return {}
+
+    resolved_player_id = player_id
+    tm_id = _WYSCOUT_TO_TM.get(player_id, player_id)
+    with SessionFactory() as session:
+        if not session.get(Player, resolved_player_id):
+            try:
+                player = session.execute(
+                    select(Player).where(Player.tm_id == int(tm_id))
+                ).scalars().first()
+            except Exception:
+                player = None
+            if not player:
+                return {}
+            resolved_player_id = player.id
+
+        rows = session.execute(
+            select(MatchHistory)
+            .where(
+                MatchHistory.player_id == resolved_player_id,
+                MatchHistory.date >= season_start,
+                MatchHistory.date <= season_end,
+            )
+        ).scalars().all()
+    if not rows:
+        return {}
+
+    # Aggregate by competition
+    comp_stats: Dict[str, Dict] = {}
+    total_goals = 0
+    total_assists = 0
+    total_minutes = 0
+    for row in rows:
+        # ONLY count as a played match if minutes > 0
+        mins = int(row.minutes_played or 0)
+        if mins <= 0:
+            continue
+
+        comp = row.competition_name or "Unknown"
+        if comp not in comp_stats:
+            comp_stats[comp] = {"competition": comp, "pj": 0, "goals": 0, "assists": 0}
+        
+        comp_stats[comp]["pj"] += 1
+        comp_stats[comp]["goals"] += int(row.goals or 0)
+        comp_stats[comp]["assists"] += int(row.assists or 0)
+        total_goals += int(row.goals or 0)
+        total_assists += int(row.assists or 0)
+        total_minutes += mins
+
+    return {
+        "season": season,
+        "pj": sum(c["pj"] for c in comp_stats.values()),
+        "goals": total_goals,
+        "assists": total_assists,
+        "minutes": total_minutes,
+        "by_competition": list(comp_stats.values()),
+    }
+
+
+def _strip_team_rank(name: str) -> str:
+    """Remove ranking suffix from team name, e.g. 'Kitchee(7.)' → 'Kitchee'."""
+    return re.sub(r"\s*\(\d+\.?\)\s*", "", name).strip()
+
+
+def _parse_h2h_match(opponent_field: str, result: str) -> Optional[Dict]:
+    """
+    Parse a match from TM historical records opponent field.
+
+    Args:
+        opponent_field: e.g. "Kitchee(7.) vs Eastern(1.)" or "Eastern vs Lee Man"
+        result: e.g. "2:1", "1:1", "0:3"
+
+    Returns:
+        Dict with home_team, away_team, home_score, away_score or None if unparseable.
+    """
+    if " vs " not in opponent_field:
+        return None
+    parts = opponent_field.split(" vs ", 1)
+    home = _strip_team_rank(parts[0])
+    away = _strip_team_rank(parts[1])
+
+    score_match = re.match(r"(\d+)\s*:\s*(\d+)", result or "")
+    if not score_match:
+        return None
+
+    return {
+        "home_team": home,
+        "away_team": away,
+        "home_score": int(score_match.group(1)),
+        "away_score": int(score_match.group(2)),
+    }
+
+
+def get_h2h_record(team_a: str, team_b: str, last_n: Optional[int] = None) -> Dict:
+    """
+    Returns head-to-head record for team_a vs team_b from SQL match_history.
+
+    Args:
+        team_a: English team name (home team perspective for W/D/L).
+        team_b: English team name.
+        last_n: Maximum number of most recent matches to consider. `None` uses full record.
+
+    Returns:
+        Dict with wins, draws, losses (from team_a's perspective), matches_found.
+    """
+    team_a_lower = _normalize_team_name_for_h2h(team_a)
+    team_b_lower = _normalize_team_name_for_h2h(team_b)
+
+    # Collect unique matches keyed by date/opponent/result to avoid one row per player.
+    seen: Dict[str, Dict] = {}
+    with SessionFactory() as session:
+        rows = session.execute(
+            select(MatchHistory.date, MatchHistory.opponent, MatchHistory.result)
+            .where(
+                MatchHistory.opponent.is_not(None),
+                MatchHistory.result.is_not(None),
+            )
+        ).all()
+
+    for date_value, opponent_field, result in rows:
+        parsed = _parse_h2h_match(opponent_field or "", result or "")
+        if not parsed:
+            continue
+
+        h_lower = _normalize_team_name_for_h2h(parsed["home_team"])
+        a_lower = _normalize_team_name_for_h2h(parsed["away_team"])
+        teams_in_match = {h_lower, a_lower}
+        if team_a_lower in teams_in_match and team_b_lower in teams_in_match:
+            date_text = date_value.strftime("%d/%m/%Y") if isinstance(date_value, datetime) else str(date_value or "")
+            key = f"{date_text}-{opponent_field}-{result}"
+            if key not in seen:
+                seen[key] = {**parsed, "date": date_text}
+
+    matches = sorted(seen.values(), key=lambda x: x.get("date", ""), reverse=True)
+    if last_n is not None:
+        matches = matches[:last_n]
+
+    wins = draws = losses = 0
+    for m in matches:
+        h_lower = _normalize_team_name_for_h2h(m["home_team"])
+        hs, as_ = m["home_score"], m["away_score"]
+
+        if h_lower == team_a_lower:
+            if hs > as_:
+                wins += 1
+            elif hs == as_:
+                draws += 1
+            else:
+                losses += 1
+        else:  # team_a is away
+            if as_ > hs:
+                wins += 1
+            elif as_ == hs:
+                draws += 1
+            else:
+                losses += 1
+
+    return {"wins": wins, "draws": draws, "losses": losses, "matches_found": len(matches)}

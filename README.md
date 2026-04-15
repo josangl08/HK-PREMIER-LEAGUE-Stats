@@ -119,6 +119,18 @@ Este dashboard deportivo proporciona análisis completos de datos de la **Liga d
 
 ---
 
+## 🧭 Gobernanza del repositorio
+
+Las reglas de estructura, runtime storage y clasificación de módulos están documentadas en `docs/repo_structure_governance.md`.
+
+Puntos clave:
+
+* Los assets generados en runtime escriben ahora en `storage/player_cards/`.
+* `data/player_cards/` queda como ruta legada de lectura durante la migración.
+* Artefactos generados como `htmlcov/`, `.pytest_cache/`, `__pycache__/`, `*.db-wal` y `*.db-shm` no forman parte de la estructura fuente.
+
+---
+
 ## 📁 Estructura del proyecto
 
 ```text
@@ -265,4 +277,3 @@ git add .
 git commit -m 'Deploy to production'
 git push heroku main
 ```
-

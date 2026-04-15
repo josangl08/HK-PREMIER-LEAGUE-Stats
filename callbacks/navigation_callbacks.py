@@ -1,7 +1,7 @@
 # ABOUTME: Navigation callback that handles routing, authentication, and role-based access control.
 # ABOUTME: Defines ROLE_ALLOWED_PATHS to restrict page access by user role.
 
-from dash import Input, Output, callback, html, no_update
+from dash import Input, Output, State, callback, html, no_update
 from flask_login import current_user
 # Importar layouts
 from layouts.home import layout as home_layout
@@ -10,7 +10,7 @@ from layouts.register import create_register_form
 from layouts.not_found import layout as not_found_layout
 from layouts.performance import create_performance_layout
 from layouts.injuries import create_injuries_layout
-from components.navbar import create_navbar
+from layouts.components.shared.navbar import create_navbar
 try:
     from layouts.ai_insights import create_ai_insights_layout
     _AI_INSIGHTS_AVAILABLE = True
@@ -23,7 +23,7 @@ PUBLIC_PATHS = ['/login', '/register']
 # Mapa de rutas permitidas por rol (None = acceso total)
 ROLE_ALLOWED_PATHS = {
     'admin': None,                                      # Acceso completo a todas las rutas
-    'player': ['/', '/performance', '/ai-insights', '/player-portal'],
+    'player': ['/performance', '/ai-insights', '/player-portal'], # '/' eliminado para forzar redirección
     'agent': ['/agent-portal', '/performance'],         # Sin /ai-insights (predictor callbacks)
 }
 
@@ -37,6 +37,19 @@ _AUTH_VISIBLE = {"display": "block"}
 _AUTH_HIDDEN  = {"display": "none"}
 
 
+@callback(
+    Output("navbar-collapse", "is_open"),
+    Input("navbar-toggler", "n_clicks"),
+    State("navbar-collapse", "is_open"),
+    prevent_initial_call=True,
+)
+def toggle_navbar_collapse(n_clicks: int, is_open: bool) -> bool:
+    """Toggle navbar collapse state on smaller screens."""
+    if not n_clicks:
+        return is_open
+    return not is_open
+
+
 def _get_default_path_for_role(role: str) -> str:
     """Retorna la ruta de inicio según el rol del usuario."""
     return ROLE_DEFAULT_PATH.get(role, '/')
@@ -47,6 +60,11 @@ def _is_path_allowed(pathname: str, role: str) -> bool:
     allowed = ROLE_ALLOWED_PATHS.get(role)
     if allowed is None:
         return True  # admin: acceso total
+    
+    # Redirección automática si intentan acceder a la raíz sin permiso
+    if pathname == '/' and role in ROLE_DEFAULT_PATH:
+        return False
+        
     return pathname in allowed
 
 
@@ -93,15 +111,17 @@ def display_page(pathname):
             # Comprobar permisos de rol para rutas protegidas
             if is_authenticated and not _is_path_allowed(pathname, user_role):
                 default = _get_default_path_for_role(user_role)
+                # Si el usuario es player/agent y entra en '/', redirigir a su portal
                 return _render_path(default, navbar, user_role), navbar, _AUTH_HIDDEN, no_update
 
             return _render_path(pathname, navbar, user_role), navbar, _AUTH_HIDDEN, no_update
 
     except Exception as e:
+        default_href = _get_default_path_for_role(user_role) if is_authenticated else "/"
         error_layout = html.Div([
             html.H1("Error", className="text-center"),
             html.P(f"Ha ocurrido un error: {str(e)}", className="text-center"),
-            html.A("Volver al inicio", href="/", className="btn btn-primary")
+            html.A("Volver al inicio", href=default_href, className="btn btn-primary")
         ], className="container mt-5")
         return error_layout, navbar, _AUTH_HIDDEN, no_update
 

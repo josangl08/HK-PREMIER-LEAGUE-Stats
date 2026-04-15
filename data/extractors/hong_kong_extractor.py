@@ -28,8 +28,9 @@ class HongKongDataExtractor:
             cache_dir: Directorio para cache de datos
         """
         # Configuración de URLs (centralizada)
-        self.base_url = "https://raw.githubusercontent.com/josangl08/Hong-Kong-Data/main"
-        self.github_api_base = "https://api.github.com/repos/josangl08/Hong-Kong-Data/contents"
+        # Repo renamed to SEA-Football-Data; HKPL files now live in hong_kong/ subfolder
+        self.base_url = "https://raw.githubusercontent.com/josangl08/SEA-Football-Data/main/hong_kong"
+        self.github_api_base = "https://api.github.com/repos/josangl08/SEA-Football-Data/contents/hong_kong"
 
         # Configuración de temporadas disponibles (nombres CORRECTOS del repo)
         # Formato: "hong_kong_YYYY_YY.csv"

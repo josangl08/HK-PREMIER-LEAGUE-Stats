@@ -1,7 +1,26 @@
+# ABOUTME: Dash application bootstrap for the Hong Kong Premier League dashboard.
+# ABOUTME: Initializes shared services, registers callbacks, and defines the root layout.
+
 import os
+from dotenv import load_dotenv
+load_dotenv()
+
+import warnings
+
+# Silence noisy UMAP/Numba warnings about n_jobs and TBB
+warnings.filterwarnings("ignore", message=".*n_jobs value 1 overridden.*")
+warnings.filterwarnings("ignore", message=".*TBB failed to initialize.*")
+
+# Configure Numba threading before any import that triggers numba/umap.
+# On macOS Silicon, 'omp' and 'tbb' often fail to load. 
+# 'workqueue' is the most reliable built-in layer.
+os.environ["NUMBA_THREADING_LAYER"] = "workqueue"
+os.environ.setdefault("NUMBA_NUM_THREADS", "1")
+
 import dash
 from dash import html, dcc
 import dash_bootstrap_components as dbc
+from flask import request
 from flask_login import LoginManager, current_user
 import logging
 
@@ -39,6 +58,9 @@ app = dash.Dash(
         "https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap",
         "https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"
     ],
+    external_scripts=[
+        "https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"
+    ],
     meta_tags=[
         {"name": "viewport", "content": "width=device-width, initial-scale=1"},
         {"name": "description", "content": "Sports Dashboard - Liga de Hong Kong"},
@@ -51,6 +73,28 @@ app = dash.Dash(
 app.title = "Hong Kong Premier League Dashboard"
 # app._favicon = "assets/favicon.ico"  # Si tienes un favicon
 server = app.server
+
+# Cache-Control headers for static assets served from /assets/.
+# In active development this app changes clientside callbacks frequently; if the
+# browser keeps an older JS asset while Python has already registered new
+# ClientsideFunction names, Dash throws "undefined is not an object" errors.
+# Prefer no-store here so the browser always reloads the latest assets.
+@server.after_request
+def add_cache_control_headers(response):
+    path = getattr(request, 'path', '')
+    if path.startswith('/assets/'):
+        ct = response.headers.get('Content-Type', '')
+        if any(t in ct for t in ('javascript', 'css', 'font', 'image')):
+            # Remove any existing Cache-Control set by Werkzeug/Dash before
+            # setting ours — avoids duplicate/concatenated header values.
+            try:
+                del response.headers['Cache-Control']
+            except KeyError:
+                pass
+            response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+            response.headers['Pragma'] = 'no-cache'
+            response.headers['Expires'] = '0'
+    return response
 
 # Configuración de Flask
 server.config.update(
@@ -89,12 +133,33 @@ def load_user_from_id(user_id):
 # Solo debemos inicializar en el proceso hijo (cuando WERKZEUG_RUN_MAIN=true)
 # ==============================================================================
 
-def is_werkzeug_reloader_process():
-    """Verifica si estamos en el proceso padre del reloader de Werkzeug."""
-    return os.environ.get('WERKZEUG_RUN_MAIN') != 'true'
+def is_werkzeug_reloader_parent():
+    """Detecta solo el proceso padre del reloader de Werkzeug."""
+    return os.environ.get("WERKZEUG_RUN_MAIN") == "false"
 
-# Solo inicializar si NO estamos en el proceso padre del reloader
-if not is_werkzeug_reloader_process():
+# Placeholders para el proceso padre
+_player_options = []
+
+class DummyDataManager:
+    """Fallback defensivo para mantener la app funcional si el gestor real falla."""
+
+    def __getattr__(self, name):
+        def method(*args, **kwargs):
+            logger.error(
+                f"Llamada a '{name}' en DataManager dummy debido a un error de inicialización."
+            )
+            return {} if "get" in name or "status" in name else []
+
+        return method
+
+
+data_manager = DummyDataManager()
+
+
+# Inicializamos siempre salvo en el proceso padre del reloader.
+# Si la app se ejecuta sin reloader, WERKZEUG_RUN_MAIN no existe y la app
+# debe registrar callbacks y servicios igualmente.
+if not is_werkzeug_reloader_parent():
     logger.info("Inicializando el gestor de datos y autenticación...")
     
     # Sincronizar administrador desde .env
@@ -111,14 +176,15 @@ if not is_werkzeug_reloader_process():
             logger.warning("No se pudieron refrescar los datos iniciales. La app podría usar datos desactualizados.")
         else:
             logger.info("✓ Datos iniciales refrescados y listos.")
+            # Pre-warm aggregator caches so the first user request is fast.
+            try:
+                data_manager.get_league_statistics()
+                data_manager.get_available_teams()
+                logger.info("✓ Cache warmup completado (league stats + teams)")
+            except Exception as _we:
+                logger.warning(f"⚠️ Cache warmup parcial: {_we}")
     except Exception as e:
         logger.critical(f"❌ Error fatal al inicializar DataManager: {e}", exc_info=True)
-        class DummyDataManager:
-            def __getattr__(self, name):
-                def method(*args, **kwargs):
-                    logger.error(f"Llamada a '{name}' en DataManager dummy debido a un error de inicialización.")
-                    return {} if "get" in name or "status" in name else []
-                return method
         data_manager = DummyDataManager()
 
     # ==============================================================================
@@ -131,68 +197,77 @@ if not is_werkzeug_reloader_process():
     set_hong_kong_data_manager(data_manager)
     logger.info("✓ DataManager registrado en app context (singleton pattern)")
 
-    # Sincronizar admin desde .env → data/users.json (Admin Safety Sync)
-    from utils.auth import AuthRepository
+
+    # ==============================================================================
+    # IMPORTACIÓN DE CALLBACKS (Solo en el proceso hijo)
+    # ==============================================================================
+    ENABLE_INJURIES_MODULE = os.getenv("ENABLE_INJURIES", "False").lower() == "true"
+
+    import callbacks.auth_callbacks
+    import callbacks.navigation_callbacks
+    import callbacks.home_callbacks
+    import callbacks.performance_callbacks
+    import callbacks.fixture_callbacks
+    import callbacks.content_generation_callbacks
+
+    if ENABLE_INJURIES_MODULE:
+        import callbacks.injuries_callbacks
+        logger.info("✓ Módulo de lesiones habilitado")
+    else:
+        logger.info("⚠️ Módulo de lesiones deshabilitado (ENABLE_INJURIES=False)")
+
     try:
-        AuthRepository.sync_admin_from_env()
-        logger.info("✓ Admin sincronizado desde .env en users.json")
-    except Exception as e:
-        logger.error(f"❌ Error en Admin Safety Sync: {e}")
+        import callbacks.ai_insights_callbacks
+        from callbacks.agent_callbacks import register_agent_callbacks
+        register_agent_callbacks(app)
+        logger.info("✓ Módulo AI Insights y Stage Decision Nodes habilitados")
+    except ImportError:
+        logger.info("⚠️ Módulo AI Insights no disponible aún (pendiente de Gemini)")
+
+    try:
+        from callbacks.player_portal_callbacks import register_player_portal_callbacks
+        register_player_portal_callbacks(app)
+        logger.info("✓ Player Portal callbacks registrados")
+    except ImportError as e:
+        logger.info(f"⚠️ Player Portal callbacks no disponibles: {e}")
+
+    try:
+        from callbacks.stage_action_callbacks import register_stage_action_callbacks
+        register_stage_action_callbacks(app)
+        logger.info("✓ Stage Action callbacks registrados")
+    except ImportError as e:
+        logger.info(f"⚠️ Stage Action callbacks no disponibles: {e}")
+
+    try:
+        from callbacks.card_editor_callbacks import register_card_editor_callbacks
+        register_card_editor_callbacks(app)
+        logger.info("✓ Card Editor callbacks registrados")
+    except ImportError as e:
+        logger.info(f"⚠️ Card Editor callbacks no disponibles: {e}")
+
+    try:
+        from callbacks.player_portal_callbacks import register_career_intelligence_callbacks
+        register_career_intelligence_callbacks(app)
+        logger.info("✓ Career Intelligence overlay callbacks registrados")
+    except ImportError as e:
+        logger.info(f"⚠️ Career Intelligence callbacks no disponibles: {e}")
+
+    logger.info("✓ Callbacks importados correctamente.")
+
+    # Obtener nombres de jugadores para el Store global
+    try:
+        from utils.player_index import get_player_index as _get_player_index
+        _player_options = [
+            {"label": name, "value": name}
+            for name in sorted(_get_player_index().get_all_player_names())
+        ]
+        logger.info(f"✓ player-names-store preparado ({len(_player_options)} jugadores)")
+    except Exception as _e:
+        logger.warning(f"⚠️ No se pudieron cargar nombres de jugadores para el Store: {_e}")
+        _player_options = []
 else:
     logger.info("⏳ Proceso padre del reloader - esperando al proceso hijo...")
 
-# ==============================================================================
-# IMPORTACIÓN DE CALLBACKS
-# ==============================================================================
-# Se importan después de que 'app' y 'data_manager' están definidos y registrados
-# Los callbacks ahora usan app_context para evitar crear instancias duplicadas
-#
-# NOTA: Solo importar callbacks activos. El módulo 'injuries' está deshabilitado
-# por configuración (ENABLE_INJURIES=False por defecto)
-# ==============================================================================
-ENABLE_INJURIES_MODULE = os.getenv("ENABLE_INJURIES", "False").lower() == "true"
-
-import callbacks.auth_callbacks
-import callbacks.navigation_callbacks
-import callbacks.home_callbacks
-import callbacks.performance_callbacks
-import callbacks.fixture_callbacks
-import callbacks.content_generation_callbacks
-
-if ENABLE_INJURIES_MODULE:
-    import callbacks.injuries_callbacks
-    logger.info("✓ Módulo de lesiones habilitado")
-else:
-    logger.info("⚠️ Módulo de lesiones deshabilitado (ENABLE_INJURIES=False)")
-
-try:
-    import callbacks.ai_insights_callbacks
-    from callbacks.agent_callbacks import register_agent_callbacks
-    register_agent_callbacks(app)
-    logger.info("✓ Módulo AI Insights y Agent habilitados")
-except ImportError:
-    logger.info("⚠️ Módulo AI Insights no disponible aún (pendiente de Gemini)")
-
-try:
-    from callbacks.player_portal_callbacks import register_player_portal_callbacks
-    register_player_portal_callbacks(app)
-    logger.info("✓ Player Portal callbacks registrados")
-except ImportError as e:
-    logger.info(f"⚠️ Player Portal callbacks no disponibles: {e}")
-
-logger.info("✓ Callbacks importados correctamente.")
-
-# Obtener nombres de jugadores para el Store global (una sola vez al arrancar)
-try:
-    from utils.player_index import get_player_index as _get_player_index
-    _player_options = [
-        {"label": name, "value": name}
-        for name in sorted(_get_player_index().get_all_player_names())
-    ]
-    logger.info(f"✓ player-names-store preparado ({len(_player_options)} jugadores)")
-except Exception as _e:
-    logger.warning(f"⚠️ No se pudieron cargar nombres de jugadores para el Store: {_e}")
-    _player_options = []
 
 # Definir layout principal de la aplicación
 app.layout = dbc.Container([
@@ -207,11 +282,14 @@ app.layout = dbc.Container([
         dbc.Container([
             dbc.Row([
                 dbc.Col([
-                    html.Div(id='auth-form-content', className="auth-card")
+                    html.Div(id='auth-form-content')
                 ], width=12, sm=9, md=7, lg=5, className="mx-auto mt-4 mb-5")
             ])
         ], fluid=True, className="min-vh-100 py-5",
-           style={"backgroundColor": "#18181A"})
+           style={
+               "background": "radial-gradient(circle at 50% 50%, #3a1a2a 0%, #18181A 100%)",
+               "backgroundAttachment": "fixed"
+           })
     ]),
 
     # Contenido principal para rutas no-auth
@@ -226,7 +304,9 @@ app.layout = dbc.Container([
     dcc.Store(id='app-theme', storage_type='local', data='light'),
 
     # Componente para downloads
-    html.Div(id='download-components')
+    html.Div(id='download-components', children=[
+        dcc.Download(id="card-download")
+    ])
 
 ], fluid=True, className="p-0")
 

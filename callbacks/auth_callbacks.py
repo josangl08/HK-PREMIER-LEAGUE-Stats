@@ -140,6 +140,18 @@ def login_callback(n_clicks, username, password):
         if user:
             login_user(user)
             logger.info(f"Login exitoso para {username} (role={user.role})")
+            
+            # Disparo de IdentityResolver (Task 3.3) para vincular IDs externos bajo demanda
+            if user.role == 'player' and user.player_id:
+                import threading
+                from utils.player_index import IdentityResolver
+                def _bg_resolve(pid):
+                    try:
+                        IdentityResolver().resolve_external_ids(pid)
+                    except Exception as exc:
+                        logger.warning(f"Background IdentityResolver failed for {pid}: {exc}")
+                threading.Thread(target=_bg_resolve, args=(user.player_id,), daemon=True).start()
+
             redirect_path = '/player-portal' if user.role == 'player' else '/agent-portal' if user.role == 'agent' else '/'
             return None, 'success', redirect_path
         else:
@@ -283,6 +295,17 @@ def handle_registration(n_clicks, username, password, confirm_password,
                     f"(player={player_name}, team={player_profile.get('team', '?')}, "
                     f"season={player_profile.get('season', '?')})"
                 )
+                # Background TM data resolution (photo, position, tm_id)
+                import threading
+                from data.managers.hkpl_sync_manager import HKPLSyncManager
+                _team_hint = player_profile.get('team', '') or ''
+                def _bg_tm_sync(_pid=player_id, _pname=player_name, _team=_team_hint):
+                    try:
+                        HKPLSyncManager().resolve_player_tm_data(_pid, _pname, _team)
+                    except Exception as _exc:
+                        logger.warning(f"Background TM sync failed for {_pname!r}: {_exc}")
+                threading.Thread(target=_bg_tm_sync, daemon=True).start()
+                logger.info(f"Background TM sync started for {player_name!r}")
                 return (None, None, None, None, '/login') + _NO_AGENT_ERRORS
             else:
                 return (

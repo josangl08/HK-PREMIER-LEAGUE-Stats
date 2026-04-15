@@ -6,76 +6,16 @@ Skeleton Screen Components for HK Premier League Dashboard.
 
 Provides skeleton loaders that match the structure of actual content,
 creating a perception of faster loading times and better UX.
+Classes are defined in assets/style.css.
 """
 
 from dash import html
 import dash_bootstrap_components as dbc
-from typing import Optional
-
-
-def create_skeleton_pulse_css():
-    """
-    Create CSS for skeleton pulse animation.
-
-    Returns:
-        html.Style: CSS for pulse animation
-    """
-    css = """
-    <style>
-        @keyframes skeleton-pulse {
-            0% { opacity: 1; }
-            50% { opacity: 0.4; }
-            100% { opacity: 1; }
-        }
-
-        .skeleton {
-            animation: skeleton-pulse 1.5s ease-in-out infinite;
-            background: linear-gradient(
-                90deg,
-                rgba(255, 255, 255, 0.05) 0%,
-                rgba(255, 255, 255, 0.1) 50%,
-                rgba(255, 255, 255, 0.05) 100%
-            );
-            border-radius: 4px;
-        }
-
-        .skeleton-card {
-            background: rgba(255, 255, 255, 0.02);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 8px;
-            padding: 1rem;
-        }
-
-        .skeleton-text {
-            height: 16px;
-            margin-bottom: 8px;
-        }
-
-        .skeleton-title {
-            height: 24px;
-            width: 60%;
-            margin-bottom: 16px;
-        }
-
-        .skeleton-circle {
-            border-radius: 50%;
-        }
-
-        .skeleton-chart {
-            height: 300px;
-            border-radius: 8px;
-        }
-    </style>
-    """
-    return html.Style(html.Div(dangerously_allow_html=True, children=css))
 
 
 def create_skeleton_kpi_card():
     """
     Create a skeleton loader for KPI card.
-
-    Returns:
-        dbc.Col: Skeleton KPI card
     """
     return dbc.Col([
         dbc.Card([
@@ -103,12 +43,6 @@ def create_skeleton_kpi_card():
 def create_skeleton_kpi_row(num_cards: int = 4):
     """
     Create a skeleton loader for KPI row.
-
-    Args:
-        num_cards: Number of KPI cards to show
-
-    Returns:
-        dbc.Row: Skeleton KPI row
     """
     cards = [create_skeleton_kpi_card() for _ in range(num_cards)]
     return dbc.Row(cards, className="mb-4")
@@ -121,14 +55,6 @@ def create_skeleton_chart(
 ):
     """
     Create a skeleton loader for chart.
-
-    Args:
-        title: Chart title
-        height: Chart height in pixels
-        full_width: Use full width (12 cols) or half width (6 cols)
-
-    Returns:
-        dbc.Col: Skeleton chart container
     """
     chart_md = 12 if full_width else 6
 
@@ -156,13 +82,6 @@ def create_skeleton_table(
 ):
     """
     Create a skeleton loader for table.
-
-    Args:
-        num_rows: Number of skeleton rows
-        num_cols: Number of columns
-
-    Returns:
-        html.Div: Skeleton table
     """
     # Header row
     header = html.Tr([
@@ -193,197 +112,171 @@ def create_skeleton_table(
     ], className="skeleton-card", bordered=True, striped=True)
 
 
-def create_skeleton_league_view():
+def create_skeleton_timeline(num_items: int = 6):
     """
-    Create skeleton loader for league view.
-
-    Matches the structure of the actual league view with
-    KPIs and 5 charts.
-
-    Returns:
-        html.Div: Skeleton league view
+    Create a skeleton loader for the Player Portal Timeline (Sidebar).
+    Mirrors the season-header plus milestone-card rhythm of the real timeline.
     """
-    return html.Div([
-        # Title skeleton
-        html.Div(
-            className="skeleton skeleton-title mb-4",
-            style={"width": "300px"}
-        ),
-
-        # KPIs skeleton
-        create_skeleton_kpi_row(4),
-
-        # Charts skeleton (1 full width + 2x2 half width)
-        dbc.Row([
-            create_skeleton_chart(
-                title="League Overview",
-                height=350,
-                full_width=True
+    season_blocks = []
+    remaining = max(num_items, 1)
+    for season_idx in range(2):
+        season_blocks.append(
+            html.Div(
+                [
+                    html.Div(
+                        [
+                            html.Div(className="skeleton", style={"width": "92px", "height": "16px", "marginBottom": "10px"}),
+                            html.Div(
+                                [
+                                    html.Div(className="skeleton skeleton-circle", style={"width": "34px", "height": "34px"}),
+                                    html.Div(className="skeleton", style={"width": "58px", "height": "34px", "borderRadius": "10px"}),
+                                ],
+                                className="d-flex align-items-center justify-content-end",
+                                style={"gap": "8px"},
+                            ),
+                        ],
+                        className="d-flex align-items-start justify-content-between px-2 mb-3",
+                    ),
+                ],
+                className="mb-2",
             )
-        ], className="mb-4"),
-
-        dbc.Row([
-            create_skeleton_chart(title="Position Analysis", height=300),
-            create_skeleton_chart(title="Age Distribution", height=300)
-        ], className="mb-4"),
-
-        dbc.Row([
-            create_skeleton_chart(title="Tactical Heatmap", height=300),
-            create_skeleton_chart(title="Timeline", height=300)
-        ], className="mb-4")
-    ])
-
-
-def create_skeleton_team_view():
-    """
-    Create skeleton loader for team view.
-
-    Matches the structure of the team view.
-
-    Returns:
-        html.Div: Skeleton team view
-    """
-    return html.Div([
-        # Title skeleton
-        html.Div(
-            className="skeleton skeleton-title mb-4",
-            style={"width": "400px"}
-        ),
-
-        # KPIs skeleton
-        create_skeleton_kpi_row(4),
-
-        # Charts skeleton (asymmetric grid)
-        dbc.Row([
-            create_skeleton_chart(title="Team Radar", height=300),
-            dbc.Col([
-                create_skeleton_kpi_card(),
-                html.Div(style={"height": "16px"}),  # Spacer
-                create_skeleton_kpi_card()
-            ], md=4)
-        ], className="mb-4"),
-
-        dbc.Row([
-            create_skeleton_chart(title="Squad Depth", height=300),
-            create_skeleton_chart(title="Player Minutes", height=300)
-        ], className="mb-4"),
-
-        dbc.Row([
-            create_skeleton_chart(
-                title="Tactical Fingerprint",
-                height=300,
-                full_width=True
+        )
+        for item_idx in range(min(remaining, 3)):
+            season_blocks.append(
+                html.Div(
+                    [
+                        html.Div(className="skeleton skeleton-circle", style={"width": "18px", "height": "18px", "flexShrink": 0, "marginTop": "6px"}),
+                        html.Div(
+                            [
+                                html.Div(className="skeleton", style={"width": "72%", "height": "14px", "marginBottom": "6px"}),
+                                html.Div(className="skeleton", style={"width": "46%", "height": "10px", "marginBottom": "10px"}),
+                                html.Div(className="skeleton", style={"width": "100%", "height": "62px", "borderRadius": "14px"}),
+                            ],
+                            className="flex-grow-1",
+                        ),
+                    ],
+                    className="d-flex align-items-start px-2 mb-4",
+                    style={"gap": "12px"},
+                )
             )
-        ], className="mb-4")
-    ])
+            remaining -= 1
+            if remaining <= 0:
+                break
+        if remaining <= 0:
+            break
+    return html.Div(season_blocks, className="portal-skeleton-timeline")
 
 
-def create_skeleton_player_view():
+def create_skeleton_year_navigator(num_pills: int = 6):
     """
-    Create skeleton loader for player view.
-
-    Matches the structure of the player view.
-
-    Returns:
-        html.Div: Skeleton player view
+    Create a skeleton loader for the Unified Year Navigator.
     """
-    return html.Div([
-        # Title skeleton
-        html.Div(
-            className="skeleton skeleton-title mb-4",
-            style={"width": "350px"}
-        ),
-
-        # KPIs skeleton
-        create_skeleton_kpi_row(4),
-
-        # Charts skeleton (symmetric 6-6 grid)
-        dbc.Row([
-            create_skeleton_chart(title="Player Radar", height=300),
-            create_skeleton_chart(title="Percentile Rankings", height=300)
-        ], className="mb-4"),
-
-        dbc.Row([
-            create_skeleton_chart(title="Efficiency Scatter", height=300),
-            create_skeleton_chart(title="Performance Heatmap", height=300)
-        ], className="mb-4"),
-
-        dbc.Row([
-            create_skeleton_chart(
-                title="Evolution Timeline",
-                height=300,
-                full_width=True
+    pills = []
+    for _ in range(num_pills):
+        pills.append(
+            html.Div(
+                className="skeleton year-nav-pill",
+                style={
+                    "width": "60px", 
+                    "height": "32px", 
+                    "marginRight": "8px",
+                    "display": "inline-block",
+                    "border": "none" # Override pill border for skeleton look
+                }
             )
-        ], className="mb-4")
-    ])
+        )
+    return html.Div(
+        pills, 
+        id="year-navigator-pills-skeleton",
+        className="d-flex overflow-hidden py-2 mb-3"
+    )
+
+
+def create_skeleton_stage():
+    """
+    Create a skeleton loader for the Stage area.
+    """
+    return html.Div(
+        [
+            html.Div(
+                [
+                    html.Div(
+                        [
+                            html.Div(className="skeleton skeleton-title", style={"width": "220px", "height": "24px", "marginBottom": "12px"}),
+                            html.Div(className="skeleton", style={"width": "140px", "height": "14px"}),
+                        ],
+                        className="flex-grow-1",
+                    ),
+                    html.Div(className="skeleton", style={"width": "88px", "height": "28px", "borderRadius": "999px"}),
+                ],
+                className="d-flex align-items-start justify-content-between mb-4",
+                style={"gap": "16px"},
+            ),
+            html.Div(
+                [
+                    html.Div(className="skeleton", style={"height": "118px", "borderRadius": "16px"}),
+                    html.Div(className="skeleton", style={"height": "118px", "borderRadius": "16px"}),
+                    html.Div(className="skeleton", style={"height": "118px", "borderRadius": "16px"}),
+                ],
+                className="mb-4",
+                style={"display": "grid", "gridTemplateColumns": "repeat(auto-fit, minmax(180px, 1fr))", "gap": "14px"},
+            ),
+            html.Div(className="skeleton mb-3", style={"width": "180px", "height": "16px"}),
+            html.Div(className="skeleton mb-4", style={"height": "280px", "borderRadius": "18px"}),
+            dbc.Row(
+                [
+                    dbc.Col(html.Div(className="skeleton", style={"height": "220px", "borderRadius": "18px"}), md=6, className="mb-3"),
+                    dbc.Col(html.Div(className="skeleton", style={"height": "220px", "borderRadius": "18px"}), md=6, className="mb-3"),
+                ],
+                className="g-3",
+            ),
+            html.Div(className="skeleton mb-3", style={"width": "150px", "height": "16px"}),
+            html.Div(className="skeleton", style={"height": "176px", "borderRadius": "18px"}),
+        ],
+        className="stage-view stage-view--skeleton",
+    )
 
 
 def get_skeleton_for_view(view_level: str):
     """
     Get appropriate skeleton loader based on view level.
-
-    Args:
-        view_level: 'league', 'team', or 'player'
-
-    Returns:
-        html.Div: Skeleton loader for the specified view
     """
-    skeletons = {
-        'league': create_skeleton_league_view,
-        'team': create_skeleton_team_view,
-        'player': create_skeleton_player_view
-    }
+    if view_level == 'league':
+        return html.Div([
+            html.Div(className="skeleton skeleton-title mb-4", style={"width": "300px"}),
+            create_skeleton_kpi_row(4),
+            create_skeleton_chart(full_width=True),
+            dbc.Row([create_skeleton_chart(), create_skeleton_chart()])
+        ])
+    elif view_level == 'team':
+        return html.Div([
+            html.Div(className="skeleton skeleton-title mb-4", style={"width": "400px"}),
+            create_skeleton_kpi_row(4),
+            dbc.Row([create_skeleton_chart(), create_skeleton_chart()])
+        ])
+    else:  # player
+        return html.Div([
+            html.Div(className="skeleton skeleton-title mb-4", style={"width": "350px"}),
+            create_skeleton_kpi_row(4),
+            dbc.Row([create_skeleton_chart(), create_skeleton_chart()]),
+            create_skeleton_chart(full_width=True)
+        ])
 
-    skeleton_func = skeletons.get(view_level, create_skeleton_league_view)
-    return skeleton_func()
 
-
-def create_loading_overlay(
-    message: str = "Loading data...",
-    show_spinner: bool = True
-):
+def create_loading_overlay(message: str = "Loading data..."):
     """
-    Create a loading overlay with optional spinner.
-
-    Args:
-        message: Loading message
-        show_spinner: Show spinner animation
-
-    Returns:
-        html.Div: Loading overlay
+    Create a loading overlay.
     """
-    children = []
-
-    if show_spinner:
-        children.append(
-            dbc.Spinner(
-                size="lg",
-                color="danger",  # HKFA red
-                spinner_style={"width": "3rem", "height": "3rem"}
-            )
-        )
-
-    children.append(
-        html.H5(message, className="mt-3 text-secondary")
-    )
-
     return html.Div(
-        html.Div(
-            children,
-            className="text-center"
-        ),
+        html.Div([
+            dbc.Spinner(size="lg", color="danger", spinner_style={"width": "3rem", "height": "3rem"}),
+            html.H5(message, className="mt-3 text-secondary")
+        ], className="text-center"),
         className="loading-overlay",
         style={
-            'position': 'absolute',
-            'top': 0,
-            'left': 0,
-            'right': 0,
-            'bottom': 0,
-            'backgroundColor': 'rgba(24, 24, 26, 0.95)',
-            'display': 'flex',
-            'alignItems': 'center',
-            'justifyContent': 'center',
-            'zIndex': 1000,
+            'position': 'absolute', 'top': 0, 'left': 0, 'right': 0, 'bottom': 0,
+            'backgroundColor': 'rgba(24, 24, 26, 0.95)', 'display': 'flex',
+            'alignItems': 'center', 'justifyContent': 'center', 'zIndex': 1000,
             'borderRadius': '8px'
         }
     )

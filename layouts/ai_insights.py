@@ -1,4 +1,4 @@
-# ABOUTME: Dashboard layout for AI insights (clustering, prediction, similarity, agent).
+# ABOUTME: Dashboard layout for AI insights (clustering, prediction, and similarity).
 # ABOUTME: Implements role-based access control and responsive grid components.
 
 # Standard Library
@@ -10,14 +10,6 @@ from dash import dcc, html
 
 # Project
 from utils.chart_helpers import HKFATheme
-
-# Agent panel — imported lazily to avoid hard failure if agent deps are absent
-try:
-    from layouts.agent_panel import create_agent_panel as _create_agent_panel
-    _AGENT_PANEL_AVAILABLE = True
-except ImportError:
-    _AGENT_PANEL_AVAILABLE = False
-
 
 def _card(title: str, icon: str, children, card_id: Optional[str] = None) -> dbc.Card:
     """Utility: styled HKFA card with title and icon."""
@@ -184,6 +176,11 @@ def _predictor_panel() -> dbc.Card:
                 [
                     html.Div(id="ai-predictor-result", className="mb-3"),
                     dcc.Graph(
+                        id="ai-predictor-trend-graph",
+                        config={"displayModeBar": False},
+                        style={"minHeight": "220px"},
+                    ),
+                    dcc.Graph(
                         id="ai-predictor-shap-graph",
                         config={"displayModeBar": False},
                         style={"minHeight": "300px"},
@@ -254,27 +251,13 @@ def _similarity_panel() -> dbc.Card:
         ],
     )
 
-
-def _agent_panel_content() -> html.Div:
-    """Returns the Agent tab content, or a placeholder if agent_panel is unavailable."""
-    if _AGENT_PANEL_AVAILABLE:
-        return _create_agent_panel()
-    return html.Div(
-        dbc.Alert(
-            "Agent panel unavailable. Install agent dependencies: pip install langgraph langchain-google-genai",
-            color="warning",
-        ),
-        className="p-3",
-    )
-
-
 def create_ai_insights_layout(role: Optional[str] = None) -> html.Div:
     """
     Creates the AI Insights dashboard layout with role-gated panels.
 
     Panels by role:
-      - admin : Clustering + Predictor + Similarity + Agent
-      - agent : Clustering + Similarity + Agent
+      - admin : Clustering + Predictor + Similarity
+      - agent : Clustering + Similarity
       - player: Predictor (own data) + Similarity
 
     Args:
@@ -287,8 +270,6 @@ def create_ai_insights_layout(role: Optional[str] = None) -> html.Div:
     show_clustering = role in ("admin", "agent")
     show_predictor = role in ("admin", "player")
     show_similarity = True  # all roles
-    show_agent = role in ("admin", "agent")
-
     # ── Tab definitions ──────────────────────────────────────────────────────
     tabs = []
 
@@ -318,18 +299,6 @@ def create_ai_insights_layout(role: Optional[str] = None) -> html.Div:
         )
     )
 
-    # Agent tab — only for admin and agent roles
-    if show_agent:
-        tabs.append(
-            dcc.Tab(
-                label="AI Agent",
-                value="ai-agent",
-                children=html.Div(_agent_panel_content(), className="pt-3"),
-                className="custom-tab",
-                selected_className="custom-tab--selected",
-            )
-        )
-
     return html.Div(
         [
             # Page header
@@ -342,7 +311,7 @@ def create_ai_insights_layout(role: Optional[str] = None) -> html.Div:
                             style={"color": HKFATheme.TEXT_PRIMARY},
                         ),
                         html.P(
-                            "Machine learning-powered player analysis and agentic AI.",
+                            "Machine learning-powered player analysis and structured intelligence surfaces.",
                             className="text-muted mb-4",
                         ),
                     ],

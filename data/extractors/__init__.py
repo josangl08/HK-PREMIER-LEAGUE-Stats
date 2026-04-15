@@ -7,11 +7,13 @@ principalmente desde repositorios de GitHub.
 
 from .hong_kong_extractor import HongKongDataExtractor
 from .transfermarkt_extractor import TransfermarktExtractor
+from .transfermarkt_playwright_extractor import TransfermarktPlaywrightExtractor
 
 # Exportar las clases principales
 __all__ = [
 'HongKongDataExtractor',
-'TransfermarktExtractor'
+'TransfermarktExtractor',
+'TransfermarktPlaywrightExtractor',
 ]
 
 
