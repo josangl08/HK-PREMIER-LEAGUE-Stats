@@ -244,6 +244,8 @@ storage/
 runtime/intelligence_artifacts/
 runtime/intelligence_session_memory/
 htmlcov/
+logo_plintel.png
+logo.png
 
 
 # .claude

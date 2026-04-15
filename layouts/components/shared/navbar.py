@@ -211,8 +211,8 @@ def create_navbar(pathname):
                 [
                     dbc.NavbarBrand(
                         [
-                            html.Img(src="/assets/logo.png", height="32px", className="me-2"),
-                            html.Span("HK Premier League", className="portal-navbar__brand-text"),
+                            html.Img(src="/assets/logo_plintel.png", height="32px", className="me-2"),
+                            html.Span("PLINTEL", className="portal-navbar__brand-text"),
                         ],
                         href=home_href,
                         className="portal-navbar__brand",

@@ -6,8 +6,8 @@ import dash_bootstrap_components as dbc
 
 _HKFA_HEADER = html.Div([
     html.Div([
-        html.I(className="bi bi-shield-lock-fill fs-1 text-white mb-3"),
-        html.H2("HK Premier League", className="fw-bold text-white mb-1"),
+        html.Img(src="/assets/logo_plintel.png", height="64px", className="mb-3"),
+        html.H2("PLINTEL", className="fw-bold text-white mb-1"),
         html.P("Sports Analytics Platform", className="text-white-50 small mb-0"),
     ], className="p-4 text-center auth-header-gradient")
 ])
