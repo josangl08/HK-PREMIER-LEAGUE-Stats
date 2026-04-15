@@ -163,6 +163,8 @@ cython_debug/
 # Cache de datos
 data/cache/
 cache/
+runtime/
+storage/
 
 # Logs
 logs/
@@ -180,6 +182,11 @@ secrets.json
 # Datos temporales y de prueba
 temp/
 tmp/
+data/archive/
+data/database.db
+data/database.db-wal
+data/database.db-shm
+data/fixtures/fixtures.json
 
 
 # Archivos IDE específicos
@@ -210,6 +217,14 @@ DS_Store
 .QUICK_START.md
 .DESARROLLO.md
 .setup.py
+AGENTS.md
+
+# Assets locales y referencias
+assets/team_logos/
+assets/team_media/
+assets/team_jersey/
+assets/design_references/
+assets/design_trends/
 
 # .claude
 .claude/
@@ -226,6 +241,7 @@ tests/
 docs/
 openspec/
 screenshots/
+scripts/
 
 # Herramientas de IA y automatización (MCP/Codex/etc)
 .gemini/
