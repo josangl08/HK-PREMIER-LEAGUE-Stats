@@ -47,6 +47,28 @@ def build_career_session_memory_key(*, player_id: str) -> str:
     )
 
 
+def build_prematch_session_memory_key(*, player_id: str, fixture_id: str) -> str:
+    """Build the canonical session-memory key for the prematch stage."""
+    return build_session_memory_key(
+        "prematch",
+        {
+            "player_id": player_id,
+            "fixture_id": fixture_id,
+        },
+    )
+
+
+def build_postmatch_session_memory_key(*, player_id: str, match_id: str) -> str:
+    """Build the canonical session-memory key for the postmatch stage."""
+    return build_session_memory_key(
+        "postmatch",
+        {
+            "player_id": player_id,
+            "match_id": match_id,
+        },
+    )
+
+
 def build_season_session_memory_record(
     *,
     player_id: str,
@@ -115,6 +137,95 @@ def build_career_session_memory_record(
         "last_curated_signal_id": str(last_curated_signal_id or "") or None,
         "last_updated_at": str(last_updated_at or serialize_timestamp(utc_now())),
     }
+
+
+def _build_stage_session_memory_record(
+    *,
+    stage: str,
+    scope: Mapping[str, Any],
+    current_novelty_key: str | None = None,
+    seen_novelty_keys: list[str] | None = None,
+    last_curated_signal_id: str | None = None,
+    current_candidate: Mapping[str, Any] | None = None,
+    current_anchor: str | None = None,
+    current_priority: float | None = None,
+    last_updated_at: str | None = None,
+) -> Dict[str, Any]:
+    """Build a normalized shared session-memory payload for a non-season stage."""
+    normalized_seen = []
+    for novelty_key in seen_novelty_keys or []:
+        value = str(novelty_key or "").strip()
+        if value and value not in normalized_seen:
+            normalized_seen.append(value)
+
+    normalized_scope = {
+        str(key): str(value or "")
+        for key, value in dict(scope or {}).items()
+    }
+    normalized_scope["stage"] = str(stage or "").strip().lower()
+    return {
+        "memory_key": build_session_memory_key(stage, normalized_scope),
+        "scope": normalized_scope,
+        "current_novelty_key": str(current_novelty_key or "") or None,
+        "current_anchor": str(current_anchor or "") or None,
+        "current_priority": float(current_priority) if current_priority is not None else None,
+        "current_candidate": deepcopy(dict(current_candidate or {})) if current_candidate else None,
+        "seen_novelty_keys": normalized_seen,
+        "last_curated_signal_id": str(last_curated_signal_id or "") or None,
+        "last_updated_at": str(last_updated_at or serialize_timestamp(utc_now())),
+    }
+
+
+def build_prematch_session_memory_record(
+    *,
+    player_id: str,
+    fixture_id: str,
+    current_novelty_key: str | None = None,
+    seen_novelty_keys: list[str] | None = None,
+    last_curated_signal_id: str | None = None,
+    current_candidate: Mapping[str, Any] | None = None,
+    current_anchor: str | None = None,
+    current_priority: float | None = None,
+    last_updated_at: str | None = None,
+) -> Dict[str, Any]:
+    """Build the normalized prematch-stage session-memory payload."""
+    return _build_stage_session_memory_record(
+        stage="prematch",
+        scope={"player_id": player_id, "fixture_id": fixture_id},
+        current_novelty_key=current_novelty_key,
+        seen_novelty_keys=seen_novelty_keys,
+        last_curated_signal_id=last_curated_signal_id,
+        current_candidate=current_candidate,
+        current_anchor=current_anchor,
+        current_priority=current_priority,
+        last_updated_at=last_updated_at,
+    )
+
+
+def build_postmatch_session_memory_record(
+    *,
+    player_id: str,
+    match_id: str,
+    current_novelty_key: str | None = None,
+    seen_novelty_keys: list[str] | None = None,
+    last_curated_signal_id: str | None = None,
+    current_candidate: Mapping[str, Any] | None = None,
+    current_anchor: str | None = None,
+    current_priority: float | None = None,
+    last_updated_at: str | None = None,
+) -> Dict[str, Any]:
+    """Build the normalized postmatch-stage session-memory payload."""
+    return _build_stage_session_memory_record(
+        stage="postmatch",
+        scope={"player_id": player_id, "match_id": match_id},
+        current_novelty_key=current_novelty_key,
+        seen_novelty_keys=seen_novelty_keys,
+        last_curated_signal_id=last_curated_signal_id,
+        current_candidate=current_candidate,
+        current_anchor=current_anchor,
+        current_priority=current_priority,
+        last_updated_at=last_updated_at,
+    )
 
 
 class SessionMemoryStore:
@@ -334,6 +445,72 @@ class SessionMemoryStore:
         )
         return self.put_memory(memory["memory_key"], memory)
 
+    def get_prematch_memory(self, *, player_id: str, fixture_id: str) -> Optional[Dict[str, Any]]:
+        """Return prematch-stage session memory for the given player and fixture."""
+        return self.get_memory(
+            build_prematch_session_memory_key(player_id=player_id, fixture_id=fixture_id)
+        )
+
+    def put_prematch_memory(
+        self,
+        *,
+        player_id: str,
+        fixture_id: str,
+        current_novelty_key: str | None = None,
+        seen_novelty_keys: list[str] | None = None,
+        last_curated_signal_id: str | None = None,
+        current_candidate: Mapping[str, Any] | None = None,
+        current_anchor: str | None = None,
+        current_priority: float | None = None,
+        last_updated_at: str | None = None,
+    ) -> Dict[str, Any]:
+        """Persist a normalized prematch-stage session-memory record."""
+        memory = build_prematch_session_memory_record(
+            player_id=player_id,
+            fixture_id=fixture_id,
+            current_novelty_key=current_novelty_key,
+            seen_novelty_keys=seen_novelty_keys,
+            last_curated_signal_id=last_curated_signal_id,
+            current_candidate=current_candidate,
+            current_anchor=current_anchor,
+            current_priority=current_priority,
+            last_updated_at=last_updated_at,
+        )
+        return self.put_memory(memory["memory_key"], memory)
+
+    def get_postmatch_memory(self, *, player_id: str, match_id: str) -> Optional[Dict[str, Any]]:
+        """Return postmatch-stage session memory for the given player and match."""
+        return self.get_memory(
+            build_postmatch_session_memory_key(player_id=player_id, match_id=match_id)
+        )
+
+    def put_postmatch_memory(
+        self,
+        *,
+        player_id: str,
+        match_id: str,
+        current_novelty_key: str | None = None,
+        seen_novelty_keys: list[str] | None = None,
+        last_curated_signal_id: str | None = None,
+        current_candidate: Mapping[str, Any] | None = None,
+        current_anchor: str | None = None,
+        current_priority: float | None = None,
+        last_updated_at: str | None = None,
+    ) -> Dict[str, Any]:
+        """Persist a normalized postmatch-stage session-memory record."""
+        memory = build_postmatch_session_memory_record(
+            player_id=player_id,
+            match_id=match_id,
+            current_novelty_key=current_novelty_key,
+            seen_novelty_keys=seen_novelty_keys,
+            last_curated_signal_id=last_curated_signal_id,
+            current_candidate=current_candidate,
+            current_anchor=current_anchor,
+            current_priority=current_priority,
+            last_updated_at=last_updated_at,
+        )
+        return self.put_memory(memory["memory_key"], memory)
+
 
 _DEFAULT_SESSION_MEMORY_STORE: SessionMemoryStore | None = None
 
@@ -430,6 +607,84 @@ def put_career_session_memory(
     active_store = store or _get_default_session_memory_store()
     return active_store.put_career_memory(
         player_id=player_id,
+        current_novelty_key=current_novelty_key,
+        seen_novelty_keys=seen_novelty_keys,
+        last_curated_signal_id=last_curated_signal_id,
+        current_candidate=current_candidate,
+        current_anchor=current_anchor,
+        current_priority=current_priority,
+        last_updated_at=last_updated_at,
+    )
+
+
+def get_prematch_session_memory(
+    *,
+    player_id: str,
+    fixture_id: str,
+    store: SessionMemoryStore | None = None,
+) -> Optional[Dict[str, Any]]:
+    """Module-level getter for prematch-stage session memory."""
+    active_store = store or _get_default_session_memory_store()
+    return active_store.get_prematch_memory(player_id=player_id, fixture_id=fixture_id)
+
+
+def put_prematch_session_memory(
+    *,
+    player_id: str,
+    fixture_id: str,
+    current_novelty_key: str | None = None,
+    seen_novelty_keys: list[str] | None = None,
+    last_curated_signal_id: str | None = None,
+    current_candidate: Mapping[str, Any] | None = None,
+    current_anchor: str | None = None,
+    current_priority: float | None = None,
+    last_updated_at: str | None = None,
+    store: SessionMemoryStore | None = None,
+) -> Dict[str, Any]:
+    """Module-level put helper for prematch-stage session memory."""
+    active_store = store or _get_default_session_memory_store()
+    return active_store.put_prematch_memory(
+        player_id=player_id,
+        fixture_id=fixture_id,
+        current_novelty_key=current_novelty_key,
+        seen_novelty_keys=seen_novelty_keys,
+        last_curated_signal_id=last_curated_signal_id,
+        current_candidate=current_candidate,
+        current_anchor=current_anchor,
+        current_priority=current_priority,
+        last_updated_at=last_updated_at,
+    )
+
+
+def get_postmatch_session_memory(
+    *,
+    player_id: str,
+    match_id: str,
+    store: SessionMemoryStore | None = None,
+) -> Optional[Dict[str, Any]]:
+    """Module-level getter for postmatch-stage session memory."""
+    active_store = store or _get_default_session_memory_store()
+    return active_store.get_postmatch_memory(player_id=player_id, match_id=match_id)
+
+
+def put_postmatch_session_memory(
+    *,
+    player_id: str,
+    match_id: str,
+    current_novelty_key: str | None = None,
+    seen_novelty_keys: list[str] | None = None,
+    last_curated_signal_id: str | None = None,
+    current_candidate: Mapping[str, Any] | None = None,
+    current_anchor: str | None = None,
+    current_priority: float | None = None,
+    last_updated_at: str | None = None,
+    store: SessionMemoryStore | None = None,
+) -> Dict[str, Any]:
+    """Module-level put helper for postmatch-stage session memory."""
+    active_store = store or _get_default_session_memory_store()
+    return active_store.put_postmatch_memory(
+        player_id=player_id,
+        match_id=match_id,
         current_novelty_key=current_novelty_key,
         seen_novelty_keys=seen_novelty_keys,
         last_curated_signal_id=last_curated_signal_id,

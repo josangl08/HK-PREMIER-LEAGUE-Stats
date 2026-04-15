@@ -14,9 +14,11 @@ def render_critical_overlay(signal: Mapping[str, Any]) -> html.Div:
     Renders the shared critical overlay surface.
 
     Layout: fixed full-viewport backdrop → centered card with animated gradient,
-    title, body text, and two buttons ("Entendido" dismiss + cta_label action).
+    title, body text, and two buttons ("Dismiss" archive + cta_label action).
     Initially shown; hidden via callback on dismiss.
     """
+    stage = _overlay_value(signal, "stage", "career").strip().lower()
+    show_cta = stage == "career" and bool(_overlay_value(signal, "cta_label"))
     return html.Div(
         id="stage-overlay-critical-backdrop",
         className="stage-overlay-critical-backdrop",
@@ -65,16 +67,24 @@ def render_critical_overlay(signal: Mapping[str, Any]) -> html.Div:
                                 id={
                                     "type": "stage-overlay-critical-btn",
                                     "action": "cta",
+                                    "stage": _overlay_value(signal, "stage", "career"),
+                                    "signal_id": _overlay_value(signal, "signal_id"),
                                     "evidence_key": _overlay_value(signal, "evidence_key", "career_arc"),
                                 },
                                 color="primary",
                                 size="sm",
                                 className="flex-grow-1",
                                 n_clicks=0,
-                            ),
+                            ) if show_cta else None,
                             dbc.Button(
-                                "Entendido",
-                                id={"type": "stage-overlay-critical-btn", "action": "dismiss", "evidence_key": ""},
+                                "Dismiss",
+                                id={
+                                    "type": "stage-overlay-critical-btn",
+                                    "action": "dismiss",
+                                    "stage": _overlay_value(signal, "stage", "career"),
+                                    "signal_id": _overlay_value(signal, "signal_id"),
+                                    "evidence_key": "",
+                                },
                                 color="outline-light",
                                 size="sm",
                                 className="flex-shrink-0",
@@ -103,9 +113,11 @@ def render_contextual_overlay(signal: Mapping[str, Any], signal_index: int = 0) 
     stagger_delay = f"{signal_index * 400}ms"
     dismiss_id = {"type": "stage-overlay-contextual-dismiss", "index": signal_index}
     tier = _overlay_value(signal, "presentation_tier", "contextual").lower()
+    stage = _overlay_value(signal, "stage", "career").strip().lower()
     card_class = "stage-overlay-contextual-floating"
     if tier == "micro":
         card_class += " stage-overlay-contextual-floating--micro"
+    show_cta = stage == "career" and bool(_overlay_value(signal, "cta_label"))
 
     return html.Div(
         className=card_class,
@@ -157,12 +169,14 @@ def render_contextual_overlay(signal: Mapping[str, Any], signal_index: int = 0) 
                         id={
                             "type": "stage-overlay-contextual-cta",
                             "index": signal_index,
+                            "stage": _overlay_value(signal, "stage", "career"),
+                            "signal_id": _overlay_value(signal, "signal_id"),
                             "evidence_key": _overlay_value(signal, "evidence_key", "career_arc"),
                         },
                         color="link",
                         className="p-0 stage-overlay-contextual-floating__cta",
                         n_clicks=0,
-                    ) if _overlay_value(signal, "cta_label") else None,
+                    ) if show_cta else None,
                 ],
             ),
         ],

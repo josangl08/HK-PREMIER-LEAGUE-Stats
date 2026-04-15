@@ -8,7 +8,6 @@ from typing import Dict
 
 from dash import html
 
-from utils.agents.intelligence_orchestrator import orchestrate_season_intelligence
 from utils.intelligence.overlay_surface import choose_primary_overlay_candidate
 from utils.season_stage.season_components import (
     render_season_intelligence_debug,
@@ -16,7 +15,6 @@ from utils.season_stage.season_components import (
     render_season_header,
     render_season_performance,
     render_season_role_profile,
-    render_worth_noticing_block,
 )
 from utils.season_stage.season_context import build_season_stage_context
 from utils.season_stage.season_profile import build_season_profile_context
@@ -51,12 +49,7 @@ def render_season_stage(payload: Dict) -> html.Div:
         except Exception as exc:
             logger.debug("Season stage profile cache skipped: %s", exc)
 
-    intelligence_payload = None
-    try:
-        intelligence_payload = orchestrate_season_intelligence(payload)
-    except Exception as exc:
-        logger.exception("Season stage intelligence orchestration failed: %s", exc)
-        intelligence_payload = None
+    intelligence_payload = dict(payload.get("season_intelligence") or {})
 
     overlay_surface = dict((intelligence_payload or {}).get("overlay_surface") or {})
     dismissed_overlay_keys = {
@@ -75,10 +68,6 @@ def render_season_stage(payload: Dict) -> html.Div:
         ]
         visible_overlay_candidate = dict(choose_primary_overlay_candidate(visible_candidates) or {})
 
-    worth_noticing_node = render_worth_noticing_block(
-        visible_overlay_candidate or None,
-        debug_meta=(intelligence_payload or {}).get("debug") or {},
-    )
     debug_meta = dict((intelligence_payload or {}).get("debug") or {})
     debug_meta["mode"] = str((intelligence_payload or {}).get("mode") or "fallback")
     debug_node = render_season_intelligence_debug(debug_meta)
@@ -111,7 +100,7 @@ def render_season_stage(payload: Dict) -> html.Div:
     return html.Div(
         [
             debug_node,
-            worth_noticing_node,
+            None,
             html.Div(
                 [
                     render_season_header(context),

@@ -6,7 +6,8 @@ from __future__ import annotations
 from typing import Any, Dict, Mapping
 
 from utils.agents.stage_agents.base import StageAgent
-from utils.intelligence.discovery_contracts import StageAnalysis, StageDiscovery
+from utils.domain_ai.postmatch_agentic_discovery import synthesize_postmatch_stage_analysis
+from utils.intelligence.discovery_contracts import StageAnalysis, StageDiscovery, coerce_stage_analysis
 
 
 class PostmatchStageAgent(StageAgent):
@@ -19,7 +20,15 @@ class PostmatchStageAgent(StageAgent):
         artifacts: Mapping[str, Mapping[str, Any]],
         session_memory: Mapping[str, Any] | None = None,
     ) -> StageAnalysis:
-        del session_memory
+        ai_analysis = synthesize_postmatch_stage_analysis(
+            scope=scope,
+            artifacts=artifacts,
+            session_memory=session_memory,
+        )
+        if ai_analysis is not None:
+            normalized_ai_analysis = coerce_stage_analysis(ai_analysis)
+            if normalized_ai_analysis is not None:
+                return normalized_ai_analysis
         match_payload = ((artifacts.get("postmatch_match_context") or {}).get("payload") or {})
         performance_payload = ((artifacts.get("postmatch_performance_context") or {}).get("payload") or {})
         reflection_payloads = ((artifacts.get("postmatch_reflection_payloads") or {}).get("payload") or {})
@@ -27,6 +36,7 @@ class PostmatchStageAgent(StageAgent):
 
         selected_reflection = dict((reflection_payloads.get("selected_payload") or {}))
         selected_candidate = dict((overlay_payload.get("selected_candidate") or {}))
+        has_reflective_candidate = bool(selected_reflection or selected_candidate)
         confidence_label = str(selected_reflection.get("confidence") or "limited").lower()
         confidence_score = {"high": 0.82, "medium": 0.68, "limited": 0.54}.get(confidence_label, 0.54)
         evidence_key = str(
@@ -43,7 +53,7 @@ class PostmatchStageAgent(StageAgent):
         )
 
         discoveries = []
-        if title or body:
+        if has_reflective_candidate and (title or body):
             discoveries.append(
                 StageDiscovery(
                     discovery_id=f"postmatch:{scope.get('match_id', evidence_key)}",
@@ -56,7 +66,7 @@ class PostmatchStageAgent(StageAgent):
                     evidence_keys=[evidence_key],
                     novelty_key=str(scope.get("match_id") or evidence_key),
                     anchor=evidence_key,
-                    presentation_hint="contextual" if confidence_score < 0.75 else "prominent",
+                    presentation_hint="prominent",
                     cta_label="Open review",
                     metadata={
                         "result": match_payload.get("result"),
@@ -75,7 +85,7 @@ class PostmatchStageAgent(StageAgent):
         return StageAnalysis(
             stage="postmatch",
             scope=scope,
-            summary=body or "Postmatch reflection is ready.",
+            summary=body if has_reflective_candidate else "Postmatch reflection is ready.",
             confidence=confidence_label or "medium",
             discoveries=discoveries,
             supporting_artifacts=[

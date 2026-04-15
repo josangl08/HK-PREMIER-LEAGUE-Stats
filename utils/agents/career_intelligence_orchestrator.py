@@ -46,8 +46,10 @@ from utils.intelligence.freshness_manager import (
     evaluate_artifact_freshness,
 )
 from utils.intelligence.overlay_surface import resolve_stage_overlay_surface
+from utils.intelligence.reevaluation_policy import decide_stage_reevaluation
 from utils.intelligence.runtime_config import get_intelligence_runtime_config
 from utils.intelligence.session_memory import get_career_session_memory
+from utils.intelligence.stage_orchestrator import build_stage_runtime_result
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +189,7 @@ def orchestrate_career_intelligence(
     signals_payload = None
     overlay_payload = None
     overlay_surface = resolve_stage_overlay_surface("career", {"candidates": []})
+    llm_enabled = bool(runtime_config.get("career_agent_llm_enabled"))
 
     logger.info(
         "Career intelligence runtime config player_id=%s artifacts_root=%s session_memory_root=%s persistence_enabled=%s derived_writes_enabled=%s",
@@ -223,6 +226,47 @@ def orchestrate_career_intelligence(
         len(session_memory.get("seen_novelty_keys") or []),
     )
 
+    stored_analysis = (artifact_states.get(CAREER_STAGE_ANALYSIS_ARTIFACT) or {}).get("artifact")
+    stored_analysis_payload = dict((stored_analysis or {}).get("payload") or {})
+    stored_analysis_source = str(((stored_analysis_payload.get("debug") or {}).get("analysis_source")) or "artifact")
+    reevaluation = decide_stage_reevaluation(
+        stage_name="career",
+        artifact_states=artifact_states,
+        primary_artifact_type=CAREER_STAGE_ANALYSIS_ARTIFACT,
+        dependency_fingerprints={},
+        refresh_plan=refresh_plan,
+        trigger_context={
+            "force": force_refresh,
+            "material_context_changed": bool(
+                set(refresh_plan)
+                & set(CAREER_BASE_ARTIFACT_TYPES + [CAREER_STAGE_ANALYSIS_ARTIFACT])
+            ),
+            "llm_first_required": bool(llm_enabled and stored_analysis and stored_analysis_source != "agentic"),
+        },
+    )
+    reevaluation_metadata = {
+        "should_reevaluate": bool(reevaluation.should_reevaluate),
+        "reason": reevaluation.reason,
+        "reasons": list(reevaluation.reasons),
+        "freshness_status": reevaluation.freshness_status,
+        "soft_stale": bool(reevaluation.soft_stale),
+        "hard_stale": bool(reevaluation.hard_stale),
+        "age_hours": reevaluation.age_hours,
+        "policy": dict(reevaluation.policy or {}),
+    }
+    if reevaluation.should_reevaluate:
+        refresh_plan = [
+            artifact_type
+            for artifact_type in [
+                *refresh_plan,
+                CAREER_SIGNALS_ARTIFACT,
+                CAREER_STAGE_ANALYSIS_ARTIFACT,
+                CAREER_OVERLAY_CANDIDATES_ARTIFACT,
+            ]
+            if artifact_type
+        ]
+        refresh_plan = list(dict.fromkeys(refresh_plan))
+
     stored_signals = (artifact_states.get(CAREER_SIGNALS_ARTIFACT) or {}).get("artifact")
     if (
         is_fresh_artifact_state(artifact_states.get(CAREER_SIGNALS_ARTIFACT))
@@ -249,9 +293,9 @@ def orchestrate_career_intelligence(
             write_failures.append({"target": CAREER_SIGNALS_ARTIFACT, "error": persisted_signals["failure"]})
         served_from["signals"] = "inline"
 
-    stored_analysis = (artifact_states.get(CAREER_STAGE_ANALYSIS_ARTIFACT) or {}).get("artifact")
     if (
         not force_refresh
+        and not reevaluation.should_reevaluate
         and is_fresh_artifact_state(artifact_states.get(CAREER_STAGE_ANALYSIS_ARTIFACT))
         and stored_analysis
     ):
@@ -373,41 +417,25 @@ def orchestrate_career_intelligence(
     elif not stage_analysis_payload and not signals_payload:
         fallback_reason = "no_intelligence_payload_available"
 
-    result = {
-        "available": bool(stage_analysis_payload or overlay_payload),
-        "mode": mode,
-        "non_blocking": True,
-        "background_refresh_required": background_refresh_required,
-        "refresh_plan": refresh_plan,
-        "stage_analysis": stage_analysis_payload,
-        "shared_stage_analysis": shared_stage_analysis,
-        "signals": signals_payload,
-        "overlay_candidates": overlay_payload,
-        "overlay_surface": overlay_surface,
-        "debug": {
-            "scope": state.get("scope") or {},
-            "served_from": served_from,
-            "base_ready": base_ready,
-            "non_blocking": True,
-            "background_refresh_requested": background_refresh_required,
-            "fallback_reason": fallback_reason,
-            "refresh_requested_for": refresh_plan,
-            "persisted_artifacts": persisted_artifacts,
-            "runtime": {
-                "artifacts_root": str(runtime_config.get("artifacts_root") or ""),
-                "session_memory_root": str(runtime_config.get("session_memory_root") or ""),
-                "persistence_enabled": bool(runtime_config.get("persistence_enabled")),
-                "derived_writes_enabled": bool(runtime_config.get("derived_writes_enabled")),
-            },
-            "freshness": (state.get("debug") or {}).get("freshness") or {},
-            "artifact_keys": (state.get("debug") or {}).get("artifact_keys") or {},
-            "expected_fingerprints": (state.get("debug") or {}).get("expected_fingerprints") or {},
-            "persisted_session_memory": persisted_session_memory,
-            "session_memory": session_memory,
-            "write_failures": write_failures,
-            "overlay_surface": overlay_surface,
-        },
-    }
+    result = build_stage_runtime_result(
+        stage_name="career",
+        state=state,
+        runtime_config=runtime_config,
+        stage_analysis=stage_analysis_payload,
+        shared_stage_analysis=shared_stage_analysis,
+        signals=signals_payload,
+        overlay_candidates=overlay_payload,
+        overlay_surface=overlay_surface,
+        served_from=served_from,
+        refresh_plan=refresh_plan,
+        persisted_artifacts=persisted_artifacts,
+        session_memory=session_memory,
+        persisted_session_memory=persisted_session_memory,
+        base_ready=base_ready,
+        fallback_reason=fallback_reason,
+        write_failures=write_failures,
+        reevaluation=reevaluation_metadata,
+    )
 
     logger.info(
         "Career orchestrator mode=%s base_ready=%s refresh_plan=%s served_from=%s",

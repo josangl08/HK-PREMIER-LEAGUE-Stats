@@ -133,11 +133,13 @@ def create_player_portal_layout(user_role: str = "player") -> html.Div:
             dcc.Store(id="prematch-stage-analysis-store", storage_type="memory"),
             dcc.Store(id="postmatch-stage-analysis-store", storage_type="memory"),
             dcc.Store(id="career-stage-analysis-store", storage_type="memory"),
+            dcc.Store(id="season-stage-analysis-store", storage_type="memory"),
             # Stores the player photo album — session only (never share between players)
             dcc.Store(id="player-photos-store", storage_type="session"),
             # Triggers post-generation gallery refresh or download
             dcc.Store(id="card-generation-trigger"),
             dcc.Store(id="career-dashboard-brief-store", storage_type="memory"),
+            dcc.Store(id="stage-background-dispatch-store", storage_type="memory"),
             # Keys (player_name + season) for lazy UMAP modal rendering
             dcc.Store(id="season-umap-context-store", storage_type="memory"),
             # Loading color system: pre-flight store for stage dot type (ui/data/ai)

@@ -87,6 +87,7 @@ def _build_fallback_stage_analysis(
             "available": bool(analysis_payload.get("available")),
             "abstained": bool(analysis_payload.get("abstained")),
             "llm_generated": False,
+            "analysis_source": "deterministic",
         },
     )
 

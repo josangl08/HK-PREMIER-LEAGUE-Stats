@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import date, datetime
 import logging
 from typing import Any, Dict, List, Mapping
 
@@ -14,15 +15,19 @@ from utils.app_context import get_hong_kong_data_manager
 from utils.intelligence.artifact_keys import build_artifact_key
 from utils.intelligence.artifact_registry import ArtifactRegistry
 from utils.intelligence.discovery_contracts import serialize_stage_analysis
+from utils.intelligence.discovery_overlay_mapper import build_overlay_candidates_from_analysis
 from utils.intelligence.freshness_manager import (
     FRESHNESS_FRESH,
     FRESHNESS_HOT,
     FRESHNESS_WARM,
     build_artifact_fingerprint,
+    build_dependency_fingerprint_map,
+    evaluate_artifact_freshness,
     serialize_timestamp,
     utc_now,
 )
 from utils.intelligence.runtime_config import get_intelligence_runtime_config
+from utils.intelligence.stage_orchestrator import build_runtime_artifact_record
 from utils.intelligence.versioning import (
     ARTIFACT_SCHEMA_VERSION,
     get_intelligence_version_bundle,
@@ -39,18 +44,32 @@ PREMATCH_HEAD_TO_HEAD_CONTEXT_ARTIFACT = "prematch_head_to_head_context"
 PREMATCH_RIVAL_PROFILES_CONTEXT_ARTIFACT = "prematch_rival_profiles_context"
 PREMATCH_OPPONENT_THREAT_CONTEXT_ARTIFACT = "prematch_opponent_threat_context"
 PREMATCH_GAME_PLAN_CONTEXT_ARTIFACT = "prematch_game_plan_context"
+PREMATCH_SIGNALS_ARTIFACT = "prematch_signals"
+PREMATCH_OVERLAY_CANDIDATES_ARTIFACT = "prematch_overlay_candidates"
 PREMATCH_STAGE_ANALYSIS_ARTIFACT = "prematch_stage_analysis"
 PREMATCH_STAGE_ANALYSIS_CONTRACT_VERSION = "v2"
 
-PREMATCH_ARTIFACT_TYPES = [
+PREMATCH_BASE_ARTIFACT_TYPES = [
     PREMATCH_FIXTURE_CONTEXT_ARTIFACT,
     PREMATCH_RECENT_FORM_CONTEXT_ARTIFACT,
     PREMATCH_HEAD_TO_HEAD_CONTEXT_ARTIFACT,
     PREMATCH_RIVAL_PROFILES_CONTEXT_ARTIFACT,
     PREMATCH_OPPONENT_THREAT_CONTEXT_ARTIFACT,
     PREMATCH_GAME_PLAN_CONTEXT_ARTIFACT,
+]
+
+PREMATCH_ARTIFACT_TYPES = [
+    *PREMATCH_BASE_ARTIFACT_TYPES,
+    PREMATCH_SIGNALS_ARTIFACT,
+    PREMATCH_OVERLAY_CANDIDATES_ARTIFACT,
     PREMATCH_STAGE_ANALYSIS_ARTIFACT,
 ]
+
+PREMATCH_ARTIFACT_DEPENDENCIES = {
+    PREMATCH_SIGNALS_ARTIFACT: PREMATCH_BASE_ARTIFACT_TYPES,
+    PREMATCH_STAGE_ANALYSIS_ARTIFACT: PREMATCH_BASE_ARTIFACT_TYPES,
+    PREMATCH_OVERLAY_CANDIDATES_ARTIFACT: [PREMATCH_STAGE_ANALYSIS_ARTIFACT],
+}
 
 PREMATCH_FRESHNESS_POLICY = {
     PREMATCH_FIXTURE_CONTEXT_ARTIFACT: {"regime": FRESHNESS_HOT, "ttl_hours": 3},
@@ -59,6 +78,8 @@ PREMATCH_FRESHNESS_POLICY = {
     PREMATCH_RIVAL_PROFILES_CONTEXT_ARTIFACT: {"regime": FRESHNESS_HOT, "ttl_hours": 3},
     PREMATCH_OPPONENT_THREAT_CONTEXT_ARTIFACT: {"regime": FRESHNESS_HOT, "ttl_hours": 3},
     PREMATCH_GAME_PLAN_CONTEXT_ARTIFACT: {"regime": FRESHNESS_HOT, "ttl_hours": 3},
+    PREMATCH_SIGNALS_ARTIFACT: {"regime": FRESHNESS_HOT, "ttl_hours": 3},
+    PREMATCH_OVERLAY_CANDIDATES_ARTIFACT: {"regime": FRESHNESS_HOT, "ttl_hours": 3},
     PREMATCH_STAGE_ANALYSIS_ARTIFACT: {"regime": FRESHNESS_HOT, "ttl_hours": 3},
 }
 
@@ -67,6 +88,8 @@ logger = logging.getLogger(__name__)
 
 def _safe_scalar(value: Any) -> Any:
     """Convert nested values into JSON-safe primitives."""
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
     if isinstance(value, dict):
         return {str(key): _safe_scalar(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
@@ -339,6 +362,16 @@ def build_prematch_artifact_payloads(payload: Dict[str, Any]) -> Dict[str, Dict[
     }
 
 
+def build_prematch_signals_payload(stage_analysis_payload: Mapping[str, Any]) -> Dict[str, Any]:
+    """Build persisted prematch signal inputs from the shared stage analysis."""
+    overlay_payload = build_overlay_candidates_from_analysis(stage_analysis_payload)
+    candidates = [dict(candidate) for candidate in list((overlay_payload or {}).get("candidates") or [])]
+    return {
+        "signals": candidates,
+        "signal_count": len(candidates),
+    }
+
+
 def _prematch_source_checksum(base_payloads: Mapping[str, Mapping[str, Any]]) -> str:
     """Build a deterministic checksum for prematch facts that materially affect analysis."""
     relevant_payload = {
@@ -353,6 +386,147 @@ def _prematch_source_checksum(base_payloads: Mapping[str, Mapping[str, Any]]) ->
         )
     }
     return build_artifact_fingerprint(relevant_payload)
+
+
+def build_prematch_artifact_fingerprint_inputs(
+    artifact_type: str,
+    *,
+    player_id: str,
+    fixture_id: str,
+    source_checksum: str,
+    dependency_fingerprint_map: Mapping[str, str] | None = None,
+) -> Dict[str, Any]:
+    """Return fingerprint inputs for any prematch artifact."""
+    return {
+        "artifact_type": artifact_type,
+        "scope": build_prematch_artifact_scope(player_id, fixture_id),
+        "source_checksum": source_checksum,
+        "dependency_fingerprint_map": dict(dependency_fingerprint_map or {}),
+        "version_bundle": get_intelligence_version_bundle(),
+    }
+
+
+def build_prematch_artifact_record(
+    artifact_type: str,
+    payload: Mapping[str, Any],
+    *,
+    player_id: str,
+    fixture_id: str,
+    source_checksum: str,
+    dependency_fingerprint_map: Mapping[str, str] | None = None,
+) -> Dict[str, Any]:
+    """Build a persisted artifact record for any prematch runtime artifact."""
+    ttl_hours = int(PREMATCH_FRESHNESS_POLICY[artifact_type]["ttl_hours"])
+    return build_runtime_artifact_record(
+        artifact_type=artifact_type,
+        scope=build_prematch_artifact_scope(player_id, fixture_id),
+        payload=payload,
+        ttl_hours=ttl_hours,
+        fingerprint_inputs=build_prematch_artifact_fingerprint_inputs(
+            artifact_type,
+            player_id=player_id,
+            fixture_id=fixture_id,
+            source_checksum=source_checksum,
+            dependency_fingerprint_map=dependency_fingerprint_map,
+        ),
+        dependency_fingerprint_map=dependency_fingerprint_map,
+    )
+
+
+def get_prematch_intelligence_state(
+    payload: Dict[str, Any],
+    *,
+    registry: ArtifactRegistry | None = None,
+) -> Dict[str, Any]:
+    """Load prematch artifacts from the registry and decide which ones need refresh."""
+    player_id = str(payload.get("player_id") or "")
+    fixture_id = str(payload.get("fixture_id") or "")
+    active_registry = registry or ArtifactRegistry()
+    base_payloads = build_prematch_artifact_payloads(payload)
+    artifact_states: Dict[str, Any] = {}
+    refresh_plan: List[str] = []
+    persisted_base_artifacts: List[str] = []
+
+    for artifact_type in PREMATCH_ARTIFACT_TYPES:
+        artifact_key = build_prematch_artifact_key(artifact_type, player_id, fixture_id)
+        dependency_fingerprint_map = build_dependency_fingerprint_map(
+            {
+                dependency: (artifact_states.get(dependency) or {}).get("artifact")
+                for dependency in PREMATCH_ARTIFACT_DEPENDENCIES.get(artifact_type, [])
+            }
+        )
+        if artifact_type in base_payloads:
+            source_checksum = build_artifact_fingerprint(base_payloads[artifact_type] or {})
+        else:
+            source_checksum = _prematch_source_checksum(base_payloads)
+        expected_fingerprint = build_artifact_fingerprint(
+            build_prematch_artifact_fingerprint_inputs(
+                artifact_type,
+                player_id=player_id,
+                fixture_id=fixture_id,
+                source_checksum=source_checksum,
+                dependency_fingerprint_map=dependency_fingerprint_map,
+            )
+        )
+        stored_artifact = active_registry.get_artifact(artifact_key)
+        freshness = evaluate_artifact_freshness(
+            stored_artifact,
+            expected_fingerprint=expected_fingerprint,
+            dependency_artifacts=[
+                (artifact_states.get(dependency) or {}).get("artifact")
+                for dependency in PREMATCH_ARTIFACT_DEPENDENCIES.get(artifact_type, [])
+            ],
+            dependency_fingerprint_map=dependency_fingerprint_map,
+        )
+        if artifact_type in base_payloads and freshness["status"] != FRESHNESS_FRESH:
+            stored_artifact = active_registry.put_artifact(
+                artifact_key,
+                build_prematch_artifact_record(
+                    artifact_type,
+                    base_payloads[artifact_type],
+                    player_id=player_id,
+                    fixture_id=fixture_id,
+                    source_checksum=build_artifact_fingerprint(base_payloads[artifact_type] or {}),
+                ),
+            )
+            freshness = {
+                "status": FRESHNESS_FRESH,
+                "is_usable": True,
+                "reasons": ["materialized_base_artifact"],
+            }
+            persisted_base_artifacts.append(artifact_type)
+        if freshness["status"] != FRESHNESS_FRESH:
+            refresh_plan.append(artifact_type)
+        artifact_states[artifact_type] = {
+            "artifact_key": artifact_key,
+            "artifact": stored_artifact,
+            "freshness": freshness,
+            "freshness_policy": PREMATCH_FRESHNESS_POLICY.get(artifact_type) or {},
+            "expected_fingerprint": expected_fingerprint,
+            "payload_contract": base_payloads.get(artifact_type),
+        }
+
+    return {
+        "scope": build_prematch_artifact_scope(player_id, fixture_id),
+        "base_payloads": base_payloads,
+        "artifacts": artifact_states,
+        "refresh_plan": refresh_plan,
+        "debug": {
+            "artifact_keys": {
+                artifact_type: state["artifact_key"]
+                for artifact_type, state in artifact_states.items()
+            },
+            "expected_fingerprints": {
+                artifact_type: state["expected_fingerprint"]
+                for artifact_type, state in artifact_states.items()
+            },
+            "freshness": {
+                artifact_type: state["freshness"]["status"]
+                for artifact_type, state in artifact_states.items()
+            },
+            "persisted_base_artifacts": persisted_base_artifacts,
+        },
+    }
 
 
 def build_prematch_stage_analysis_fingerprint_inputs(

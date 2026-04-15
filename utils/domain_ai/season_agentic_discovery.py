@@ -389,6 +389,7 @@ def synthesize_season_stage_analysis(
             continue
 
         debug = dict(analysis.debug or {})
+        debug["analysis_source"] = "agentic"
         debug["llm_generated"] = True
         debug["used_tools"] = selected_tools
         debug["model_profile"] = model_profile

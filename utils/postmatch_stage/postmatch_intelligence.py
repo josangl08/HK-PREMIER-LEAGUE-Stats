@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import asdict, is_dataclass
+from datetime import date, datetime
+import logging
 from typing import Any, Dict, List, Mapping
 
 import pandas as pd
@@ -14,14 +16,19 @@ from utils.domain_ai.postmatch_ai import get_postmatch_payloads
 from utils.intelligence.artifact_keys import build_artifact_key
 from utils.intelligence.artifact_registry import ArtifactRegistry
 from utils.intelligence.discovery_contracts import serialize_stage_analysis
+from utils.intelligence.discovery_overlay_mapper import build_overlay_candidates_from_analysis
 from utils.intelligence.freshness_manager import (
     FRESHNESS_FRESH,
     FRESHNESS_HOT,
     FRESHNESS_WARM,
     build_artifact_fingerprint,
+    build_dependency_fingerprint_map,
+    evaluate_artifact_freshness,
     serialize_timestamp,
     utc_now,
 )
+from utils.intelligence.runtime_config import get_intelligence_runtime_config
+from utils.intelligence.stage_orchestrator import build_runtime_artifact_record
 from utils.intelligence.versioning import (
     ARTIFACT_SCHEMA_VERSION,
     get_intelligence_version_bundle,
@@ -30,29 +37,53 @@ from utils.intelligence.versioning import (
 POSTMATCH_MATCH_CONTEXT_ARTIFACT = "postmatch_match_context"
 POSTMATCH_PERFORMANCE_CONTEXT_ARTIFACT = "postmatch_performance_context"
 POSTMATCH_REFLECTION_PAYLOADS_ARTIFACT = "postmatch_reflection_payloads"
+POSTMATCH_SIGNALS_ARTIFACT = "postmatch_signals"
 POSTMATCH_OVERLAY_CANDIDATES_ARTIFACT = "postmatch_overlay_candidates"
 POSTMATCH_STAGE_ANALYSIS_ARTIFACT = "postmatch_stage_analysis"
 POSTMATCH_STAGE_ANALYSIS_CONTRACT_VERSION = "v1"
 
-POSTMATCH_ARTIFACT_TYPES = [
+logger = logging.getLogger(__name__)
+
+POSTMATCH_BASE_ARTIFACT_TYPES = [
     POSTMATCH_MATCH_CONTEXT_ARTIFACT,
     POSTMATCH_PERFORMANCE_CONTEXT_ARTIFACT,
     POSTMATCH_REFLECTION_PAYLOADS_ARTIFACT,
+]
+
+POSTMATCH_ARTIFACT_TYPES = [
+    *POSTMATCH_BASE_ARTIFACT_TYPES,
+    POSTMATCH_SIGNALS_ARTIFACT,
     POSTMATCH_OVERLAY_CANDIDATES_ARTIFACT,
     POSTMATCH_STAGE_ANALYSIS_ARTIFACT,
 ]
+
+POSTMATCH_ARTIFACT_DEPENDENCIES = {
+    POSTMATCH_SIGNALS_ARTIFACT: POSTMATCH_BASE_ARTIFACT_TYPES,
+    POSTMATCH_STAGE_ANALYSIS_ARTIFACT: POSTMATCH_BASE_ARTIFACT_TYPES,
+    POSTMATCH_OVERLAY_CANDIDATES_ARTIFACT: [POSTMATCH_STAGE_ANALYSIS_ARTIFACT],
+}
 
 POSTMATCH_FRESHNESS_POLICY = {
     POSTMATCH_MATCH_CONTEXT_ARTIFACT: {"regime": FRESHNESS_HOT, "ttl_hours": 12},
     POSTMATCH_PERFORMANCE_CONTEXT_ARTIFACT: {"regime": FRESHNESS_HOT, "ttl_hours": 12},
     POSTMATCH_REFLECTION_PAYLOADS_ARTIFACT: {"regime": FRESHNESS_WARM, "ttl_hours": 24},
+    POSTMATCH_SIGNALS_ARTIFACT: {"regime": FRESHNESS_WARM, "ttl_hours": 24},
     POSTMATCH_OVERLAY_CANDIDATES_ARTIFACT: {"regime": FRESHNESS_WARM, "ttl_hours": 24},
     POSTMATCH_STAGE_ANALYSIS_ARTIFACT: {"regime": FRESHNESS_WARM, "ttl_hours": 24},
 }
 
+_POSTMATCH_PLACEHOLDER_BODY = "Postmatch AI entrypoint is prepared for structured reflective payloads."
+
+
+def _is_placeholder_postmatch_reflection(payload: Mapping[str, Any] | None) -> bool:
+    body = str((payload or {}).get("body") or "").strip()
+    return body == _POSTMATCH_PLACEHOLDER_BODY
+
 
 def _safe_scalar(value: Any) -> Any:
     """Convert nested values into JSON-safe primitives."""
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
     if is_dataclass(value):
         return _safe_scalar(asdict(value))
     if isinstance(value, dict):
@@ -167,7 +198,11 @@ def build_postmatch_reflection_payloads_payload(payload: Dict[str, Any]) -> Dict
         "performance_context": build_postmatch_performance_context_payload(payload),
     }
     reflections = get_postmatch_payloads(context, allow_llm_synthesis=False)
-    normalized_reflections = _safe_records(reflections)
+    normalized_reflections = [
+        record
+        for record in _safe_records(reflections)
+        if not _is_placeholder_postmatch_reflection(record)
+    ]
     return {
         "payloads": deepcopy(normalized_reflections),
         "payload_count": len(normalized_reflections),
@@ -204,6 +239,16 @@ def build_postmatch_overlay_candidates_payload(
     }
 
 
+def build_postmatch_signals_payload(stage_analysis_payload: Mapping[str, Any]) -> Dict[str, Any]:
+    """Build persisted postmatch signal inputs from the shared stage analysis."""
+    overlay_payload = build_overlay_candidates_from_analysis(stage_analysis_payload)
+    candidates = [dict(candidate) for candidate in list((overlay_payload or {}).get("candidates") or [])]
+    return {
+        "signals": candidates,
+        "signal_count": len(candidates),
+    }
+
+
 def build_postmatch_artifact_payloads(payload: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     """Build JSON-safe deterministic payloads for the postmatch stage artifacts."""
     match_context_payload = build_postmatch_match_context_payload(payload)
@@ -218,7 +263,6 @@ def build_postmatch_artifact_payloads(payload: Dict[str, Any]) -> Dict[str, Dict
         POSTMATCH_MATCH_CONTEXT_ARTIFACT: match_context_payload,
         POSTMATCH_PERFORMANCE_CONTEXT_ARTIFACT: performance_context_payload,
         POSTMATCH_REFLECTION_PAYLOADS_ARTIFACT: reflection_payloads_payload,
-        POSTMATCH_OVERLAY_CANDIDATES_ARTIFACT: overlay_candidates_payload,
     }
 
 
@@ -230,10 +274,150 @@ def _postmatch_source_checksum(base_payloads: Mapping[str, Mapping[str, Any]]) -
             POSTMATCH_MATCH_CONTEXT_ARTIFACT,
             POSTMATCH_PERFORMANCE_CONTEXT_ARTIFACT,
             POSTMATCH_REFLECTION_PAYLOADS_ARTIFACT,
-            POSTMATCH_OVERLAY_CANDIDATES_ARTIFACT,
         )
     }
     return build_artifact_fingerprint(relevant_payload)
+
+
+def build_postmatch_artifact_fingerprint_inputs(
+    artifact_type: str,
+    *,
+    player_id: str,
+    match_id: str,
+    source_checksum: str,
+    dependency_fingerprint_map: Mapping[str, str] | None = None,
+) -> Dict[str, Any]:
+    """Return fingerprint inputs for any postmatch artifact."""
+    return {
+        "artifact_type": artifact_type,
+        "scope": build_postmatch_artifact_scope(player_id, match_id),
+        "source_checksum": source_checksum,
+        "dependency_fingerprint_map": dict(dependency_fingerprint_map or {}),
+        "version_bundle": get_intelligence_version_bundle(),
+    }
+
+
+def build_postmatch_artifact_record(
+    artifact_type: str,
+    payload: Mapping[str, Any],
+    *,
+    player_id: str,
+    match_id: str,
+    source_checksum: str,
+    dependency_fingerprint_map: Mapping[str, str] | None = None,
+) -> Dict[str, Any]:
+    """Build a persisted artifact record for any postmatch runtime artifact."""
+    ttl_hours = int(POSTMATCH_FRESHNESS_POLICY[artifact_type]["ttl_hours"])
+    return build_runtime_artifact_record(
+        artifact_type=artifact_type,
+        scope=build_postmatch_artifact_scope(player_id, match_id),
+        payload=payload,
+        ttl_hours=ttl_hours,
+        fingerprint_inputs=build_postmatch_artifact_fingerprint_inputs(
+            artifact_type,
+            player_id=player_id,
+            match_id=match_id,
+            source_checksum=source_checksum,
+            dependency_fingerprint_map=dependency_fingerprint_map,
+        ),
+        dependency_fingerprint_map=dependency_fingerprint_map,
+    )
+
+
+def get_postmatch_intelligence_state(
+    payload: Dict[str, Any],
+    *,
+    registry: ArtifactRegistry | None = None,
+) -> Dict[str, Any]:
+    """Load postmatch artifacts from the registry and decide which ones need refresh."""
+    player_id = str(payload.get("player_id") or "")
+    match_id = str(payload.get("match_id") or payload.get("fixture_id") or "")
+    active_registry = registry or ArtifactRegistry()
+    base_payloads = build_postmatch_artifact_payloads(payload)
+    artifact_states: Dict[str, Any] = {}
+    refresh_plan: List[str] = []
+    persisted_base_artifacts: List[str] = []
+
+    for artifact_type in POSTMATCH_ARTIFACT_TYPES:
+        artifact_key = build_postmatch_artifact_key(artifact_type, player_id, match_id)
+        dependency_fingerprint_map = build_dependency_fingerprint_map(
+            {
+                dependency: (artifact_states.get(dependency) or {}).get("artifact")
+                for dependency in POSTMATCH_ARTIFACT_DEPENDENCIES.get(artifact_type, [])
+            }
+        )
+        if artifact_type in base_payloads:
+            source_checksum = build_artifact_fingerprint(base_payloads[artifact_type] or {})
+        else:
+            source_checksum = _postmatch_source_checksum(base_payloads)
+        expected_fingerprint = build_artifact_fingerprint(
+            build_postmatch_artifact_fingerprint_inputs(
+                artifact_type,
+                player_id=player_id,
+                match_id=match_id,
+                source_checksum=source_checksum,
+                dependency_fingerprint_map=dependency_fingerprint_map,
+            )
+        )
+        stored_artifact = active_registry.get_artifact(artifact_key)
+        freshness = evaluate_artifact_freshness(
+            stored_artifact,
+            expected_fingerprint=expected_fingerprint,
+            dependency_artifacts=[
+                (artifact_states.get(dependency) or {}).get("artifact")
+                for dependency in POSTMATCH_ARTIFACT_DEPENDENCIES.get(artifact_type, [])
+            ],
+            dependency_fingerprint_map=dependency_fingerprint_map,
+        )
+        if artifact_type in base_payloads and freshness["status"] != FRESHNESS_FRESH:
+            stored_artifact = active_registry.put_artifact(
+                artifact_key,
+                build_postmatch_artifact_record(
+                    artifact_type,
+                    base_payloads[artifact_type],
+                    player_id=player_id,
+                    match_id=match_id,
+                    source_checksum=build_artifact_fingerprint(base_payloads[artifact_type] or {}),
+                ),
+            )
+            freshness = {
+                "status": FRESHNESS_FRESH,
+                "is_usable": True,
+                "reasons": ["materialized_base_artifact"],
+            }
+            persisted_base_artifacts.append(artifact_type)
+        if freshness["status"] != FRESHNESS_FRESH:
+            refresh_plan.append(artifact_type)
+        artifact_states[artifact_type] = {
+            "artifact_key": artifact_key,
+            "artifact": stored_artifact,
+            "freshness": freshness,
+            "freshness_policy": POSTMATCH_FRESHNESS_POLICY.get(artifact_type) or {},
+            "expected_fingerprint": expected_fingerprint,
+            "payload_contract": base_payloads.get(artifact_type),
+        }
+
+    return {
+        "scope": build_postmatch_artifact_scope(player_id, match_id),
+        "base_payloads": base_payloads,
+        "artifacts": artifact_states,
+        "refresh_plan": refresh_plan,
+        "debug": {
+            "artifact_keys": {
+                artifact_type: state["artifact_key"]
+                for artifact_type, state in artifact_states.items()
+            },
+            "expected_fingerprints": {
+                artifact_type: state["expected_fingerprint"]
+                for artifact_type, state in artifact_states.items()
+            },
+            "freshness": {
+                artifact_type: state["freshness"]["status"]
+                for artifact_type, state in artifact_states.items()
+            },
+            "persisted_base_artifacts": persisted_base_artifacts,
+        },
+    }
 
 
 def build_postmatch_stage_analysis_fingerprint_inputs(
@@ -241,6 +425,8 @@ def build_postmatch_stage_analysis_fingerprint_inputs(
     player_id: str,
     match_id: str,
     source_checksum: str,
+    llm_enabled: bool,
+    model_profile: str,
 ) -> Dict[str, Any]:
     """Return fingerprint inputs for the persisted postmatch stage analysis."""
     return {
@@ -248,6 +434,10 @@ def build_postmatch_stage_analysis_fingerprint_inputs(
         "scope": build_postmatch_artifact_scope(player_id, match_id),
         "source_checksum": source_checksum,
         "analysis_contract_version": POSTMATCH_STAGE_ANALYSIS_CONTRACT_VERSION,
+        "runtime_flavor": {
+            "llm_enabled": bool(llm_enabled),
+            "model_profile": str(model_profile or "flash"),
+        },
         "version_bundle": get_intelligence_version_bundle(),
     }
 
@@ -258,6 +448,8 @@ def build_postmatch_stage_analysis_record(
     player_id: str,
     match_id: str,
     source_checksum: str,
+    llm_enabled: bool,
+    model_profile: str,
 ) -> Dict[str, Any]:
     """Build a persisted artifact record for postmatch stage analysis."""
     current_time = utc_now()
@@ -266,6 +458,8 @@ def build_postmatch_stage_analysis_record(
         player_id=player_id,
         match_id=match_id,
         source_checksum=source_checksum,
+        llm_enabled=llm_enabled,
+        model_profile=model_profile,
     )
     return {
         "artifact_key": build_postmatch_artifact_key(POSTMATCH_STAGE_ANALYSIS_ARTIFACT, player_id, match_id),
@@ -296,6 +490,9 @@ def build_postmatch_stage_analysis_payload(
     base_payloads = build_postmatch_artifact_payloads(payload)
     source_checksum = _postmatch_source_checksum(base_payloads)
     active_registry = registry or ArtifactRegistry()
+    runtime_config = get_intelligence_runtime_config()
+    llm_enabled = bool(runtime_config.get("postmatch_agent_llm_enabled"))
+    model_profile = str(runtime_config.get("postmatch_agent_model_profile") or "flash")
 
     artifact_key = build_postmatch_artifact_key(POSTMATCH_STAGE_ANALYSIS_ARTIFACT, player_id, match_id)
     expected_fingerprint = build_artifact_fingerprint(
@@ -303,6 +500,8 @@ def build_postmatch_stage_analysis_payload(
             player_id=player_id,
             match_id=match_id,
             source_checksum=source_checksum,
+            llm_enabled=llm_enabled,
+            model_profile=model_profile,
         )
     )
     stored_artifact = active_registry.get_artifact(artifact_key)
@@ -314,9 +513,20 @@ def build_postmatch_stage_analysis_payload(
         stored_payload = dict(stored_artifact.get("payload") or {})
         if stored_payload:
             debug = dict(stored_payload.get("debug") or {})
-            debug.setdefault("analysis_source", "artifact")
-            stored_payload["debug"] = debug
-            return stored_payload
+            analysis_source = str(debug.get("analysis_source") or "artifact")
+            if llm_enabled and analysis_source != "agentic":
+                logger.info(
+                    "Postmatch stage analysis ignoring stored artifact player_id=%s match_id=%s analysis_source=%s llm_enabled=%s model_profile=%s",
+                    player_id,
+                    match_id,
+                    analysis_source,
+                    llm_enabled,
+                    model_profile,
+                )
+            else:
+                debug.setdefault("analysis_source", "artifact")
+                stored_payload["debug"] = debug
+                return stored_payload
 
     artifacts = {
         artifact_type: {"payload": artifact_payload}
@@ -325,13 +535,15 @@ def build_postmatch_stage_analysis_payload(
     analysis = PostmatchStageAgent().analyze(scope=scope, artifacts=artifacts, session_memory=None)
     serialized = serialize_stage_analysis(analysis)
     debug = dict(serialized.get("debug") or {})
-    debug.setdefault("analysis_source", "fallback")
+    debug.setdefault("analysis_source", "agentic" if debug.get("llm_generated") else "fallback")
     serialized["debug"] = debug
     record = build_postmatch_stage_analysis_record(
         serialized,
         player_id=player_id,
         match_id=match_id,
         source_checksum=source_checksum,
+        llm_enabled=llm_enabled,
+        model_profile=model_profile,
     )
     active_registry.put_artifact(record["artifact_key"], record)
     return serialized

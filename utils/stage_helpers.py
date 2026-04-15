@@ -151,6 +151,9 @@ def _build_prematch_overlay_surface(
     game_plan_payload: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Build prematch shared overlay surface from stage discoveries when available."""
+    orchestrated = dict(payload.get("prematch_intelligence") or {})
+    if orchestrated.get("overlay_surface"):
+        return dict(orchestrated.get("overlay_surface") or {})
     if bool(payload.get("_prematch_ai_pending")) and not payload.get("prematch_stage_analysis"):
         return {
             "stage": "prematch",
@@ -162,10 +165,8 @@ def _build_prematch_overlay_surface(
             "inbox_entries": [],
         }
     try:
-        from utils.intelligence.discovery_overlay_mapper import build_overlay_candidates_from_analysis
-        from utils.prematch_stage.prematch_intelligence import build_prematch_stage_analysis_payload
+        from utils.agents.prematch_intelligence_orchestrator import orchestrate_prematch_intelligence
 
-        stage_analysis = payload.get("prematch_stage_analysis")
         has_rich_prematch_scope = bool(
             payload.get("fixture_id")
             and payload.get("player_name")
@@ -175,11 +176,11 @@ def _build_prematch_overlay_surface(
                 or payload.get("player_pos_group")
             )
         )
-        if not stage_analysis and has_rich_prematch_scope:
-            stage_analysis = build_prematch_stage_analysis_payload(payload)
-        overlay_payload = build_overlay_candidates_from_analysis(stage_analysis)
-        if list((overlay_payload or {}).get("candidates") or []):
-            return resolve_stage_overlay_surface("prematch", overlay_payload)
+        if has_rich_prematch_scope:
+            intelligence = orchestrate_prematch_intelligence(payload)
+            overlay_surface = dict((intelligence or {}).get("overlay_surface") or {})
+            if list(overlay_surface.get("candidates") or []):
+                return overlay_surface
     except Exception as exc:
         logger.debug("prematch shared overlay surface build error: %s", exc)
 
@@ -189,8 +190,9 @@ def _build_prematch_overlay_surface(
         "headline": f"Pre-match focus vs {payload.get('opponent') or 'opponent'}",
         "body": str(game_plan_payload.get("plan_headline") or ""),
         "anchor": "prematch_game_plan_context",
-        "priority": confidence,
+        "priority": 0.76,
         "confidence": confidence,
+        "presentation_hint": "prominent",
         "cta_label": "Open preview",
         "type": "prematch_game_plan",
         "novelty_key": str(payload.get("fixture_id") or payload.get("opponent") or "prematch-game-plan"),
@@ -208,6 +210,9 @@ def _build_prematch_overlay_surface(
 def _build_postmatch_overlay_surface(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Build postmatch shared overlay surface from stage discoveries when available."""
     try:
+        orchestrated = dict(payload.get("postmatch_intelligence") or {})
+        if orchestrated.get("overlay_surface"):
+            return dict(orchestrated.get("overlay_surface") or {})
         if payload.get("_postmatch_ai_pending"):
             return {
                 "stage": "postmatch",
@@ -218,51 +223,23 @@ def _build_postmatch_overlay_surface(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "deferred_candidates": [],
                 "inbox_entries": [],
             }
-        from utils.postmatch_stage.postmatch_intelligence import (
-            build_postmatch_match_context_payload,
-            build_postmatch_overlay_candidates_payload,
-            build_postmatch_performance_context_payload,
-            build_postmatch_reflection_payloads_payload,
-            build_postmatch_stage_analysis_payload,
-        )
-        from utils.intelligence.discovery_overlay_mapper import build_overlay_candidates_from_analysis
+        from utils.agents.postmatch_intelligence_orchestrator import orchestrate_postmatch_intelligence
 
-        stage_analysis = payload.get("postmatch_stage_analysis") or build_postmatch_stage_analysis_payload(payload)
-        overlay_payload = build_overlay_candidates_from_analysis(stage_analysis)
-        if list((overlay_payload or {}).get("candidates") or []):
-            return resolve_stage_overlay_surface("postmatch", overlay_payload)
-
-        match_context_payload = build_postmatch_match_context_payload(payload)
-        performance_context_payload = build_postmatch_performance_context_payload(payload)
-        reflection_payloads_payload = build_postmatch_reflection_payloads_payload(payload)
-        overlay_candidates_payload = build_postmatch_overlay_candidates_payload(
-            match_context_payload,
-            performance_context_payload,
-            reflection_payloads_payload,
-        )
-        candidates = list(overlay_candidates_payload.get("candidates") or [])
-        for candidate in candidates:
-            body_text = str(candidate.get("body") or "")
-            if "entrypoint is prepared for structured reflective payloads" in body_text.lower():
-                continue
-            candidate["confidence"] = _overlay_confidence_score(candidate.get("confidence"), 0.68)
-            candidate["priority"] = candidate["confidence"]
-        filtered_candidates = [
-            candidate for candidate in candidates
-            if "priority" in candidate
-        ]
-        return resolve_stage_overlay_surface("postmatch", {"candidates": filtered_candidates})
+        intelligence = orchestrate_postmatch_intelligence(payload)
+        overlay_surface = dict((intelligence or {}).get("overlay_surface") or {})
+        if list(overlay_surface.get("candidates") or []):
+            return overlay_surface
     except Exception as exc:
         logger.debug(f"postmatch overlay surface build error: {exc}")
-        return {
-            "stage": "postmatch",
-            "candidates": [],
-            "candidate_count": 0,
-            "primary_candidate": None,
-            "visible_primary": None,
-            "deferred_candidates": [],
-            "inbox_entries": [],
-        }
+    return {
+        "stage": "postmatch",
+        "candidates": [],
+        "candidate_count": 0,
+        "primary_candidate": None,
+        "visible_primary": None,
+        "deferred_candidates": [],
+        "inbox_entries": [],
+    }
 
 
 def _build_dashboard_data_cache_key(player_name: str, player_id: str) -> str:
@@ -1720,7 +1697,6 @@ def render_post_match(payload: Dict[str, Any], milestone_id: str = "") -> html.D
     competition_display = get_competition_display_name(competition, long_form=True)
     competition_logo = payload.get("competition_logo") or get_competition_logo(competition)
     overlay_surface = _build_postmatch_overlay_surface(payload)
-    contextual_overlay_card = _build_stage_contextual_overlay_card("postmatch", overlay_surface)
     
     home_logo = payload.get("home_logo") or _resolve_team_logo(home)
     away_logo = payload.get("away_logo") or _resolve_team_logo(away)
@@ -2675,7 +2651,6 @@ def render_post_match(payload: Dict[str, Any], milestone_id: str = "") -> html.D
         [
             header,
             summary_section,
-            contextual_overlay_card,
             dbc.Row(upper_analysis_cols, className="g-3 align-items-stretch"),
             dbc.Row(lower_analysis_cols, className="g-3 align-items-stretch mt-0") if lower_analysis_cols else None,
         ],
@@ -7696,7 +7671,6 @@ def render_pre_match(
             "recent_form_assists": int(recent_form.get("assists_total", 0) or 0),
         },
     )
-    contextual_overlay_card = _build_stage_contextual_overlay_card("prematch", overlay_surface)
     resolved_candidates: List[Dict[str, Any]] = []
     primary_candidate = dict((overlay_surface or {}).get("primary_candidate") or {})
     if primary_candidate:
@@ -7883,7 +7857,6 @@ def render_pre_match(
         html.Div(recent_form_section, style={"marginBottom": "36px"}),
         html.Div(rivals_section, style={"marginBottom": "36px"}),
         html.Div(h2h_section, style={"marginBottom": "36px"}),
-        contextual_overlay_card,
         game_plan_card,
     ], className="stage-view stage-view--prematch")
 

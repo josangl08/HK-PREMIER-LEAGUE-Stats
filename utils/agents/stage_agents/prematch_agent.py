@@ -54,7 +54,7 @@ class PrematchStageAgent(StageAgent):
                 evidence_keys=["prematch_game_plan"],
                 novelty_key=str(scope.get("fixture_id") or opponent),
                 anchor="prematch_game_plan_context",
-                presentation_hint="contextual",
+                presentation_hint="prominent",
                 cta_label="Open preview",
                 metadata=dict(game_plan_payload),
                 supporting_artifacts=[

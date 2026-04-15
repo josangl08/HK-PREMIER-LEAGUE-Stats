@@ -92,7 +92,7 @@ def create_navbar(pathname):
         ),
     ]
 
-    if user_role != "agent":
+    if user_role == "admin":
         nav_items.append(
             dbc.NavItem(
                 dbc.NavLink(
@@ -122,7 +122,7 @@ def create_navbar(pathname):
             )
         )
 
-    if user_role in ("admin", "player"):
+    if user_role == "admin":
         nav_items.append(
             dbc.NavItem(
                 dbc.NavLink(

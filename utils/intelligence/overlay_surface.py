@@ -75,15 +75,13 @@ def _candidate_body(candidate: Mapping[str, Any]) -> str:
 def _resolve_tier_from_importance(
     *,
     priority: float,
-    confidence: float,
 ) -> str:
-    """Resolve overlay tier from signal importance only, independent of stage."""
-    score = max(priority, confidence)
-    if score >= _CRITICAL_PRIORITY_THRESHOLD:
+    """Resolve overlay tier from explicit surfacing urgency, not confidence."""
+    if priority >= _CRITICAL_PRIORITY_THRESHOLD:
         return PRESENTATION_CRITICAL
-    if score >= _PROMINENT_PRIORITY_THRESHOLD:
+    if priority >= _PROMINENT_PRIORITY_THRESHOLD:
         return PRESENTATION_PROMINENT
-    if score >= _CONTEXTUAL_PRIORITY_THRESHOLD:
+    if priority >= _CONTEXTUAL_PRIORITY_THRESHOLD:
         return PRESENTATION_CONTEXTUAL
     return PRESENTATION_MICRO
 
@@ -92,19 +90,18 @@ def _resolve_tier(
     candidate: Mapping[str, Any],
     *,
     priority: float,
-    confidence: float,
 ) -> str:
     """Resolve presentation tier from explicit hint first, otherwise from importance."""
     hinted_tier = str(candidate.get("presentation_hint") or "").strip().lower()
     if hinted_tier in _TIER_RANK:
         return hinted_tier
-    return _resolve_tier_from_importance(priority=priority, confidence=confidence)
+    return _resolve_tier_from_importance(priority=priority)
 
 
 def _normalize_season_candidate(candidate: Mapping[str, Any]) -> Dict[str, Any]:
     confidence = _safe_float(candidate.get("confidence"), 0.8)
-    priority = _safe_float(candidate.get("priority"), confidence or 0.8)
-    presentation_tier = _resolve_tier(candidate, priority=priority, confidence=confidence)
+    priority = _safe_float(candidate.get("priority"))
+    presentation_tier = _resolve_tier(candidate, priority=priority)
     return {
         "stage": "season",
         "signal_id": str(candidate.get("signal_id") or ""),
@@ -132,8 +129,8 @@ def _normalize_career_candidate(candidate: Mapping[str, Any]) -> Dict[str, Any]:
     # them back onto legacy evidence keys.
     if candidate.get("signal_id") or candidate.get("novelty_key") or candidate.get("presentation_hint"):
         confidence = _safe_float(candidate.get("confidence"), 0.8)
-        priority = _safe_float(candidate.get("priority"), confidence or 0.8)
-        presentation_tier = _resolve_tier(candidate, priority=priority, confidence=confidence)
+        priority = _safe_float(candidate.get("priority"))
+        presentation_tier = _resolve_tier(candidate, priority=priority)
         return {
             "stage": "career",
             "signal_id": str(candidate.get("signal_id") or candidate.get("evidence_key") or candidate.get("title") or ""),
@@ -169,7 +166,7 @@ def _normalize_career_candidate(candidate: Mapping[str, Any]) -> Dict[str, Any]:
         urgency = max(raw_urgency, 0.60)
     else:
         urgency = raw_urgency
-    presentation_tier = _resolve_tier(candidate, priority=urgency, confidence=urgency)
+    presentation_tier = _resolve_tier(candidate, priority=urgency)
     return {
         "stage": "career",
         "signal_id": str(candidate.get("evidence_key") or candidate.get("title") or ""),
@@ -193,8 +190,8 @@ def _normalize_career_candidate(candidate: Mapping[str, Any]) -> Dict[str, Any]:
 
 def _normalize_postmatch_candidate(candidate: Mapping[str, Any]) -> Dict[str, Any]:
     confidence = _importance_score(candidate.get("confidence"))
-    priority = _importance_score(candidate.get("priority"), confidence)
-    presentation_tier = _resolve_tier(candidate, priority=priority, confidence=confidence)
+    priority = _importance_score(candidate.get("priority"))
+    presentation_tier = _resolve_tier(candidate, priority=priority)
     return {
         "stage": "postmatch",
         "signal_id": str(candidate.get("evidence_key") or candidate.get("candidate_type") or ""),
@@ -221,8 +218,8 @@ def _normalize_postmatch_candidate(candidate: Mapping[str, Any]) -> Dict[str, An
 
 def _normalize_prematch_candidate(candidate: Mapping[str, Any]) -> Dict[str, Any]:
     confidence = _importance_score(candidate.get("confidence"), 0.72)
-    priority = _importance_score(candidate.get("priority"), confidence)
-    presentation_tier = _resolve_tier(candidate, priority=priority, confidence=confidence)
+    priority = _importance_score(candidate.get("priority"))
+    presentation_tier = _resolve_tier(candidate, priority=priority)
     return {
         "stage": "prematch",
         "signal_id": str(candidate.get("signal_id") or candidate.get("evidence_key") or ""),
@@ -260,7 +257,7 @@ def normalize_overlay_candidate(stage: str, candidate: Mapping[str, Any] | None)
         return _normalize_prematch_candidate(candidate)
 
     confidence = _safe_float(candidate.get("confidence"))
-    priority = _safe_float(candidate.get("priority"), confidence)
+    priority = _safe_float(candidate.get("priority"))
     return {
         "stage": stage_name or "unknown",
         "signal_id": str(candidate.get("signal_id") or ""),
@@ -284,6 +281,7 @@ def normalize_overlay_candidate(stage: str, candidate: Mapping[str, Any] | None)
 
 def build_overlay_inbox_entry(candidate: Mapping[str, Any], *, surfaced: bool = False) -> Dict[str, Any]:
     """Build a shared inbox entry from a normalized overlay candidate."""
+    evidence = dict(candidate.get("evidence") or {})
     return {
         "stage": str(candidate.get("stage") or ""),
         "tier": str(candidate.get("presentation_tier") or PRESENTATION_MICRO),
@@ -292,9 +290,17 @@ def build_overlay_inbox_entry(candidate: Mapping[str, Any], *, surfaced: bool = 
         "timestamp": "",
         "anchor": str(candidate.get("anchor") or ""),
         "cta_context": {
+            "stage": str(candidate.get("stage") or ""),
             "signal_id": str(candidate.get("signal_id") or ""),
             "evidence_key": str(candidate.get("evidence_key") or ""),
             "novelty_key": str(candidate.get("novelty_key") or ""),
+            "anchor": str(candidate.get("anchor") or ""),
+            "player_id": str(
+                candidate.get("player_id")
+                or evidence.get("player_id")
+                or ((candidate.get("raw_candidate") or {}).get("player_id"))
+                or ""
+            ),
         },
         "surfaced": bool(surfaced),
     }

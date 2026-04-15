@@ -19,6 +19,7 @@ from utils.intelligence.artifact_registry import ArtifactRegistry
 from utils.intelligence.discovery_contracts import coerce_stage_analysis, serialize_stage_analysis
 from utils.intelligence.discovery_overlay_mapper import build_overlay_candidates_from_analysis
 from utils.intelligence.runtime_config import get_intelligence_runtime_config
+from utils.intelligence.reevaluation_policy import decide_stage_reevaluation
 from utils.intelligence.session_memory import (
     get_season_session_memory,
     put_season_session_memory,
@@ -38,6 +39,7 @@ from utils.season_stage.season_intelligence import (
     build_season_signals_payload,
     get_season_intelligence_state,
 )
+from utils.intelligence.stage_orchestrator import build_stage_runtime_result
 
 logger = logging.getLogger(__name__)
 
@@ -252,6 +254,55 @@ def orchestrate_season_intelligence(
         str(session_memory.get("current_novelty_key") or ""),
         len(session_memory.get("seen_novelty_keys") or []),
     )
+    llm_enabled = bool(runtime_config.get("season_agent_llm_enabled", False))
+    stored_analysis = (artifact_states.get(SEASON_STAGE_ANALYSIS_ARTIFACT) or {}).get("artifact")
+    stored_analysis_payload = dict((stored_analysis or {}).get("payload") or {})
+    stored_analysis_source = str(((stored_analysis_payload.get("debug") or {}).get("analysis_source")) or "artifact")
+    reevaluation = decide_stage_reevaluation(
+        stage_name="season",
+        artifact_states=artifact_states,
+        primary_artifact_type=SEASON_STAGE_ANALYSIS_ARTIFACT,
+        dependency_fingerprints={},
+        refresh_plan=refresh_plan,
+        trigger_context={
+            "season_context_changed": bool(
+                set(refresh_plan)
+                & {
+                    SEASON_PROFILE_CONTEXT_ARTIFACT,
+                    "season_performance_context",
+                    "competition_split_context",
+                    "previous_season_context",
+                    RECENT_FORM_CONTEXT_ARTIFACT,
+                    SEASON_STAGE_ANALYSIS_ARTIFACT,
+                }
+            ),
+            "new_match_available": bool(
+                set(refresh_plan) & {"season_performance_context", RECENT_FORM_CONTEXT_ARTIFACT}
+            ),
+            "llm_first_required": bool(llm_enabled and stored_analysis and stored_analysis_source != "agentic"),
+        },
+    )
+    reevaluation_metadata = {
+        "should_reevaluate": bool(reevaluation.should_reevaluate),
+        "reason": reevaluation.reason,
+        "reasons": list(reevaluation.reasons),
+        "freshness_status": reevaluation.freshness_status,
+        "soft_stale": bool(reevaluation.soft_stale),
+        "hard_stale": bool(reevaluation.hard_stale),
+        "age_hours": reevaluation.age_hours,
+        "policy": dict(reevaluation.policy or {}),
+    }
+    if reevaluation.should_reevaluate:
+        refresh_plan = list(
+            dict.fromkeys(
+                [
+                    *refresh_plan,
+                    SEASON_SIGNALS_ARTIFACT,
+                    SEASON_STAGE_ANALYSIS_ARTIFACT,
+                    SEASON_OVERLAY_CANDIDATES_ARTIFACT,
+                ]
+            )
+        )
 
     stage_analysis_payload = None
     shared_stage_analysis = None
@@ -299,8 +350,11 @@ def orchestrate_season_intelligence(
             )
         served_from["signals"] = "inline"
 
-    stored_analysis = (artifact_states.get(SEASON_STAGE_ANALYSIS_ARTIFACT) or {}).get("artifact")
-    if is_fresh_artifact_state(artifact_states.get(SEASON_STAGE_ANALYSIS_ARTIFACT)) and stored_analysis:
+    if (
+        not reevaluation.should_reevaluate
+        and is_fresh_artifact_state(artifact_states.get(SEASON_STAGE_ANALYSIS_ARTIFACT))
+        and stored_analysis
+    ):
         stage_analysis_payload = dict((stored_analysis.get("payload") or {}))
         coerced_analysis = coerce_stage_analysis(stage_analysis_payload)
         if coerced_analysis is not None:
@@ -314,10 +368,9 @@ def orchestrate_season_intelligence(
                 session_memory=session_memory,
             )
         )
-        stage_analysis_payload = shared_stage_analysis
         persisted_analysis = _persist_runtime_artifact(
             SEASON_STAGE_ANALYSIS_ARTIFACT,
-            stage_analysis_payload,
+            shared_stage_analysis,
             player_id=player_id,
             season=season,
             base_payloads=base_payloads,
@@ -343,7 +396,7 @@ def orchestrate_season_intelligence(
             overlay_payload = shared_overlay_payload
             overlay_surface = shared_overlay_surface
             worth_noticing = shared_primary_candidate
-            served_from["overlay"] = f"analysis_{served_from['analysis']}"
+            served_from["overlay"] = "artifact" if served_from["analysis"] == "artifact" else "inline"
             if not (
                 is_fresh_artifact_state(artifact_states.get(SEASON_OVERLAY_CANDIDATES_ARTIFACT))
                 and stored_overlay
@@ -560,7 +613,7 @@ def orchestrate_season_intelligence(
     elif not stage_analysis_payload and not signals_payload:
         fallback_reason = "no_intelligence_payload_available"
 
-    if shared_stage_analysis is None:
+    if shared_stage_analysis is None and base_ready:
         shared_stage_analysis = serialize_stage_analysis(
             SeasonStageAgent().analyze(
                 scope={"player_id": player_id, "season": season, "stage": "season"},
@@ -568,45 +621,31 @@ def orchestrate_season_intelligence(
                 session_memory=session_memory,
             )
         )
-    if not stage_analysis_payload:
-        stage_analysis_payload = shared_stage_analysis
+    if not stage_analysis_payload and base_ready:
+        fallback_analysis_payload = build_season_stage_analysis(runtime_artifacts)
+        if fallback_analysis_payload and fallback_analysis_payload.get("available"):
+            stage_analysis_payload = fallback_analysis_payload
 
-    result = {
-        "available": bool(stage_analysis_payload or worth_noticing or signals_payload),
-        "mode": mode,
-        "non_blocking": True,
-        "background_refresh_required": background_refresh_required,
-        "refresh_plan": refresh_plan,
-        "stage_analysis": stage_analysis_payload,
-        "shared_stage_analysis": shared_stage_analysis,
-        "signals": signals_payload,
-        "worth_noticing": worth_noticing,
-        "overlay_candidates": overlay_payload,
-        "overlay_surface": overlay_surface,
-        "debug": {
-            "scope": state.get("scope") or {},
-            "served_from": served_from,
-            "base_ready": base_ready,
-            "non_blocking": True,
-            "fallback_reason": fallback_reason,
-            "background_refresh_requested": background_refresh_required,
-            "refresh_requested_for": refresh_plan,
-            "persisted_artifacts": persisted_artifacts,
-            "session_memory": session_memory,
-            "persisted_session_memory": persisted_session_memory,
-            "runtime": {
-                "artifacts_root": str(runtime_config.get("artifacts_root") or ""),
-                "session_memory_root": str(runtime_config.get("session_memory_root") or ""),
-                "persistence_enabled": bool(runtime_config.get("persistence_enabled")),
-                "derived_writes_enabled": bool(runtime_config.get("derived_writes_enabled")),
-            },
-            "write_failures": write_failures,
-            "overlay_surface": overlay_surface,
-            "freshness": (state.get("debug") or {}).get("freshness") or {},
-            "artifact_keys": (state.get("debug") or {}).get("artifact_keys") or {},
-            "expected_fingerprints": (state.get("debug") or {}).get("expected_fingerprints") or {},
-        },
-    }
+    result = build_stage_runtime_result(
+        stage_name="season",
+        state=state,
+        runtime_config=runtime_config,
+        stage_analysis=stage_analysis_payload,
+        shared_stage_analysis=shared_stage_analysis,
+        signals=signals_payload,
+        overlay_candidates=overlay_payload,
+        overlay_surface=overlay_surface,
+        served_from=served_from,
+        refresh_plan=refresh_plan,
+        persisted_artifacts=persisted_artifacts,
+        session_memory=session_memory,
+        persisted_session_memory=persisted_session_memory,
+        base_ready=base_ready,
+        fallback_reason=fallback_reason,
+        write_failures=write_failures,
+        reevaluation=reevaluation_metadata,
+    )
+    result["worth_noticing"] = worth_noticing
 
     logger.info(
         "Season orchestrator mode=%s base_ready=%s refresh_plan=%s served_from=%s",

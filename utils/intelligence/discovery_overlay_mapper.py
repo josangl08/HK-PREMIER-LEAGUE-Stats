@@ -17,6 +17,7 @@ def build_overlay_candidates_from_analysis(
         return {"candidates": []}
 
     candidates: List[Dict[str, Any]] = []
+    scope = dict(normalized.scope or {})
     for discovery in normalized.discoveries:
         candidates.append(
             {
@@ -34,6 +35,8 @@ def build_overlay_candidates_from_analysis(
                 "evidence": dict(discovery.metadata),
                 "supporting_artifacts": list(discovery.supporting_artifacts),
                 "stage": discovery.stage,
+                "player_id": str(scope.get("player_id") or ""),
+                "scope": scope,
             }
         )
     return {"candidates": candidates}

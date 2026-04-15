@@ -280,3 +280,7 @@ data/users.json
 *.code-workspace
 scripts/scheduled_jobs.sh
 temp_hkfa.html
+
+
+scripts/
+reports/

@@ -22,6 +22,8 @@ from utils.intelligence.overlay_surface import (
     PRESENTATION_CRITICAL,
     PRESENTATION_MICRO,
     PRESENTATION_PROMINENT,
+    build_overlay_inbox_entry,
+    resolve_stage_overlay_surface,
 )
 from utils.stage_helpers import (
     _build_postmatch_overlay_surface,
@@ -62,6 +64,8 @@ import html as _html_lib
 logger = logging.getLogger(__name__)
 
 _CAREER_HISTORY_RESET_VERSION = "career_history_reset_v2"
+_PLAYER_INSIGHT_RESET_VERSION = "player_insight_reset_v1"
+_PLAYER_IDS_REQUIRING_INSIGHT_RESET = {"211580"}
 
 _MATCH_POSITION_MAP = {
     "CEN": "CB",
@@ -96,6 +100,25 @@ def _career_visible_overlay_queue(resolved_surface: dict | None) -> list[dict]:
     return queue
 
 
+def _is_career_dashboard_overlay_context(timeline_context: dict | None) -> bool:
+    context_type = str((timeline_context or {}).get("type") or "")
+    return not timeline_context or context_type in ("ai-insight", "career-overview")
+
+
+def _active_overlay_stage_name(timeline_context: dict | None) -> str:
+    if _is_career_dashboard_overlay_context(timeline_context):
+        return "career"
+
+    context_type = str((timeline_context or {}).get("type") or "").strip().lower()
+    if context_type == "career":
+        return "season"
+    if context_type == "pre-match":
+        return "prematch"
+    if context_type == "post-match":
+        return "postmatch"
+    return ""
+
+
 def _dismissed_overlay_keys(session_state: dict | None, *, stage: str, player_id: str = "") -> set[str]:
     """Collect dismissed overlay identifiers from persisted inbox history."""
     dismissed: set[str] = set()
@@ -122,41 +145,7 @@ def _dismissed_overlay_keys(session_state: dict | None, *, stage: str, player_id
 
 
 def _build_active_stage_inbox_entries(context: dict | None) -> list[dict]:
-    """Rebuild shared inbox entries for the currently active stage when possible."""
-    if not context:
-        return []
-
-    stage_type = str(context.get("type") or "").strip().lower()
-    payload = dict(context.get("payload") or {})
-
-    try:
-        if stage_type == "career":
-            # Career owns its active overlay runtime through t1/t2 stores and
-            # dismiss history. Rebuilding it via the season orchestrator was a
-            # legacy mismatch that could surface unrelated season entries.
-            return []
-
-        if stage_type == "pre-match":
-            if payload.get("prematch_stage_analysis"):
-                recent_form = _build_prematch_overlay_surface(
-                    payload,
-                    {
-                        "confidence": "limited",
-                        "plan_headline": f"Focus the next phase against {payload.get('opponent') or 'the opponent'}.",
-                        "meeting_count": 0,
-                        "recent_form_goals": 0,
-                        "recent_form_assists": 0,
-                    },
-                )
-                return list(recent_form.get("inbox_entries") or [])
-            return []
-
-        if stage_type == "post-match":
-            overlay_surface = _build_postmatch_overlay_surface(payload)
-            return list(overlay_surface.get("inbox_entries") or [])
-    except Exception as exc:
-        logger.debug("active stage inbox rebuild error: %s", exc)
-
+    """Keep inbox sourced from persisted history only; active stage queues live outside the inbox."""
     return []
 
 
@@ -344,6 +333,39 @@ def _filter_history_entries_for_active_player(entries: list[dict], timeline_cont
         if entry_player_id == active_player_id:
             filtered.append(entry)
     return filtered
+
+
+def _reset_player_insight_history_if_needed(
+    session_state: dict | None,
+    *,
+    player_id: str,
+) -> dict:
+    """One-time reset of locally stored insight history for selected players."""
+    active_player_id = str(player_id or "").strip()
+    if not active_player_id:
+        return dict(session_state or {})
+    if active_player_id not in _PLAYER_IDS_REQUIRING_INSIGHT_RESET:
+        return dict(session_state or {})
+
+    normalized_state = dict(session_state or {})
+    reset_versions = dict(normalized_state.get("player_insight_reset_versions") or {})
+    if reset_versions.get(active_player_id) == _PLAYER_INSIGHT_RESET_VERSION:
+        return normalized_state
+
+    history = list(normalized_state.get("history") or [])
+    player_scoped_stages = {"career", "season", "prematch", "postmatch", "pre-match", "post-match"}
+    normalized_state["history"] = [
+        entry
+        for entry in history
+        if not (
+            str(entry.get("stage") or "").strip().lower() in player_scoped_stages
+            and str((entry.get("cta_context") or {}).get("player_id") or entry.get("player_id") or "").strip() == active_player_id
+        )
+    ]
+    normalized_state["t1_dismissed_this_session"] = False
+    reset_versions[active_player_id] = _PLAYER_INSIGHT_RESET_VERSION
+    normalized_state["player_insight_reset_versions"] = reset_versions
+    return normalized_state
 
 
 def collect_insight_inbox_entries(session_state: dict | None, timeline_context: dict | None) -> list[dict]:
@@ -604,6 +626,34 @@ def _prematch_analysis_request_key(payload: dict) -> str:
     )
 
 
+def _build_postmatch_render_payload(payload: dict) -> dict:
+    """Enrich postmatch payloads with canonical scope keys before orchestration."""
+    enriched_payload = dict(payload or {})
+
+    player_id = str(
+        enriched_payload.get("player_id")
+        or getattr(current_user, "player_id", "")
+        or ""
+    ).strip()
+    match_id = str(
+        enriched_payload.get("match_id")
+        or enriched_payload.get("fixture_id")
+        or ""
+    ).strip()
+    if not match_id:
+        match_bits = [
+            str(enriched_payload.get("home_team") or "").strip().lower().replace(" ", "-"),
+            "vs",
+            str(enriched_payload.get("away_team") or enriched_payload.get("opponent") or "").strip().lower().replace(" ", "-"),
+            str(enriched_payload.get("date") or enriched_payload.get("kickoff_display") or "").strip().lower().replace(" ", "-"),
+        ]
+        match_id = "-".join([bit for bit in match_bits if bit]).strip("-")
+
+    enriched_payload["player_id"] = player_id
+    enriched_payload["match_id"] = match_id
+    return enriched_payload
+
+
 def _career_analysis_request_key(portal_data: dict) -> str:
     """Build a stable key for one career analysis request."""
     return "|".join(
@@ -611,6 +661,18 @@ def _career_analysis_request_key(portal_data: dict) -> str:
             str(portal_data.get("player_id") or ""),
             str(portal_data.get("player_name") or ""),
             str((portal_data.get("career_phase") or {}).get("current_season") or ""),
+        ]
+    )
+
+
+def _season_analysis_request_key(payload: dict) -> str:
+    """Build a stable key for one season analysis request."""
+    return "|".join(
+        [
+            str(payload.get("player_id") or ""),
+            str(payload.get("player_name") or ""),
+            str(payload.get("season") or ""),
+            str(payload.get("team") or payload.get("season_team") or ""),
         ]
     )
 
@@ -628,9 +690,101 @@ def _postmatch_analysis_request_key(payload: dict) -> str:
     )
 
 
+def _resolve_active_overlay_surface(
+    timeline_context: dict | None,
+    portal_data: dict | None,
+    career_stage_analysis: dict | None,
+    season_stage_analysis: dict | None,
+    prematch_stage_analysis: dict | None,
+    postmatch_stage_analysis: dict | None,
+) -> tuple[str, dict, str, str]:
+    """Resolve the active stage overlay surface for the shared overlay runtime."""
+    stage_name = _active_overlay_stage_name(timeline_context)
+    if not stage_name:
+        return "", {}, "", ""
+
+    if stage_name == "career":
+        active_player_id = str((portal_data or {}).get("player_id") or "").strip()
+        player_name = str(
+            (portal_data or {}).get("player_name")
+            or ((timeline_context or {}).get("payload") or {}).get("player_name")
+            or getattr(current_user, "player_name", None)
+            or ""
+        )
+        analysis_bundle = dict(career_stage_analysis or {})
+        analysis_payload = dict(analysis_bundle.get("analysis") or {})
+        raw_candidates = list(
+            (analysis_bundle.get("overlay_candidates") or {}).get("candidates")
+            or (build_overlay_candidates_from_analysis(analysis_payload) or {}).get("candidates")
+            or []
+        )
+        return (
+            stage_name,
+            resolve_stage_overlay_surface(stage_name, {"candidates": raw_candidates}),
+            active_player_id,
+            player_name,
+        )
+
+    context_payload = dict((timeline_context or {}).get("payload") or {})
+    active_player_id = str(
+        context_payload.get("player_id")
+        or (portal_data or {}).get("player_id")
+        or getattr(current_user, "player_id", "")
+        or ""
+    ).strip()
+    player_name = str(
+        context_payload.get("player_name")
+        or (portal_data or {}).get("player_name")
+        or getattr(current_user, "player_name", None)
+        or ""
+    )
+
+    try:
+        if stage_name == "season":
+            request_key = _season_analysis_request_key(context_payload)
+            cached = dict(season_stage_analysis or {})
+            intelligence = (
+                dict(cached.get("intelligence") or {})
+                if str(cached.get("request_key") or "") == request_key
+                else {}
+            )
+            return stage_name, dict((intelligence or {}).get("overlay_surface") or {}), active_player_id, player_name
+
+        if stage_name == "prematch":
+            from utils.agents.prematch_intelligence_orchestrator import orchestrate_prematch_intelligence
+
+            payload, _, _, _ = _build_prematch_render_payload(context_payload)
+            request_key = _prematch_analysis_request_key(payload)
+            cached = dict(prematch_stage_analysis or {})
+            intelligence = (
+                dict(cached.get("intelligence") or {})
+                if str(cached.get("request_key") or "") == request_key
+                else orchestrate_prematch_intelligence(payload)
+            )
+            return stage_name, dict((intelligence or {}).get("overlay_surface") or {}), active_player_id, player_name
+
+        if stage_name == "postmatch":
+            from utils.agents.postmatch_intelligence_orchestrator import orchestrate_postmatch_intelligence
+
+            payload = _build_postmatch_render_payload(context_payload)
+            request_key = _postmatch_analysis_request_key(payload)
+            cached = dict(postmatch_stage_analysis or {})
+            intelligence = (
+                dict(cached.get("intelligence") or {})
+                if str(cached.get("request_key") or "") == request_key
+                else orchestrate_postmatch_intelligence(payload)
+            )
+            return stage_name, dict((intelligence or {}).get("overlay_surface") or {}), active_player_id, player_name
+    except Exception as exc:
+        logger.debug("active overlay surface resolution error stage=%s error=%s", stage_name, exc)
+
+    return stage_name, {}, active_player_id, player_name
+
+
 def _render_stage_content_for_context_with_session(
     context,
     session_state,
+    season_stage_analysis=None,
     prematch_stage_analysis=None,
     postmatch_stage_analysis=None,
 ):
@@ -643,10 +797,13 @@ def _render_stage_content_for_context_with_session(
     payload = dict(context.get("payload", {}) or {})
 
     if m_type == "post-match":
+        payload = _build_postmatch_render_payload(payload)
         analysis_bundle = dict(postmatch_stage_analysis or {})
         request_key = _postmatch_analysis_request_key(payload)
         if request_key == str(analysis_bundle.get("request_key") or ""):
-            payload["postmatch_stage_analysis"] = dict(analysis_bundle.get("analysis") or {})
+            intelligence_bundle = dict(analysis_bundle.get("intelligence") or {})
+            payload["postmatch_stage_analysis"] = dict(intelligence_bundle.get("stage_analysis") or analysis_bundle.get("analysis") or {})
+            payload["postmatch_intelligence"] = intelligence_bundle
         payload["_postmatch_ai_pending"] = bool(not payload.get("postmatch_stage_analysis"))
         try:
             return render_post_match(payload, milestone_id=context.get("id", ""))
@@ -659,7 +816,9 @@ def _render_stage_content_for_context_with_session(
         request_key = _prematch_analysis_request_key(payload)
         llm_enabled = bool(get_intelligence_runtime_config().get("prematch_agent_llm_enabled", False))
         if request_key == str(analysis_bundle.get("request_key") or ""):
-            payload["prematch_stage_analysis"] = dict(analysis_bundle.get("analysis") or {})
+            intelligence_bundle = dict(analysis_bundle.get("intelligence") or {})
+            payload["prematch_stage_analysis"] = dict(intelligence_bundle.get("stage_analysis") or analysis_bundle.get("analysis") or {})
+            payload["prematch_intelligence"] = intelligence_bundle
         payload["_prematch_ai_pending"] = bool(llm_enabled and not payload.get("prematch_stage_analysis"))
         return render_pre_match(
             payload,
@@ -670,6 +829,10 @@ def _render_stage_content_for_context_with_session(
 
     if m_type == "career":
         payload["_dismissed_overlay_keys"] = sorted(_dismissed_overlay_keys(session_state, stage="season"))
+        analysis_bundle = dict(season_stage_analysis or {})
+        request_key = _season_analysis_request_key(payload)
+        if request_key == str(analysis_bundle.get("request_key") or ""):
+            payload["season_intelligence"] = dict(analysis_bundle.get("intelligence") or {})
         return render_season_stage(payload)
 
     return dbc.Alert(f"Tipo de contexto desconocido: {m_type}", color="warning")
@@ -2763,6 +2926,38 @@ def register_player_portal_callbacks(app):
             logger.error(f"refresh_default_stage_with_ai error: {exc}")
             return _render_default_stage_content(ai_payload=career_dashboard_brief)
 
+    @app.callback(
+        Output("stage-background-dispatch-store", "data"),
+        Input("portal-render-complete-store", "data"),
+        State("portal-data-store", "data"),
+        State("milestones-data-store", "data"),
+        prevent_initial_call=True,
+    )
+    def dispatch_stage_reevaluations_after_portal_entry(render_signal, portal_data, milestones_data):
+        """Prewarm eligible stage runtimes after app entry without waiting for stage-local callbacks."""
+        if not render_signal or not portal_data or bool((render_signal or {}).get("skipped")):
+            return no_update
+        try:
+            from utils.intelligence.background_dispatch import dispatch_background_stage_reevaluations
+
+            summary = dispatch_background_stage_reevaluations(portal_data, milestones_data)
+            logger.info(
+                "Portal background stage dispatch summary=%s",
+                {
+                    stage_name: {
+                        "eligible": bool(stage_summary.get("eligible")),
+                        "dispatched": bool(stage_summary.get("dispatched")),
+                        "refresh_plan": list(stage_summary.get("refresh_plan") or []),
+                        "reevaluation_reason": str((stage_summary.get("reevaluation") or {}).get("reason") or ""),
+                    }
+                    for stage_name, stage_summary in dict(summary or {}).items()
+                },
+            )
+            return json.loads(json.dumps(summary, default=str))
+        except Exception as exc:
+            logger.warning("portal background stage dispatch error: %s", exc)
+            return no_update
+
     # ------------------------------------------------------------------ #
     # timeline-context-store → Stage content                              #
     # ------------------------------------------------------------------ #
@@ -2770,22 +2965,104 @@ def register_player_portal_callbacks(app):
         Output("stage-content", "children"),
         Input("timeline-context-store", "data"),
         State("insight-session-state", "data"),
+        State("season-stage-analysis-store", "data"),
         State("prematch-stage-analysis-store", "data"),
         State("postmatch-stage-analysis-store", "data"),
         prevent_initial_call=True,
     )
-    def update_stage(context, session_state, prematch_stage_analysis, postmatch_stage_analysis):
+    def update_stage(context, session_state, season_stage_analysis, prematch_stage_analysis, postmatch_stage_analysis):
         """Dispatches rendering to the appropriate stage helper based on card type."""
         try:
             return _render_stage_content_for_context_with_session(
                 context,
                 session_state,
+                season_stage_analysis,
                 prematch_stage_analysis,
                 postmatch_stage_analysis,
             )
         except Exception as e:
             logger.error(f"update_stage error: {e}")
             return dbc.Alert("Error al renderizar el escenario.", color="danger")
+
+    @app.callback(
+        Output("season-stage-analysis-store", "data"),
+        Input("stage-content", "children"),
+        State("timeline-context-store", "data"),
+        State("season-stage-analysis-store", "data"),
+        prevent_initial_call=True,
+    )
+    def build_season_stage_analysis_after_render(_, context, current_analysis_store):
+        """Compute season intelligence after the stage is visible, avoiding repeated stage-entry orchestration."""
+        if not context or str(context.get("type") or "") != "career":
+            return no_update
+        try:
+            from utils.agents.intelligence_orchestrator import orchestrate_season_intelligence
+
+            payload = dict(context.get("payload") or {})
+            request_key = _season_analysis_request_key(payload)
+            runtime_config = get_intelligence_runtime_config()
+            persistence_enabled = bool(runtime_config.get("persistence_enabled"))
+            store_reuse_enabled = bool(runtime_config.get("stage_analysis_store_reuse_enabled", True))
+            store = dict(current_analysis_store or {})
+            if (
+                store_reuse_enabled
+                and str(store.get("request_key") or "") == request_key
+                and store.get("intelligence")
+            ):
+                logger.info(
+                    "Season stage analysis reuse request_key=%s persistence_enabled=%s store_reuse_enabled=%s",
+                    request_key,
+                    persistence_enabled,
+                    store_reuse_enabled,
+                )
+                return no_update
+            intelligence = orchestrate_season_intelligence(payload)
+            logger.info(
+                "Season stage analysis built request_key=%s analysis_source=%s persistence_enabled=%s store_reuse_enabled=%s served_from=%s refresh_plan=%s",
+                request_key,
+                str((((intelligence or {}).get("stage_analysis") or {}).get("debug") or {}).get("analysis_source") or "unknown"),
+                persistence_enabled,
+                store_reuse_enabled,
+                dict((intelligence or {}).get("debug") or {}).get("served_from") or {},
+                list(dict((intelligence or {}).get("debug") or {}).get("refresh_plan") or []),
+            )
+            return {
+                "request_key": request_key,
+                "analysis": dict((intelligence or {}).get("stage_analysis") or {}),
+                "intelligence": intelligence,
+            }
+        except Exception as exc:
+            logger.debug("season stage analysis async build error: %s", exc)
+            return no_update
+
+    @app.callback(
+        Output("stage-content", "children", allow_duplicate=True),
+        Input("season-stage-analysis-store", "data"),
+        State("timeline-context-store", "data"),
+        State("insight-session-state", "data"),
+        State("prematch-stage-analysis-store", "data"),
+        State("postmatch-stage-analysis-store", "data"),
+        prevent_initial_call=True,
+    )
+    def refresh_season_stage_after_analysis(
+        season_stage_analysis,
+        timeline_context,
+        session_state,
+        prematch_stage_analysis,
+        postmatch_stage_analysis,
+    ):
+        """Refresh the visible season stage once the async intelligence bundle is ready."""
+        if not timeline_context or str(timeline_context.get("type") or "") != "career":
+            return no_update
+        if not season_stage_analysis:
+            return no_update
+        return _render_stage_content_for_context_with_session(
+            timeline_context,
+            session_state,
+            season_stage_analysis,
+            prematch_stage_analysis,
+            postmatch_stage_analysis,
+        )
 
     @app.callback(
         Output("prematch-stage-analysis-store", "data"),
@@ -2799,7 +3076,7 @@ def register_player_portal_callbacks(app):
         if not context or str(context.get("type") or "") != "pre-match":
             return no_update
         try:
-            from utils.prematch_stage.prematch_intelligence import build_prematch_stage_analysis_payload
+            from utils.agents.prematch_intelligence_orchestrator import orchestrate_prematch_intelligence
 
             payload, _, _, _ = _build_prematch_render_payload(dict(context.get("payload") or {}))
             request_key = _prematch_analysis_request_key(payload)
@@ -2823,14 +3100,14 @@ def register_player_portal_callbacks(app):
                     store_reuse_enabled,
                 )
                 return no_update
-            analysis = build_prematch_stage_analysis_payload(
+            intelligence = orchestrate_prematch_intelligence(
                 payload,
                 force_refresh=not persistence_enabled,
             )
             logger.info(
                 "Prematch stage analysis built request_key=%s analysis_source=%s llm_enabled=%s model_profile=%s persistence_enabled=%s store_reuse_enabled=%s",
                 request_key,
-                str(((analysis or {}).get("debug") or {}).get("analysis_source") or "unknown"),
+                str((((intelligence or {}).get("stage_analysis") or {}).get("debug") or {}).get("analysis_source") or "unknown"),
                 bool(runtime_config.get("prematch_agent_llm_enabled")),
                 str(runtime_config.get("prematch_agent_model_profile") or "flash"),
                 persistence_enabled,
@@ -2838,7 +3115,8 @@ def register_player_portal_callbacks(app):
             )
             return {
                 "request_key": request_key,
-                "analysis": analysis,
+                "analysis": dict((intelligence or {}).get("stage_analysis") or {}),
+                "intelligence": intelligence,
             }
         except Exception as exc:
             logger.debug("prematch stage analysis async build error: %s", exc)
@@ -2876,9 +3154,9 @@ def register_player_portal_callbacks(app):
         if not context or str(context.get("type") or "") != "post-match":
             return no_update
         try:
-            from utils.postmatch_stage.postmatch_intelligence import build_postmatch_stage_analysis_payload
+            from utils.agents.postmatch_intelligence_orchestrator import orchestrate_postmatch_intelligence
 
-            payload = dict(context.get("payload") or {})
+            payload = _build_postmatch_render_payload(dict(context.get("payload") or {}))
             request_key = _postmatch_analysis_request_key(payload)
             runtime_config = get_intelligence_runtime_config()
             persistence_enabled = bool(runtime_config.get("persistence_enabled"))
@@ -2898,20 +3176,21 @@ def register_player_portal_callbacks(app):
                     store_reuse_enabled,
                 )
                 return no_update
-            analysis = build_postmatch_stage_analysis_payload(
+            intelligence = orchestrate_postmatch_intelligence(
                 payload,
                 force_refresh=not persistence_enabled,
             )
             logger.info(
                 "Postmatch stage analysis built request_key=%s analysis_source=%s persistence_enabled=%s store_reuse_enabled=%s",
                 request_key,
-                str(((analysis or {}).get("debug") or {}).get("analysis_source") or "unknown"),
+                str((((intelligence or {}).get("stage_analysis") or {}).get("debug") or {}).get("analysis_source") or "unknown"),
                 persistence_enabled,
                 store_reuse_enabled,
             )
             return {
                 "request_key": request_key,
-                "analysis": analysis,
+                "analysis": dict((intelligence or {}).get("stage_analysis") or {}),
+                "intelligence": intelligence,
             }
         except Exception as exc:
             logger.debug("postmatch stage analysis async build error: %s", exc)
@@ -3522,40 +3801,56 @@ def register_career_intelligence_callbacks(app):
         Input("timeline-context-store", "data"),
         Input("portal-data-store", "data"),
         Input("career-stage-analysis-store", "data"),
+        Input("season-stage-analysis-store", "data"),
+        Input("prematch-stage-analysis-store", "data"),
+        Input("postmatch-stage-analysis-store", "data"),
         State("insight-session-state", "data"),
         prevent_initial_call=False,
     )
-    def evaluate_career_signals(timeline_context, portal_data, career_stage_analysis, session_state):
+    def evaluate_career_signals(
+        timeline_context,
+        portal_data,
+        career_stage_analysis,
+        season_stage_analysis,
+        prematch_stage_analysis,
+        postmatch_stage_analysis,
+        session_state,
+    ):
         """
-        Runs the career pattern detector for the default dashboard/career layer,
-        not for season milestones that reuse `type="career"` in the timeline.
+        Runs the shared overlay evaluator for the active surface.
         """
         try:
-            context_type = str((timeline_context or {}).get("type") or "")
-            is_career_dashboard_surface = not timeline_context or context_type in ("ai-insight", "career-overview")
-            if not is_career_dashboard_surface:
+            active_stage = _active_overlay_stage_name(timeline_context)
+            if not active_stage:
                 return None, [], no_update
 
             if not portal_data:
-                logger.info("Career overlay skipped portal_data_missing")
+                logger.info("Stage overlay skipped portal_data_missing stage=%s", active_stage)
                 return None, [], no_update
 
-            active_player_id = str(portal_data.get("player_id") or "").strip()
+            stage_name, resolved_surface, active_player_id, player_name = _resolve_active_overlay_surface(
+                timeline_context,
+                portal_data,
+                career_stage_analysis,
+                season_stage_analysis,
+                prematch_stage_analysis,
+                postmatch_stage_analysis,
+            )
+            if not stage_name:
+                return None, [], no_update
+
             normalized_session_state = _reset_career_history_for_player_if_needed(
                 session_state,
                 player_id=active_player_id,
             )
-            normalized_session_state["history"] = _compact_stage_history_entries(
-                list(normalized_session_state.get("history") or []),
-                stage="career",
+            normalized_session_state = _reset_player_insight_history_if_needed(
+                normalized_session_state,
                 player_id=active_player_id,
             )
-
-            player_name = str(
-                portal_data.get("player_name")
-                or (timeline_context.get("payload") or {}).get("player_name")
-                or getattr(current_user, "player_name", None)
-                or ""
+            normalized_session_state["history"] = _compact_stage_history_entries(
+                list(normalized_session_state.get("history") or []),
+                stage=stage_name,
+                player_id=active_player_id,
             )
             current_season = str(
                 ((timeline_context or {}).get("payload") or {}).get("season")
@@ -3563,21 +3858,13 @@ def register_career_intelligence_callbacks(app):
                 or ""
             )
             today = date.today().isoformat()
-            analysis_bundle = dict(career_stage_analysis or {})
-            analysis_payload = dict(analysis_bundle.get("analysis") or {})
-            analysis_source = str(((analysis_payload or {}).get("debug") or {}).get("analysis_source") or "none")
-            raw_candidates = list(
-                (analysis_bundle.get("overlay_candidates") or {}).get("candidates")
-                or (build_overlay_candidates_from_analysis(analysis_payload) or {}).get("candidates")
-                or []
-            )
 
-            if not raw_candidates:
+            if not list(resolved_surface.get("candidates") or []):
                 logger.info(
-                    "Career overlay evaluated player=%s season=%s discoveries=0 analysis_source=%s",
+                    "Stage overlay evaluated player=%s season=%s stage=%s discoveries=0",
                     player_name,
                     current_season,
-                    analysis_source,
+                    stage_name,
                 )
                 return None, [], {
                     **normalized_session_state,
@@ -3585,27 +3872,10 @@ def register_career_intelligence_callbacks(app):
                     "eval_date": today,
                 }
 
-            resolved_surface = resolve_stage_overlay_surface(
-                "career",
-                {"candidates": raw_candidates},
-            )
             logger.info(
-                "Career overlay raw candidates player=%s details=%s",
+                "Stage overlay resolved candidates player=%s stage=%s details=%s",
                 player_name,
-                [
-                    {
-                        "signal_id": str(candidate.get("signal_id") or ""),
-                        "novelty_key": str(candidate.get("novelty_key") or ""),
-                        "hint": str(candidate.get("presentation_hint") or ""),
-                        "priority": candidate.get("priority"),
-                        "confidence": candidate.get("confidence"),
-                    }
-                    for candidate in raw_candidates
-                ],
-            )
-            logger.info(
-                "Career overlay resolved candidates player=%s details=%s",
-                player_name,
+                stage_name,
                 [
                     {
                         "signal_id": str(candidate.get("signal_id") or ""),
@@ -3619,12 +3889,13 @@ def register_career_intelligence_callbacks(app):
             )
             dismissed_keys = _dismissed_overlay_keys(
                 normalized_session_state,
-                stage="career",
+                stage=stage_name,
                 player_id=active_player_id,
             )
             if dismissed_keys:
                 logger.info(
-                    "Career overlay suppressing dismissed entries count=%s",
+                    "Stage overlay suppressing dismissed entries stage=%s count=%s",
+                    stage_name,
                     len(dismissed_keys),
                 )
                 filtered_candidates = [
@@ -3634,8 +3905,9 @@ def register_career_intelligence_callbacks(app):
                     and str(candidate.get("novelty_key") or "") not in dismissed_keys
                 ]
                 logger.info(
-                    "Career overlay filtered candidates player=%s details=%s",
+                    "Stage overlay filtered candidates player=%s stage=%s details=%s",
                     player_name,
+                    stage_name,
                     [
                         {
                             "signal_id": str(candidate.get("signal_id") or ""),
@@ -3646,7 +3918,7 @@ def register_career_intelligence_callbacks(app):
                     ],
                 )
                 resolved_surface = resolve_stage_overlay_surface(
-                    "career",
+                    stage_name,
                     {"candidates": [candidate.get("raw_candidate") or candidate for candidate in filtered_candidates]},
                 )
             primary_overlay = None
@@ -3657,13 +3929,13 @@ def register_career_intelligence_callbacks(app):
             contextual_queue = _career_visible_overlay_queue(resolved_surface)
 
             logger.info(
-                "Career overlay evaluated player=%s season=%s candidates=%s primary_tier=%s queue=%s analysis_source=%s",
+                "Stage overlay evaluated player=%s season=%s stage=%s candidates=%s primary_tier=%s queue=%s",
                 player_name,
                 current_season,
-                len(raw_candidates),
+                stage_name,
+                len(list(resolved_surface.get("candidates") or [])),
                 str(primary_candidate.get("presentation_tier") or "none"),
                 len(contextual_queue),
-                analysis_source,
             )
 
             new_session_state = {
@@ -3682,8 +3954,8 @@ def register_career_intelligence_callbacks(app):
         Output("portal-overlay-store", "data"),
         Input("insight-inbox-btn", "n_clicks"),
         Input({"type": "career-evidence-trigger", "key": ALL, "source": ALL, "index": ALL, "focus_metric": ALL}, "n_clicks"),
-        Input({"type": "stage-overlay-critical-btn", "action": ALL, "evidence_key": ALL}, "n_clicks"),
-        Input({"type": "stage-overlay-contextual-cta", "index": ALL, "evidence_key": ALL}, "n_clicks"),
+        Input({"type": "stage-overlay-critical-btn", "action": ALL, "stage": ALL, "signal_id": ALL, "evidence_key": ALL}, "n_clicks"),
+        Input({"type": "stage-overlay-contextual-cta", "index": ALL, "stage": ALL, "signal_id": ALL, "evidence_key": ALL}, "n_clicks"),
         Input("career-evidence-modal-close", "n_clicks"),
         State("portal-overlay-store", "data"),
         prevent_initial_call=True,
@@ -3717,6 +3989,8 @@ def register_career_intelligence_callbacks(app):
                 "nonce": ctx.triggered[0]["value"],
             }
         if triggered_id.get("type") == "stage-overlay-critical-btn" and triggered_id.get("action") == "cta":
+            if str(triggered_id.get("stage") or "").strip().lower() != "career":
+                return no_update
             return {
                 "type": "evidence",
                 "evidence_key": resolve_career_surface_evidence_key(triggered_id.get("evidence_key", "career_arc")),
@@ -3725,6 +3999,8 @@ def register_career_intelligence_callbacks(app):
                 "nonce": ctx.triggered[0]["value"],
             }
         if triggered_id.get("type") == "stage-overlay-contextual-cta":
+            if str(triggered_id.get("stage") or "").strip().lower() != "career":
+                return no_update
             return {
                 "type": "evidence",
                 "evidence_key": resolve_career_surface_evidence_key(triggered_id.get("evidence_key", "career_arc")),
@@ -3813,7 +4089,7 @@ def register_career_intelligence_callbacks(app):
         Output("stage-overlay-critical-container", "style"),
         Output("insight-session-state", "data", allow_duplicate=True),
         Input("stage-overlay-primary-store", "data"),
-        Input({"type": "stage-overlay-critical-btn", "action": ALL, "evidence_key": ALL}, "n_clicks"),
+        Input({"type": "stage-overlay-critical-btn", "action": ALL, "stage": ALL, "signal_id": ALL, "evidence_key": ALL}, "n_clicks"),
         State("timeline-context-store", "data"),
         State("insight-session-state", "data"),
         prevent_initial_call=True,
@@ -3825,47 +4101,52 @@ def register_career_intelligence_callbacks(app):
         CTA navigation is handled by a clientside callback.
         """
         triggered_id = ctx.triggered_id
-        context_type = str((timeline_context or {}).get("type") or "")
-        is_career_dashboard_surface = not timeline_context or context_type in ("ai-insight", "career-overview")
+        active_stage = _active_overlay_stage_name(timeline_context)
 
-        if not is_career_dashboard_surface:
+        if not active_stage:
             return None, {"display": "none"}, no_update
 
-        # Dismiss or CTA click → hide the visible critical surface.
         if isinstance(triggered_id, dict) and triggered_id.get("type") == "stage-overlay-critical-btn":
+            if triggered_id.get("action") != "dismiss":
+                return no_update, no_update, no_update
             updated_state = dict(session_state or {})
             updated_state["t1_dismissed_this_session"] = True
             # Append to history so Insight Inbox can display it
             if primary_data:
                 from datetime import datetime as _dt
+                signal_stage = str((primary_data or {}).get("stage") or active_stage or "").strip().lower()
+                player_id = str(getattr(current_user, "player_id", "") or "")
                 history = list(updated_state.get("history", []))
                 entry = build_overlay_inbox_entry(primary_data, surfaced=True)
                 entry["timestamp"] = _dt.utcnow().isoformat()
-                entry["player_id"] = str(getattr(current_user, "player_id", "") or "")
-                entry["cta_context"]["evidence_key"] = resolve_career_surface_evidence_key(
-                    primary_data.get("evidence_key", "career_arc"),
-                    label=primary_data.get("title", ""),
-                )
+                entry["player_id"] = player_id
+                if signal_stage == "career":
+                    entry["cta_context"]["evidence_key"] = resolve_career_surface_evidence_key(
+                        primary_data.get("evidence_key", "career_arc"),
+                        label=primary_data.get("title", ""),
+                    )
                 entry["cta_context"]["novelty_key"] = str(primary_data.get("novelty_key") or "")
-                entry["cta_context"]["player_id"] = str(getattr(current_user, "player_id", "") or "")
+                entry["cta_context"]["player_id"] = player_id
                 updated_state["history"] = _upsert_stage_history_entry(
                     history,
                     entry,
-                    stage="career",
-                    player_id=str(getattr(current_user, "player_id", "") or ""),
+                    stage=signal_stage,
+                    player_id=player_id,
                 )
             logger.info(
-                "Career critical overlay dismissed signal_id=%s",
+                "Stage critical overlay dismissed stage=%s signal_id=%s",
+                str((primary_data or {}).get("stage") or active_stage or ""),
                 str((primary_data or {}).get("signal_id") or ""),
             )
             return None, {"display": "none"}, updated_state
 
         if not primary_data:
-            logger.info("Career critical overlay hidden no_signal")
+            logger.info("Stage critical overlay hidden stage=%s reason=no_signal", active_stage)
             return None, {"display": "none"}, no_update
 
         logger.info(
-            "Career critical overlay rendered signal_id=%s",
+            "Stage critical overlay rendered stage=%s signal_id=%s",
+            str((primary_data or {}).get("stage") or active_stage or ""),
             str((primary_data or {}).get("signal_id") or ""),
         )
         return render_critical_overlay(primary_data), {"display": "block"}, no_update
@@ -3888,13 +4169,12 @@ def register_career_intelligence_callbacks(app):
         Dismiss [×] click removes that card, appends it to history, and surfaces the next queued signal.
         """
         triggered_id = ctx.triggered_id
-        context_type = str((timeline_context or {}).get("type") or "")
-        is_career_dashboard_surface = not timeline_context or context_type in ("ai-insight", "career-overview")
+        active_stage = _active_overlay_stage_name(timeline_context)
 
         queue = list(queue or [])
         updated_session = no_update
 
-        if not is_career_dashboard_surface:
+        if not active_stage:
             return [], queue, no_update
 
         # Handle dismiss click
@@ -3904,31 +4184,35 @@ def register_career_intelligence_callbacks(app):
                 dismissed = queue.pop(idx)
                 # Append dismissed signal to insight history
                 from datetime import datetime as _dt
+                signal_stage = str((dismissed or {}).get("stage") or active_stage or "").strip().lower()
+                player_id = str(getattr(current_user, "player_id", "") or "")
                 updated_session = dict(session_state or {})
                 history = list(updated_session.get("history", []))
                 entry = build_overlay_inbox_entry(dismissed, surfaced=True)
                 entry["timestamp"] = _dt.utcnow().isoformat()
-                entry["player_id"] = str(getattr(current_user, "player_id", "") or "")
-                entry["cta_context"]["evidence_key"] = resolve_career_surface_evidence_key(
-                    dismissed.get("evidence_key", "career_arc"),
-                    label=dismissed.get("title", ""),
-                )
+                entry["player_id"] = player_id
+                if signal_stage == "career":
+                    entry["cta_context"]["evidence_key"] = resolve_career_surface_evidence_key(
+                        dismissed.get("evidence_key", "career_arc"),
+                        label=dismissed.get("title", ""),
+                    )
                 entry["cta_context"]["novelty_key"] = str(dismissed.get("novelty_key") or "")
-                entry["cta_context"]["player_id"] = str(getattr(current_user, "player_id", "") or "")
+                entry["cta_context"]["player_id"] = player_id
                 updated_session["history"] = _upsert_stage_history_entry(
                     history,
                     entry,
-                    stage="career",
-                    player_id=str(getattr(current_user, "player_id", "") or ""),
+                    stage=signal_stage,
+                    player_id=player_id,
                 )
                 logger.info(
-                    "Career non_critical overlay dismissed signal_id=%s remaining=%s",
+                    "Stage non_critical overlay dismissed stage=%s signal_id=%s remaining=%s",
+                    signal_stage,
                     str(dismissed.get("signal_id") or ""),
                     len(queue),
                 )
 
         if not queue:
-            logger.info("Career non_critical overlay hidden queue_empty")
+            logger.info("Stage non_critical overlay hidden stage=%s reason=queue_empty", active_stage)
             return [], queue, updated_session
 
         # Render only the next queued card so the stage shows one visible
@@ -3939,7 +4223,8 @@ def register_career_intelligence_callbacks(app):
             cards.append(render_contextual_overlay(sig_data, signal_index=i))
 
         logger.info(
-            "Career non_critical overlay rendered signal_id=%s visible=%s queued=%s",
+            "Stage non_critical overlay rendered stage=%s signal_id=%s visible=%s queued=%s",
+            str((visible[0] or {}).get("stage") or active_stage or ""),
             str((visible[0] or {}).get("signal_id") or ""),
             len(visible),
             len(queue),
@@ -3958,9 +4243,7 @@ def register_career_intelligence_callbacks(app):
     )
     def gate_contextual_overlay_by_context(context, primary_data, session_state):
         """Hide contextual overlays outside the dashboard/career layer and while a critical alert is active."""
-        context_type = str((context or {}).get("type") or "")
-        is_career_dashboard_surface = not context or context_type in ("ai-insight", "career-overview")
-        if is_career_dashboard_surface:
+        if _active_overlay_stage_name(context):
             dismissed = bool((session_state or {}).get("t1_dismissed_this_session"))
             if primary_data and not dismissed:
                 return {"display": "none"}
@@ -4067,13 +4350,20 @@ def register_career_intelligence_callbacks(app):
         Output("stage-content", "children", allow_duplicate=True),
         Input("insight-session-state", "data"),
         State("timeline-context-store", "data"),
+        State("season-stage-analysis-store", "data"),
         prevent_initial_call=True,
     )
-    def refresh_stage_after_overlay_session_change(session_state, timeline_context):
+    def refresh_stage_after_overlay_session_change(session_state, timeline_context, season_stage_analysis):
         """Refresh the active season stage when overlay dismiss history changes."""
         if not timeline_context or str(timeline_context.get("type") or "") != "career":
             return no_update
-        return _render_stage_content_for_context_with_session(timeline_context, session_state)
+        return _render_stage_content_for_context_with_session(
+            timeline_context,
+            session_state,
+            season_stage_analysis,
+            None,
+            None,
+        )
 
     # ── Loading Color System: pre-flight clientside callbacks ────────────────
     # These fire before the server callbacks (no network round-trip) so the
