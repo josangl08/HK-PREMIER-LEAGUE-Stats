@@ -53,6 +53,7 @@ coverage.xml
 .pytest_cache/
 .pytest_cache/**
 cover/
+tests/
 
 # Translations
 *.mo
@@ -230,7 +231,6 @@ data/fixtures/fixtures.json
 
 # Team Media & Photos
 assets/team_media/*
-!assets/team_media/.gitkeep
 assets/team_jersey/
 assets/team_logos/
 assets/team_media/
@@ -257,7 +257,7 @@ AGENTS.md
 # Entornos virtuales personalizados
 venv_HKS/
 
-# Tests y documentación (ignorado temporalmente)
+# Tests y documentación
 tests/
 docs/
 openspec/
