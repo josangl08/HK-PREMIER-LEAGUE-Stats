@@ -40,6 +40,11 @@ Return STRICTLY a JSON object following this exact schema:
 {
   "name": "A catchy, short name for this design style (e.g., 'Neon Stadium', 'Classic Editorial')",
   "description": "A brief one-sentence overview of the vibe.",
+  "card_mode": "Classify this image as exactly one of: 'editorial_split' (if the image shows player performance stats integrated anywhere in the design — as numbers with labels, regardless of position or style) OR 'god_mode' (if the image has NO visible player stats, only the player photo, team badges, and match info).",
+  "stats_integration": {
+    "has_stats": true,
+    "layout_description": "Describe specifically HOW the stats are integrated: their position on the card (e.g. bottom strip, scattered corners, overlaid on player, vertical sidebar), their visual style (e.g. large value above small label, inline with separators, inside colored boxes), color treatment, and typography scale relative to the headline."
+  },
   "visual_identity": {
     "typography": {
       "primary": "Main fonts used (e.g., Impact, Helvetica Bold)",
@@ -65,6 +70,8 @@ Rules:
 1. Return ONLY the JSON. No markdown blocks, no preamble.
 2. Be technically precise with color descriptions and typography.
 3. Identify the core 'DNA' that makes this specific design look professional.
+4. For card_mode: if there are ANY numbers that appear to be player stats (goals, rating, passes, minutes, etc.) shown with labels in the image — even if small or creatively placed — classify as 'editorial_split'. Only use 'god_mode' if there are truly zero performance stats visible.
+5. For stats_integration: if card_mode is 'god_mode', set has_stats to false and layout_description to 'none'.
 """
 
 # --- Utility Functions ---

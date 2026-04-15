@@ -8,7 +8,9 @@ from utils.postmatch_stage.postmatch_intelligence import (
     POSTMATCH_OVERLAY_CANDIDATES_ARTIFACT,
     POSTMATCH_PERFORMANCE_CONTEXT_ARTIFACT,
     POSTMATCH_REFLECTION_PAYLOADS_ARTIFACT,
+    POSTMATCH_STAGE_ANALYSIS_ARTIFACT,
     build_postmatch_artifact_payloads,
+    build_postmatch_stage_analysis_payload,
     build_postmatch_artifact_scope,
 )
 
@@ -19,6 +21,8 @@ __all__ = [
     "POSTMATCH_OVERLAY_CANDIDATES_ARTIFACT",
     "POSTMATCH_PERFORMANCE_CONTEXT_ARTIFACT",
     "POSTMATCH_REFLECTION_PAYLOADS_ARTIFACT",
+    "POSTMATCH_STAGE_ANALYSIS_ARTIFACT",
     "build_postmatch_artifact_payloads",
+    "build_postmatch_stage_analysis_payload",
     "build_postmatch_artifact_scope",
 ]

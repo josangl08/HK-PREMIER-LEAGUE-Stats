@@ -75,8 +75,10 @@ app.title = "Hong Kong Premier League Dashboard"
 server = app.server
 
 # Cache-Control headers for static assets served from /assets/.
-# Assets in Dash don't use hash-based fingerprinting by default, so we use
-# max-age=3600 (1h) without immutable — safe for active development.
+# In active development this app changes clientside callbacks frequently; if the
+# browser keeps an older JS asset while Python has already registered new
+# ClientsideFunction names, Dash throws "undefined is not an object" errors.
+# Prefer no-store here so the browser always reloads the latest assets.
 @server.after_request
 def add_cache_control_headers(response):
     path = getattr(request, 'path', '')
@@ -89,7 +91,9 @@ def add_cache_control_headers(response):
                 del response.headers['Cache-Control']
             except KeyError:
                 pass
-            response.headers['Cache-Control'] = 'public, max-age=3600'
+            response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+            response.headers['Pragma'] = 'no-cache'
+            response.headers['Expires'] = '0'
     return response
 
 # Configuración de Flask

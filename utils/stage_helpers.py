@@ -208,6 +208,16 @@ def _build_prematch_overlay_surface(
 def _build_postmatch_overlay_surface(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Build postmatch shared overlay surface from stage discoveries when available."""
     try:
+        if payload.get("_postmatch_ai_pending"):
+            return {
+                "stage": "postmatch",
+                "candidates": [],
+                "candidate_count": 0,
+                "primary_candidate": None,
+                "visible_primary": None,
+                "deferred_candidates": [],
+                "inbox_entries": [],
+            }
         from utils.postmatch_stage.postmatch_intelligence import (
             build_postmatch_match_context_payload,
             build_postmatch_overlay_candidates_payload,

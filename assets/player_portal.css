@@ -2873,6 +2873,21 @@ Handles sliding viewport, full-width header, year nav in timeline column, Lucide
     height: 100%;
 }
 
+.stage-overlay-contextual-floating--micro {
+    width: 220px;
+}
+
+.stage-overlay-contextual-floating--micro .stage-overlay-contextual-floating__inner {
+    padding: 12px;
+    background: rgba(11, 19, 31, 0.94);
+}
+
+.stage-overlay-contextual-floating--micro p {
+    font-size: 0.73rem;
+    line-height: 1.4;
+    margin: 0 0 8px 0;
+}
+
 .stage-overlay-contextual-floating__dismiss {
     background: transparent;
     border: none;

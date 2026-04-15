@@ -10,9 +10,6 @@ CAREER_PHASE_CONTEXT_ARTIFACT = "career_phase_context"
 CAREER_SIGNALS_CONTEXT_ARTIFACT = "career_signals_context"
 CAREER_PRIORITIES_CONTEXT_ARTIFACT = "career_priorities_context"
 CAREER_DASHBOARD_BRIEF_ARTIFACT = "career_dashboard_brief"
-CAREER_OVERLAY_CANDIDATES_ARTIFACT = "career_overlay_candidates"
-
-
 @dataclass(frozen=True)
 class CareerToolSpec:
     name: str
@@ -40,11 +37,6 @@ _CAREER_TOOL_SPECS = (
         name="dashboard_brief",
         description="Structured career thesis, key signals, levers, and outlook used by the dashboard.",
         artifact_dependencies=(CAREER_DASHBOARD_BRIEF_ARTIFACT,),
-    ),
-    CareerToolSpec(
-        name="overlay_candidates",
-        description="Current career overlay candidates, including urgency and evidence linkage for surfaced findings.",
-        artifact_dependencies=(CAREER_OVERLAY_CANDIDATES_ARTIFACT,),
     ),
     CareerToolSpec(
         name="session_memory",
@@ -89,8 +81,6 @@ def run_career_tool(
         return _artifact_payload(artifacts, CAREER_PRIORITIES_CONTEXT_ARTIFACT)
     if tool_name == "dashboard_brief":
         return _artifact_payload(artifacts, CAREER_DASHBOARD_BRIEF_ARTIFACT)
-    if tool_name == "overlay_candidates":
-        return _artifact_payload(artifacts, CAREER_OVERLAY_CANDIDATES_ARTIFACT)
     if tool_name == "session_memory":
         return dict(session_memory or {})
     return {}

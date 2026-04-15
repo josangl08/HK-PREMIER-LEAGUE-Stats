@@ -8,6 +8,7 @@ import logging
 import os
 import time
 import random
+import uuid
 from pathlib import Path
 from datetime import datetime
 from typing import TypedDict, List, Optional, Dict, Any, Callable
@@ -24,6 +25,21 @@ from utils.image_processing import get_player_album, get_team_assets
 from utils.runtime_storage import ensure_player_cards_dir
 
 logger = logging.getLogger(__name__)
+
+# Module-level registry for on_progress callbacks (keyed by run_id).
+# Keeps non-serializable callables out of LangGraph state.
+_PROGRESS_CALLBACKS: Dict[str, Callable] = {}
+
+
+def _emit_progress(run_id: str, progress: Dict[str, Any]) -> None:
+    """Call the registered on_progress callback for a given run, if any."""
+    cb = _PROGRESS_CALLBACKS.get(run_id)
+    if cb:
+        try:
+            cb(progress)
+        except Exception:
+            pass
+
 
 # --- State Definition ---
 class AgentState(TypedDict):
@@ -46,7 +62,7 @@ class AgentState(TypedDict):
     caption: Optional[str]
     agency_status: str
     progress: Dict[str, Any]
-    on_progress: Optional[Callable[[Dict[str, Any]], None]]
+    _run_id: str  # key into _PROGRESS_CALLBACKS registry (keeps callable out of serializable state)
     error: Optional[str]
 
 
@@ -158,20 +174,28 @@ def _normalize_editorial_decision(decision: Any, match_payload: Optional[Dict[st
 
 
 def _build_editorial_brief(editorial_decision: Dict[str, Any]) -> str:
-    stats_text = ", ".join(
-        f"{item['label']}: {item['value']}" for item in editorial_decision.get("selected_stats", [])
-    ) or "No supporting stats selected."
+    """Builds the design brief injected into the AI prompt.
+    headline = player name (dominant card text).
+    subheadline = competition/opponent context.
+    caption = narrative angle (social media only, NOT rendered on the card).
+    """
+    lines = ["PERFORMANCE BRIEF:"]
+    lines.append(f"- PLAYER NAME (dominant card text): {editorial_decision.get('headline', '')}")
+    lines.append(f"- MATCH CONTEXT (secondary text): {editorial_decision.get('subheadline', '')}")
+    selected = editorial_decision.get("selected_stats", [])
+    if selected:
+        lines.append("- STATS TO RENDER (ordered by importance, follow reference image for style):")
+        for stat in selected:
+            lines.append(f"    #{stat.get('priority', '?')}  {stat['label']}  →  {stat['value']}")
+    else:
+        lines.append("- STATS: none")
     visual = editorial_decision.get("supporting_visual") or {}
-    visual_type = str(visual.get("type") or "none")
-    visual_reason = str(visual.get("reason") or "No supporting visual.")
-    return (
-        "EDITORIAL BRIEF:\n"
-        f"- STORY ANGLE: {editorial_decision.get('story_angle', 'consistent_performer')}\n"
-        f"- HEADLINE: {editorial_decision.get('headline', '')}\n"
-        f"- SUBHEADLINE: {editorial_decision.get('subheadline', '')}\n"
-        f"- PRIORITY STATS: {stats_text}\n"
-        f"- SUPPORTING VISUAL: {visual_type} ({visual_reason})\n"
-    )
+    if visual.get("type", "none") != "none":
+        lines.append(f"- SUPPORTING VISUAL: {visual.get('type')}")
+    # Caption is for social media, explicitly NOT for the card design
+    if editorial_decision.get("caption"):
+        lines.append(f"- CAPTION (social media only, do NOT render on card): {editorial_decision['caption']}")
+    return "\n".join(lines)
 
 # --- Node 1: Match Intelligence Collector ---
 def match_intelligence_node(state: AgentState) -> AgentState:
@@ -183,8 +207,7 @@ def match_intelligence_node(state: AgentState) -> AgentState:
         "bg": "linear-gradient(135deg, rgba(10, 10, 15, 0.95) 0%, rgba(0, 100, 255, 0.3) 100%)"
     }
     state["progress"] = p
-    if state.get("on_progress"):
-        state["on_progress"](p)
+    _emit_progress(state.get("_run_id", ""), p)
     
     # Delay to allow user to read the phase
     time.sleep(5)
@@ -221,12 +244,13 @@ def match_intelligence_node(state: AgentState) -> AgentState:
         "away": {"name": away_raw, "colors": get_team_colors(away_norm)},
         "venue": match.get("venue") or match.get("stadium") or "Stadium",
         "date": date_str,
-        "competition": get_competition_display_name(match.get("competition", "HK Premier League")),
+        "competition": get_competition_display_name(match.get("competition", "HK Premier League"), long_form=True),
         "result": match.get("result"),
         "status": status,
         "position": match.get("position") or basic_info.get("position_primary") or state.get("player_profile", {}).get("position"),
         "intelligence_meta": match.get("intelligence_meta") or {},
         "player_stats": match.get("player_stats") or {},
+        "competition_logo": match.get("competition_logo"),
     }
     
     # 4. Add Performance Stats for Post-Game
@@ -257,8 +281,7 @@ def performance_editor_node(state: AgentState) -> AgentState:
         "bg": "linear-gradient(135deg, rgba(10, 10, 15, 0.95) 0%, rgba(200, 0, 255, 0.3) 100%)"
     }
     state["progress"] = p
-    if state.get("on_progress"):
-        state["on_progress"](p)
+    _emit_progress(state.get("_run_id", ""), p)
     
     # Delay to allow user to read the phase
     time.sleep(5)
@@ -266,9 +289,22 @@ def performance_editor_node(state: AgentState) -> AgentState:
     intel = state.get("match_intelligence") or {}
 
     if not state.get("is_post_game"):
+        _pre_player = str((state.get("player_profile") or {}).get("name") or "Player")
+        _pre_comp = str(intel.get("competition") or "").strip()
+        _pre_home = str((intel.get("home") or {}).get("name") or "").strip()
+        _pre_away = str((intel.get("away") or {}).get("name") or "").strip()
+        _pre_opponent = ""
+        _pre_team = str((state.get("match_payload") or {}).get("team") or "").strip()
+        if _pre_team:
+            _pre_opponent = _pre_away if _pre_home == _pre_team else _pre_home
+        _pre_subheadline_parts = []
+        if _pre_opponent:
+            _pre_subheadline_parts.append(f"vs {_pre_opponent}")
+        if _pre_comp:
+            _pre_subheadline_parts.append(_pre_comp)
         decision = _build_editorial_decision(
-            headline="MATCHDAY",
-            subheadline=str(intel.get("competition") or "").strip(),
+            headline=_pre_player,
+            subheadline=" · ".join(_pre_subheadline_parts[:2]),
             story_angle="consistent_performer",
             selected_stats=[],
             supporting_visual={"type": "none", "reason": "Pre-match cards do not use performance visuals."},
@@ -315,16 +351,17 @@ def performance_editor_node(state: AgentState) -> AgentState:
     saves = _safe_int(match_stats.get("saves"))
     pass_pct = 0.0
     total_pass = _safe_float(match_stats.get("totalPass"))
-    accurate_passes = _safe_float(match_stats.get("accuratePasses"))
+    accurate_passes = _safe_float(match_stats.get("accuratePass"))  # Sofascore key (no trailing 's')
     if total_pass > 0:
         pass_pct = (accurate_passes / total_pass) * 100.0
-    duel_total = _safe_float(match_stats.get("duelTotal"))
     duel_won = _safe_float(match_stats.get("duelWon"))
+    duel_lost = _safe_float(match_stats.get("duelLost"))
+    duel_total = duel_won + duel_lost  # Sofascore has no duelTotal key
     duel_pct = (duel_won / duel_total) * 100.0 if duel_total > 0 else 0.0
-    dribbles_total = _safe_float(match_stats.get("totalDribbles"))
-    dribbles_success = _safe_float(match_stats.get("successfulDribbles"))
-    tackles = _safe_int(match_stats.get("tackles"))
-    interceptions = _safe_int(match_stats.get("interceptions"))
+    dribbles_total = _safe_float(match_stats.get("totalContest"))       # Sofascore key
+    dribbles_success = _safe_float(match_stats.get("wonContest"))       # Sofascore key
+    tackles = _safe_int(match_stats.get("wonTackle"))                   # Sofascore key
+    interceptions = _safe_int(match_stats.get("ballRecovery"))          # Sofascore key (closest equiv)
     recent_ratings = stats.get("recent_ratings") or []
     score = str(stats.get("score") or "").strip()
     position = str(intel.get("position") or "").lower()
@@ -335,7 +372,7 @@ def performance_editor_node(state: AgentState) -> AgentState:
     elif goals + assists >= 2 or goals >= 2:
         story_angle = "match_winner"
         headline = "Decisive in the final third"
-    elif assists >= 1 or _safe_int(match_stats.get("keyPasses")) >= 3:
+    elif assists >= 1 or _safe_int(match_stats.get("keyPass")) >= 3:  # Sofascore key (no trailing 's')
         story_angle = "creative_engine"
         headline = "Creative engine on the day"
     elif tackles + interceptions >= 5 or duel_pct >= 65:
@@ -348,21 +385,43 @@ def performance_editor_node(state: AgentState) -> AgentState:
         story_angle = "consistent_performer"
         headline = "Strong all-round performance"
 
+    # Subheadline: competition + opponent context (no duplicate score formats)
+    competition_short = str(intel.get("competition") or "").strip()
+    opponent_name = str(
+        intel.get("away", {}).get("name") or intel.get("home", {}).get("name") or ""
+    ).strip()
+    match_team = str((state.get("match_payload") or {}).get("team") or "").strip()
+    # Determine actual opponent (the team the player is NOT on)
+    if match_team:
+        if intel["home"]["name"] == match_team:
+            opponent_name = intel["away"]["name"]
+        elif intel["away"]["name"] == match_team:
+            opponent_name = intel["home"]["name"]
     subheadline_parts = []
-    if score:
-        subheadline_parts.append(score)
-    result = str(intel.get("result") or "").strip()
-    if result:
-        subheadline_parts.append(result)
-    if minutes:
-        subheadline_parts.append(f"{minutes}'")
-    subheadline = " · ".join(subheadline_parts[:3])
+    if opponent_name:
+        subheadline_parts.append(f"vs {opponent_name}")
+    if competition_short:
+        subheadline_parts.append(competition_short)
+    subheadline = " · ".join(subheadline_parts[:2])
+
+    # Short display labels for the AI design prompt (match UI preview labels)
+    _DISPLAY_LABELS = {
+        "Goals": "GOALS", "Assists": "ASSISTS", "Rating": "RATING",
+        "Minutes": "MINS", "Pass %": "PASS %", "Duels Won %": "DUELS %",
+        "Dribbles": "DRIBBLES", "Tackles": "TACKLES",
+        "Interceptions": "INTERC.", "Saves": "SAVES",
+        "Yellow Cards": "YELLOWS", "Red Cards": "RED CARD",
+    }
 
     candidates: List[Dict[str, Any]] = []
     def add_stat(label: str, value: str, score_weight: float):
         if value in {"0", "0%", "0.0", "0.0%", "—", ""}:
             return
-        candidates.append({"label": label, "value": value, "score": score_weight})
+        candidates.append({
+            "label": _DISPLAY_LABELS.get(label, label.upper()),
+            "value": value,
+            "score": score_weight,
+        })
 
     add_stat("Goals", _format_stat_value(goals), 120 + goals * 10)
     add_stat("Assists", _format_stat_value(assists), 110 + assists * 8)
@@ -392,7 +451,8 @@ def performance_editor_node(state: AgentState) -> AgentState:
         if len(selected_stats) >= 5:
             break
     if len(selected_stats) < 4:
-        for label, value in [("Minutes", _format_stat_value(minutes, "minutes")), ("Rating", _format_stat_value(rating))]:
+        # Use display labels (same as add_stat) to avoid duplicate detection failure
+        for label, value in [("MINS", _format_stat_value(minutes, "minutes")), ("RATING", _format_stat_value(rating))]:
             if label not in seen_labels:
                 selected_stats.append({"label": label, "value": value, "priority": len(selected_stats) + 1})
                 seen_labels.add(label)
@@ -416,20 +476,27 @@ def performance_editor_node(state: AgentState) -> AgentState:
         visual_type = "radar"
         visual_reason = "Goalkeeper cards read better with a compact performance summary."
 
+    # Narrative captions (for social media, NOT rendered on card)
+    caption_map = {
+        "match_winner": "Match-winning impact" if goals >= 2 else "Decisive attacking display",
+        "goalkeeper_hero": "Big saves, big presence",
+        "creative_engine": "Creative engine on the day",
+        "defensive_wall": "Defensive control all match",
+        "midfield_control": "Controlled the rhythm",
+        "consistent_performer": "Strong all-round performance",
+    }
+    caption = caption_map.get(story_angle, headline)
+
+    # headline = player name (dominant card text); caption is for social media only
     decision = _build_editorial_decision(
-        headline=headline,
+        headline=player_name,
         subheadline=subheadline,
         story_angle=story_angle,
         selected_stats=selected_stats,
         supporting_visual={"type": visual_type, "reason": visual_reason},
         confidence=0.82 if selected_stats else 0.55,
     )
-    if story_angle == "match_winner" and goals:
-        decision["headline"] = "Match-winning impact" if goals >= 2 else "Decisive attacking display"
-    if story_angle == "goalkeeper_hero":
-        decision["headline"] = "Big saves, big presence"
-    if decision["headline"].lower().startswith(player_name.lower()):
-        decision["headline"] = decision["headline"].replace(player_name, "").strip() or decision["headline"]
+    decision["caption"] = caption  # narrative for social media captions
     return {**state, "editorial_decision": decision}
 
 # --- Node 2: Art Director Strategist ---
@@ -442,8 +509,7 @@ def art_director_node(state: AgentState) -> AgentState:
         "bg": "linear-gradient(135deg, rgba(10, 10, 15, 0.95) 0%, rgba(0, 255, 128, 0.3) 100%)"
     }
     state["progress"] = p
-    if state.get("on_progress"):
-        state["on_progress"](p)
+    _emit_progress(state.get("_run_id", ""), p)
 
     intel = state["match_intelligence"]
     is_post = state["is_post_game"]
@@ -457,26 +523,42 @@ def art_director_node(state: AgentState) -> AgentState:
     # 1. Select Trend
     trend_dir = Path("assets/design_trends")
     available_trends = list(trend_dir.glob("*.json"))
-    
+
     exclude = state.get("exclude_trends") or []
-    # Filter out excluded trends by filename stem
     filtered_trends = [t for t in available_trends if t.stem not in exclude]
-    # If we excluded everything, fall back to all available to avoid crash
     if not filtered_trends:
         filtered_trends = available_trends
 
-    # Competition-based priority
-    if intel["competition"] in ["AFC", "Cup"]:
-        trend_path = trend_dir / "minimal_luxury.json"
-        # If minimal_luxury was excluded but we forced it, it's okay for high-tier comps,
-        # but we could also try to find an alternative filtered if it was excluded.
+    # Partition trends by card_mode so post-match uses editorial_split references
+    # and pre-match uses god_mode references (or any unclassified trend as fallback)
+    post_pool: List[Path] = []
+    pre_pool: List[Path] = []
+    for t in filtered_trends:
+        try:
+            with open(t, "r") as f:
+                _meta = json.load(f)
+            if _meta.get("card_mode") == "editorial_split":
+                post_pool.append(t)
+            else:
+                pre_pool.append(t)
+        except Exception:
+            pre_pool.append(t)
+
+    card_pool = post_pool if is_post else pre_pool
+    if not card_pool:
+        card_pool = filtered_trends  # graceful fallback if no tagged trends yet
+
+    # Competition-based priority overrides the pool for high-tier competitions
+    _comp_priority = trend_dir / "minimal_luxury.json"
+    if intel["competition"] in ["AFC", "Cup"] and _comp_priority.exists():
+        trend_path = _comp_priority
     else:
-        trend_path = random.choice(filtered_trends) if filtered_trends else trend_dir / "urban_gritty.json"
-    
+        trend_path = random.choice(card_pool)
+
     try:
         with open(trend_path, "r") as f:
             trend = json.load(f)
-    except:
+    except Exception:
         trend = {"name": "Elite Sports"}
 
     # 2. Extract specific visual identity rules
@@ -488,78 +570,71 @@ def art_director_node(state: AgentState) -> AgentState:
     # 3. Select Archetype
     archetype = "Archetype B: Editorial Split" if is_post else "Archetype A: God Mode (Centered Action)"
     
-    # 4. Build Structured Prompt (Inverse Deconstruction Strategy)
-    # Determine post-match score for mandatory data
+    # 4. Build Prompt
     _post_score = ""
     if is_post:
         _s = intel.get("stats") or {}
-        _post_score = str(_s.get("score") or intel.get("result") or "").strip()
+        _post_score = str(_s.get("score") or "").strip()
 
-    prompt = f"""
-    Create a professional matchday graphic for Instagram ({fmt} format).
-    STYLE TARGET: {trend['name']}
+    player_name = str((state.get("player_profile") or {}).get("name") or "Player")
+    _has_comp_logo = bool(intel.get("competition_logo"))
+    _comp_label = intel['competition']
+    _comp_badge_rule = (
+        f"COMPETITION BADGE provided: use the EXACT image labelled '--- COMPETITION BADGE ---'. "
+        f"This is the {_comp_label} badge. DO NOT substitute with any other league's badge "
+        f"(e.g. do NOT use the English Premier League logo)."
+        if _has_comp_logo else
+        f"No badge image provided. Render '{_comp_label}' as small text."
+    )
 
-    CRITICAL STYLE DECONSTRUCTION:
-    - BACKGROUND SOURCE: You have been provided a VISUAL STYLE REFERENCE IMAGE. REPLICATE its background style, textures, and atmosphere exactly. DO NOT invent your own background (no galaxies, no abstract gradients, no space imagery). Stay faithful to the reference.
-    - THEMATIC GUIDE (JSON): Use the provided visual identity rules for colors, textures, and typography style.
-    - STRUCTURAL GUIDE (REFERENCE IMAGE): Use the provided VISUAL STYLE REFERENCE IMAGE strictly as a blueprint for composition, element scaling, and spatial hierarchy.
-    - ATMOSPHERE: {elements.get('background', 'Professional sports stadium.')}. Focus on high-end realism.
-    - TYPOGRAPHY: Use {typo.get('primary', 'Impact')}-style fonts.
-    - COLOR RULES: Base is {colors.get('base', 'Dark')}. Internal palette HEX CODES: {', '.join(colors.get('accents', []))}. Use for lighting and highlights ONLY. DO NOT render hex strings as visible text.
-    """
-
-    prompt += f"""
-    MANDATORY DATA TO RENDER:
-    - TEAM A: {intel['home']['name']} (Home)
-    - TEAM B: {intel['away']['name']} (Away)
-    - DATE: {intel['date']}
-    - VENUE: {intel['venue']}
-    {f"- MATCH RESULT: {_post_score}" if _post_score else ""}
-
-    HIERARCHY & SCALE RULES (CRITICAL):
-    1. ANALYZE the VISUAL STYLE REFERENCE IMAGE for the correct layout, element sizes, and visual hierarchy.
-    2. PLAYER PHOTO: Primary focus. Scale and weight as seen in the reference.
-    3. SECONDARY ELEMENTS: Date, Venue, and Team Badges must be small, tasteful metadata — proportioned as in the reference.
-    4. NO BRACKETS/PARENTHESES around team roles. Use clean bold typography only.
-    5. NO DATA LEAK: Never render internal labels like "(Role: Home Team)" literally.
-    """
+    _matchup = f"{intel['home']['name']} {_post_score} {intel['away']['name']}" if _post_score else f"{intel['home']['name']} vs {intel['away']['name']}"
+    prompt = (
+        f"Professional football card for Instagram ({fmt}). Style: {trend['name']}.\n\n"
+        f"VISUAL REFERENCE: Replicate background, atmosphere ({elements.get('background','dark stadium')}), "
+        f"composition and scale EXACTLY from the reference image. DO NOT invent backgrounds.\n"
+        f"Typography: {typo.get('primary','Impact')}-style. "
+        f"Accent colors (never as background fill): {', '.join(colors.get('accents',[]))}.\n\n"
+        f"LAYOUT ELEMENTS — RENDER ALL:\n"
+        f"  PLAYER NAME: '{player_name}' — largest, most dominant text on the card.\n"
+        f"  MATCHUP ROW: [HOME TEAM BADGE] {_matchup} [AWAY TEAM BADGE]\n"
+        f"    → The two team badges flank the score (or 'vs') in the center. Compact secondary row.\n"
+        f"  COMPETITION: '{_comp_label}' — {_comp_badge_rule}\n"
+        f"    → Competition badge or text: small, placed in a corner or alongside the competition name.\n"
+        f"  DATE: '{intel['date']}' — integrate with design intent (bottom strip, corner tag, or inline with match info).\n"
+    )
 
     if is_post:
         s = intel.get('stats') or {}
         story_angle = editorial_decision.get("story_angle", "")
         if story_angle == "match_result":
-            # Player did not participate — result is the sole protagonist
-            prompt += f"\nCARD TYPE: POST-MATCH RESULT CARD. Focus on the team result, not individual stats."
-            if _post_score:
-                prompt += f"\nSCORE (DOMINANT ELEMENT): Display '{_post_score}' as the largest, most prominent text on the card."
-            prompt += "\nPLAYER CONTEXT: Player was not in the squad for this match."
-        else:
-            prompt += f"\nCARD TYPE: POST-MATCH PERFORMANCE CARD."
-            if _post_score:
-                prompt += f"\nFINAL SCORE: {_post_score} — render this prominently below the headline."
-            if s.get("started") is True:
-                prompt += "\nPLAYER STARTED the match."
-            elif s.get("started") is False:
-                prompt += "\nPLAYER CAME ON AS SUBSTITUTE."
-            prompt += "\n" + _build_editorial_brief(editorial_decision)
             prompt += (
-                "\nSTATS PANEL RULES (MANDATORY):"
-                "\n- Render ONLY the stats listed in PRIORITY STATS above."
-                "\n- Each stat MUST show its LABEL and VALUE together (e.g. 'Goals  1', 'Rating  7.5', 'Minutes  80'')."
-                "\n- DO NOT show numbers without labels. DO NOT invent stats not listed above."
-                "\n- Keep the stats panel secondary to the player photo and headline."
-                "\n- If supporting visual is 'none', do not add charts or graphs."
+                f"\nCARD TYPE: POST-MATCH RESULT — player was not in the squad.\n"
+                + (f"Display SCORE '{_post_score}' as the largest text element.\n" if _post_score else "")
+            )
+        else:
+            started_txt = ""
+            if s.get("started") is True:
+                started_txt = " (started)"
+            elif s.get("started") is False:
+                started_txt = " (substitute)"
+            prompt += f"\nCARD TYPE: POST-MATCH PERFORMANCE{started_txt}.\n"
+            prompt += _build_editorial_brief(editorial_decision)
+            prompt += (
+                "\nSTATS RULE: Integrate the stats above using the style shown in the "
+                "VISUAL STYLE REFERENCE IMAGE (position, size, typography). "
+                "Always render LABEL + VALUE together. Never invent stats.\n"
             )
     else:
-        prompt += "\nCARD TYPE: PRE-MATCH. Hero text: 'MATCHDAY'."
+        prompt += f"\nCARD TYPE: PRE-MATCH. Upcoming fixture — no stats to render.\n"
 
-    prompt += f"""
-    ULTRA-STRICT FIDELITY RULES:
-    1. PLAYER PHOTO: The provided image is a clean cutout. PRESERVE the player's face, body, and colors exactly. DO NOT regenerate or distort him.
-    2. TEAM BADGES: USE THE EXACT images provided as HOME TEAM BADGE and AWAY TEAM BADGE. Do not replace with generic logos.
-    3. BACKGROUND: Follow the VISUAL STYLE REFERENCE IMAGE. No space imagery, no galaxies, no abstract sci-fi effects.
-    4. REALISM: Elite professional football marketing aesthetic only.
-    """
+    prompt += (
+        "\nFIDELITY RULES (ABSOLUTE):\n"
+        "1. PLAYER PHOTO: preserve face/body/colors exactly — DO NOT regenerate.\n"
+        "2. TEAM BADGES: use the EXACT HOME and AWAY badge images — no generic replacements.\n"
+        "3. COMPETITION BADGE: use the EXACT competition badge image — DO NOT use a different "
+        "competition's logo (e.g. never use the English Premier League badge for HK competitions).\n"
+        "4. BACKGROUND: follow the reference image — no sci-fi, galaxies or abstract effects.\n"
+    )
 
     # Generate Social Media Caption
     from ai_models.agent_tools import generate_caption
@@ -576,7 +651,6 @@ def art_director_node(state: AgentState) -> AgentState:
             "trend": trend["name"],
             "trend_id": trend_path.stem,
             "archetype": archetype,
-            "editorial_brief": editorial_decision,
         },
     }
 
@@ -590,8 +664,7 @@ def design_studio_node(state: AgentState) -> AgentState:
         "bg": "linear-gradient(135deg, rgba(10, 10, 15, 0.95) 0%, rgba(255, 150, 0, 0.3) 100%)"
     }
     state["progress"] = p
-    if state.get("on_progress"):
-        state["on_progress"](p)
+    _emit_progress(state.get("_run_id", ""), p)
 
     t0 = time.time()
     match = state["match_payload"]
@@ -625,6 +698,15 @@ def design_studio_node(state: AgentState) -> AgentState:
             with open(logo_path, "rb") as f:
                 parts.append(types.Part.from_bytes(data=f.read(), mime_type="image/png"))
     
+    # B2. Competition Badge
+    comp_logo_path = state.get("match_intelligence", {}).get("competition_logo")
+    if comp_logo_path:
+        local_comp = comp_logo_path.lstrip("/")
+        if os.path.exists(local_comp):
+            parts.append("--- COMPETITION BADGE ---")
+            with open(local_comp, "rb") as f:
+                parts.append(types.Part.from_bytes(data=f.read(), mime_type="image/png"))
+
     # C. Design Reference (Try to find a matching reference image for the trend)
     ref_dir = Path("assets/design_references")
     # Priority: image matching the trend stem (e.g. urban_gritty.jpg)
@@ -682,9 +764,8 @@ def validator_node(state: AgentState) -> AgentState:
             "bg": "linear-gradient(135deg, rgba(10, 10, 15, 0.95) 0%, rgba(0, 255, 0, 0.3) 100%)"
         }
         state["progress"] = p
-        if state.get("on_progress"):
-            state["on_progress"](p)
-        
+        _emit_progress(state.get("_run_id", ""), p)
+
         # Delay to allow user to see the success state
         time.sleep(5)
         return state
@@ -697,8 +778,7 @@ def validator_node(state: AgentState) -> AgentState:
         "bg": "linear-gradient(135deg, rgba(10, 10, 15, 0.95) 0%, rgba(255, 0, 0, 0.4) 100%)"
     }
     state["progress"] = p
-    if state.get("on_progress"):
-        state["on_progress"](p)
+    _emit_progress(state.get("_run_id", ""), p)
     try:
         from utils.card_compositor import compose_precision_card
         match = state["match_payload"]
@@ -742,6 +822,12 @@ def run_card_design_agent(match_payload: Dict, player_profile: Dict, card_format
 
     graph = builder.compile()
 
+    # Register the on_progress callable in the module-level registry (not in state)
+    # so LangGraph can serialize state cleanly for tracing.
+    run_id = str(uuid.uuid4())
+    if on_progress:
+        _PROGRESS_CALLBACKS[run_id] = on_progress
+
     initial_state = {
         "match_payload": match_payload,
         "player_profile": player_profile,
@@ -749,7 +835,7 @@ def run_card_design_agent(match_payload: Dict, player_profile: Dict, card_format
         "format": card_format,
         "forced_stats": forced_stats,
         "exclude_trends": exclude_trends or [],
-        "editorial_decision": _default_editorial_decision(match_payload, player_profile),
+        "editorial_decision": {},  # populated by performance_editor_node
         "generated_card_path": None,
         "caption": None,
         "agency_status": "Starting...",
@@ -759,9 +845,13 @@ def run_card_design_agent(match_payload: Dict, player_profile: Dict, card_format
             "icon": "bi bi-cpu",
             "bg": "rgba(10, 10, 15, 0.95)"
         },
-        "on_progress": on_progress,
+        "_run_id": run_id,
         "error": None
     }
-    
-    final_state = graph.invoke(initial_state)
+
+    try:
+        final_state = graph.invoke(initial_state)
+    finally:
+        _PROGRESS_CALLBACKS.pop(run_id, None)
+
     return final_state

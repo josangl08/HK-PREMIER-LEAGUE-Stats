@@ -1621,13 +1621,57 @@ def _build_template_library_ui(player_id: str) -> list:
     return [html.P("Saved styles.", className="text-muted small")]
 
 
+_STAT_DISPLAY_LABELS = {
+    "totalPass": "Total Passes",
+    "accuratePass": "Accurate Passes",
+    "keyPass": "Key Passes",
+    "goalAssist": "Assists",
+    "duelWon": "Duels Won",
+    "duelLost": "Duels Lost",
+    "wonTackle": "Tackles Won",
+    "totalTackle": "Tackles",
+    "wonContest": "Dribbles Won",
+    "totalContest": "Dribbles Attempted",
+    "ballRecovery": "Ball Recoveries",
+    "totalShots": "Total Shots",
+    "onTargetScoringAttempt": "Shots on Target",
+    "shotOffTarget": "Shots off Target",
+    "blockedScoringAttempt": "Shots Blocked",
+    "bigChanceCreated": "Big Chances Created",
+    "totalCross": "Crosses",
+    "accurateLongBalls": "Accurate Long Balls",
+    "totalLongBalls": "Long Balls",
+    "aerialWon": "Aerials Won",
+    "aerialLost": "Aerials Lost",
+    "touches": "Touches",
+    "minutesPlayed": "Minutes Played",
+    "fouls": "Fouls",
+    "wasFouled": "Times Fouled",
+    "dispossessed": "Dispossessed",
+    "totalClearance": "Clearances",
+    "outfielderBlock": "Blocks",
+    "possessionLostCtrl": "Possession Lost",
+    "rating": "Rating",
+}
+
+
+def _camel_to_label(key: str) -> str:
+    """Convert camelCase Sofascore key to a human-readable label."""
+    import re
+    if key in _STAT_DISPLAY_LABELS:
+        return _STAT_DISPLAY_LABELS[key]
+    # Insert space before uppercase letters and title-case the result
+    spaced = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", key)
+    return spaced.title()
+
+
 def _get_available_stats_options(milestones_data, milestone_id):
     """Extracts all performance stats for the dropdown."""
     payload = _get_match_payload(milestone_id, milestones_data)
     if not payload:
         return []
 
-    # 1. Main high-level stats
+    # 1. Main high-level stats (always first)
     stats_dict = {
         "Goals": payload.get("goals", 0),
         "Assists": payload.get("assists", 0),
@@ -1635,18 +1679,22 @@ def _get_available_stats_options(milestones_data, milestone_id):
         "Minutes": f"{payload.get('minutes_played', 0)}'",
     }
 
-    # 2. Add Match Stats sub-dict
+    # 2. Add Match Stats sub-dict with readable labels
     match_stats = payload.get("match_stats") or {}
+    skip_keys = {"ratingVersions", "statisticsType", "passValueNormalized",
+                 "dribbleValueNormalized", "defensiveValueNormalized", "shotValueNormalized",
+                 "rating", "minutesPlayed", "goalAssist"}  # already covered above or internal
     for k, v in match_stats.items():
-        # Human friendly labels
-        label = k.replace("_", " ").title()
+        if k in skip_keys:
+            continue
+        label = _camel_to_label(k)
         if label not in stats_dict:
             stats_dict[label] = v
 
     options = []
     for label, val in stats_dict.items():
-        if val in [0, "0", "0'", "—", None]:
-            continue  # Hide empty
+        if val in [0, "0", "0'", "—", None, False]:
+            continue  # Hide empty / zero stats
         options.append(
             {"label": f"{label}: {val}", "value": {"label": label, "value": str(val)}}
         )

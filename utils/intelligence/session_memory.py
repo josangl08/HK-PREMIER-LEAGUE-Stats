@@ -37,6 +37,16 @@ def build_season_session_memory_key(*, player_id: str, season: str) -> str:
     )
 
 
+def build_career_session_memory_key(*, player_id: str) -> str:
+    """Build the canonical session-memory key for the career stage."""
+    return build_session_memory_key(
+        "career",
+        {
+            "player_id": player_id,
+        },
+    )
+
+
 def build_season_session_memory_record(
     *,
     player_id: str,
@@ -62,6 +72,40 @@ def build_season_session_memory_record(
             "player_id": str(player_id or ""),
             "season": str(season or ""),
             "stage": "season",
+        },
+        "current_novelty_key": str(current_novelty_key or "") or None,
+        "current_anchor": str(current_anchor or "") or None,
+        "current_priority": float(current_priority) if current_priority is not None else None,
+        "current_candidate": deepcopy(dict(current_candidate or {})) if current_candidate else None,
+        "seen_novelty_keys": normalized_seen,
+        "last_curated_signal_id": str(last_curated_signal_id or "") or None,
+        "last_updated_at": str(last_updated_at or serialize_timestamp(utc_now())),
+    }
+
+
+def build_career_session_memory_record(
+    *,
+    player_id: str,
+    current_novelty_key: str | None = None,
+    seen_novelty_keys: list[str] | None = None,
+    last_curated_signal_id: str | None = None,
+    current_candidate: Mapping[str, Any] | None = None,
+    current_anchor: str | None = None,
+    current_priority: float | None = None,
+    last_updated_at: str | None = None,
+) -> Dict[str, Any]:
+    """Build the normalized career-stage session-memory payload."""
+    normalized_seen = []
+    for novelty_key in seen_novelty_keys or []:
+        value = str(novelty_key or "").strip()
+        if value and value not in normalized_seen:
+            normalized_seen.append(value)
+
+    return {
+        "memory_key": build_career_session_memory_key(player_id=player_id),
+        "scope": {
+            "player_id": str(player_id or ""),
+            "stage": "career",
         },
         "current_novelty_key": str(current_novelty_key or "") or None,
         "current_anchor": str(current_anchor or "") or None,
@@ -259,6 +303,37 @@ class SessionMemoryStore:
         )
         return self.put_memory(memory["memory_key"], memory)
 
+    def get_career_memory(self, *, player_id: str) -> Optional[Dict[str, Any]]:
+        """Return career-stage session memory for the given player."""
+        return self.get_memory(
+            build_career_session_memory_key(player_id=player_id)
+        )
+
+    def put_career_memory(
+        self,
+        *,
+        player_id: str,
+        current_novelty_key: str | None = None,
+        seen_novelty_keys: list[str] | None = None,
+        last_curated_signal_id: str | None = None,
+        current_candidate: Mapping[str, Any] | None = None,
+        current_anchor: str | None = None,
+        current_priority: float | None = None,
+        last_updated_at: str | None = None,
+    ) -> Dict[str, Any]:
+        """Persist a normalized career-stage session-memory record."""
+        memory = build_career_session_memory_record(
+            player_id=player_id,
+            current_novelty_key=current_novelty_key,
+            seen_novelty_keys=seen_novelty_keys,
+            last_curated_signal_id=last_curated_signal_id,
+            current_candidate=current_candidate,
+            current_anchor=current_anchor,
+            current_priority=current_priority,
+            last_updated_at=last_updated_at,
+        )
+        return self.put_memory(memory["memory_key"], memory)
+
 
 _DEFAULT_SESSION_MEMORY_STORE: SessionMemoryStore | None = None
 
@@ -319,6 +394,42 @@ def put_season_session_memory(
     return active_store.put_season_memory(
         player_id=player_id,
         season=season,
+        current_novelty_key=current_novelty_key,
+        seen_novelty_keys=seen_novelty_keys,
+        last_curated_signal_id=last_curated_signal_id,
+        current_candidate=current_candidate,
+        current_anchor=current_anchor,
+        current_priority=current_priority,
+        last_updated_at=last_updated_at,
+    )
+
+
+def get_career_session_memory(
+    *,
+    player_id: str,
+    store: SessionMemoryStore | None = None,
+) -> Optional[Dict[str, Any]]:
+    """Module-level getter for career-stage session memory."""
+    active_store = store or _get_default_session_memory_store()
+    return active_store.get_career_memory(player_id=player_id)
+
+
+def put_career_session_memory(
+    *,
+    player_id: str,
+    current_novelty_key: str | None = None,
+    seen_novelty_keys: list[str] | None = None,
+    last_curated_signal_id: str | None = None,
+    current_candidate: Mapping[str, Any] | None = None,
+    current_anchor: str | None = None,
+    current_priority: float | None = None,
+    last_updated_at: str | None = None,
+    store: SessionMemoryStore | None = None,
+) -> Dict[str, Any]:
+    """Module-level put helper for career-stage session memory."""
+    active_store = store or _get_default_session_memory_store()
+    return active_store.put_career_memory(
+        player_id=player_id,
         current_novelty_key=current_novelty_key,
         seen_novelty_keys=seen_novelty_keys,
         last_curated_signal_id=last_curated_signal_id,

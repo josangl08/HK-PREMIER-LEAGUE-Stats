@@ -102,9 +102,13 @@ def render_contextual_overlay(signal: Mapping[str, Any], signal_index: int = 0) 
     """
     stagger_delay = f"{signal_index * 400}ms"
     dismiss_id = {"type": "stage-overlay-contextual-dismiss", "index": signal_index}
+    tier = _overlay_value(signal, "presentation_tier", "contextual").lower()
+    card_class = "stage-overlay-contextual-floating"
+    if tier == "micro":
+        card_class += " stage-overlay-contextual-floating--micro"
 
     return html.Div(
-        className="stage-overlay-contextual-floating",
+        className=card_class,
         style={"animationDelay": stagger_delay},
         children=[
             html.Div(

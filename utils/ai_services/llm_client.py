@@ -46,8 +46,8 @@ def get_stage_agent_model_candidates(profile: str = "flash") -> list[str]:
     if normalized == "pro":
         return [
             "gemini-3.1-pro-preview",
-            "gemini-2.5-pro",
             "gemini-3-flash-preview",
+            "gemini-3.1-flash-lite-preview",
         ]
     return [
         "gemini-3-flash-preview",

@@ -27,7 +27,6 @@ from utils.ai_services.prompt_builders import (
 )
 from utils.ai_services.validators import (
     coerce_prematch_tool_plan,
-    validate_prematch_stage_analysis_payload,
     validate_prematch_tool_plan,
 )
 from utils.intelligence.discovery_contracts import StageAnalysis, coerce_stage_analysis
@@ -91,6 +90,16 @@ def _normalize_confidence_label(value: Any) -> str:
     return "medium"
 
 
+def _normalize_evidence_key(key: Any) -> str:
+    normalized = _safe_text(key).lower()
+    if not normalized:
+        return ""
+    for alias, canonical in _PREMATCH_EVIDENCE_KEY_ALIASES.items():
+        if normalized == alias or normalized.startswith(f"{alias}_"):
+            return canonical
+    return _PREMATCH_EVIDENCE_KEY_ALIASES.get(normalized, normalized)
+
+
 def _normalize_prematch_ai_payload(
     raw_payload: Dict[str, Any],
     *,
@@ -102,15 +111,31 @@ def _normalize_prematch_ai_payload(
     for item in list(raw_payload.get("discoveries") or [])[:2]:
         if not isinstance(item, dict):
             continue
-        evidence_keys = [
-            _PREMATCH_EVIDENCE_KEY_ALIASES.get(_safe_text(key), _safe_text(key))
-            for key in list(item.get("evidence_keys") or [])
-            if _safe_text(key)
-        ]
+        evidence_keys = []
+        for key in list(item.get("evidence_keys") or []):
+            normalized_key = _normalize_evidence_key(key)
+            if normalized_key and normalized_key not in evidence_keys:
+                evidence_keys.append(normalized_key)
+        anchor = _normalize_evidence_key(item.get("anchor"))
+        if anchor and anchor not in evidence_keys:
+            evidence_keys.append(anchor)
+        if not evidence_keys:
+            for tool_name in selected_tools:
+                fallback_key = _normalize_evidence_key(tool_name)
+                if fallback_key and fallback_key != "session_memory":
+                    evidence_keys.append(fallback_key)
+                    break
+        body = _safe_text(item.get("body"))
+        title = _safe_text(item.get("title") or item.get("discovery_id") or item.get("signal_id"))
+        if title and not body:
+            body = _safe_text(raw_payload.get("summary"))
         normalized_item = {
             **item,
             "stage": "prematch",
+            "title": title or "Prematch discovery",
+            "body": body,
             "evidence_keys": evidence_keys,
+            "anchor": anchor or (evidence_keys[0] if evidence_keys else ""),
             "presentation_hint": _safe_text(item.get("presentation_hint") or "contextual").lower() or "contextual",
             "cta_label": _safe_text(item.get("cta_label") or "Open preview"),
         }
@@ -118,12 +143,60 @@ def _normalize_prematch_ai_payload(
     return {
         "stage": "prematch",
         "scope": dict(scope),
-        "summary": _safe_text(raw_payload.get("summary")),
+        "summary": _safe_text(raw_payload.get("summary") or raw_payload.get("body")),
         "confidence": _normalize_confidence_label(raw_payload.get("confidence")),
         "discoveries": discoveries,
         "supporting_artifacts": list(selected_tools),
         "debug": dict(raw_payload.get("debug") or {}),
     }
+
+
+def _is_viable_prematch_analysis(raw_payload: Dict[str, Any]) -> bool:
+    """Accept normalized prematch analyses that carry usable discoveries, even if the raw model format is imperfect."""
+    analysis = coerce_stage_analysis(raw_payload)
+    if analysis is None or analysis.stage != "prematch":
+        return False
+    if analysis.confidence not in {"low", "medium", "high"}:
+        return False
+    if not analysis.discoveries or len(analysis.discoveries) > 3:
+        return False
+    return all(
+        bool(item.title and item.body and (item.evidence_keys or item.anchor))
+        for item in analysis.discoveries
+    )
+
+
+def _coerce_viable_prematch_analysis(raw_payload: Dict[str, Any]) -> Optional[StageAnalysis]:
+    """Return a normalized prematch analysis when the parsed payload is materially usable."""
+    analysis = coerce_stage_analysis(raw_payload)
+    if analysis is None or analysis.stage != "prematch":
+        return None
+    if analysis.confidence not in {"low", "medium", "high"}:
+        analysis = StageAnalysis(
+            stage="prematch",
+            scope=dict(analysis.scope),
+            summary=analysis.summary,
+            confidence="medium",
+            discoveries=list(analysis.discoveries),
+            supporting_artifacts=list(analysis.supporting_artifacts),
+            debug=dict(analysis.debug),
+        )
+    discoveries = [
+        item
+        for item in analysis.discoveries
+        if item.title and item.body and (item.evidence_keys or item.anchor)
+    ][:3]
+    if not discoveries:
+        return None
+    return StageAnalysis(
+        stage="prematch",
+        scope=dict(analysis.scope),
+        summary=analysis.summary or discoveries[0].body,
+        confidence=analysis.confidence,
+        discoveries=discoveries,
+        supporting_artifacts=list(analysis.supporting_artifacts),
+        debug=dict(analysis.debug),
+    )
 
 
 def _discovery_similarity(left: Dict[str, Any], right: Dict[str, Any]) -> float:
@@ -394,8 +467,10 @@ def synthesize_prematch_stage_analysis(
     """Run the guarded two-step prematch agentic discovery flow and return a validated StageAnalysis when possible."""
     runtime_config = get_intelligence_runtime_config()
     if not runtime_config.get("prematch_agent_llm_enabled", False):
+        logger.info("Prematch agent skipped reason=llm_disabled")
         return None
     if not gemini_is_available():
+        logger.info("Prematch agent skipped reason=gemini_unavailable")
         return None
 
     fixture_payload = ((artifacts.get("prematch_fixture_context") or {}).get("payload") or {})
@@ -474,7 +549,8 @@ def synthesize_prematch_stage_analysis(
                 scope=scope,
                 selected_tools=selected_tools,
             )
-        if not validate_prematch_stage_analysis_payload(parsed):
+        analysis = _coerce_viable_prematch_analysis(parsed) if isinstance(parsed, dict) else None
+        if analysis is None:
             if result.ok:
                 logger.info(
                     "Prematch agent invalid analysis raw model=%s payload=%s",
@@ -485,12 +561,8 @@ def synthesize_prematch_stage_analysis(
                 "Prematch agent discovery fallback model=%s status=%s valid_analysis=%s",
                 model_name,
                 result.status,
-                bool(validate_prematch_stage_analysis_payload(parsed)),
+                bool(analysis),
             )
-            continue
-
-        analysis = coerce_stage_analysis(parsed)
-        if analysis is None:
             continue
 
         debug = dict(analysis.debug or {})

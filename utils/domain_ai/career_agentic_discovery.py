@@ -27,7 +27,6 @@ from utils.ai_services.prompt_builders import (
 )
 from utils.ai_services.validators import (
     coerce_career_tool_plan,
-    validate_career_stage_analysis_payload,
     validate_career_tool_plan,
 )
 from utils.intelligence.discovery_contracts import StageAnalysis, coerce_stage_analysis
@@ -41,8 +40,8 @@ _CAREER_EVIDENCE_KEY_ALIASES = {
     "signals_context": "career_signals_context",
     "priorities_context": "career_priorities_context",
     "dashboard_brief": "career_dashboard_brief",
-    "overlay_candidates": "career_overlay_candidates",
 }
+_CAREER_DISCOVERY_LIMIT = 4
 
 
 def _safe_text(value: Any) -> str:
@@ -75,6 +74,79 @@ def _normalize_player_facing_copy(value: str) -> str:
     return re.sub(r"\s+", " ", normalized).strip()
 
 
+def _normalize_evidence_key(key: Any) -> str:
+    normalized = _safe_text(key).lower()
+    if not normalized:
+        return ""
+    for alias, canonical in _CAREER_EVIDENCE_KEY_ALIASES.items():
+        if normalized == alias or normalized.startswith(f"{alias}_"):
+            return canonical
+    return _CAREER_EVIDENCE_KEY_ALIASES.get(normalized, normalized)
+
+
+def _normalize_confidence_label(value: Any) -> str:
+    normalized = _safe_text(value).lower()
+    if normalized in {"low", "medium", "high"}:
+        return normalized
+    if normalized in {"limited", "weak", "uncertain"}:
+        return "low"
+    if normalized in {"good", "strong", "certain"}:
+        return "high"
+    return "medium"
+
+
+def _career_discovery_identity(item: Dict[str, Any]) -> tuple[str, str]:
+    """Return stable signal_id and novelty_key for recurring career discovery families."""
+    title = _safe_text(item.get("title")).lower()
+    body = _safe_text(item.get("body")).lower()
+    combined = f"{title} {body}".strip()
+    evidence_keys = [
+        _safe_text(key).lower()
+        for key in list(item.get("evidence_keys") or [])
+        if _safe_text(key)
+    ]
+    evidence_blob = " ".join(evidence_keys)
+
+    role_stability_markers = (
+        "minutes dropped",
+        "playing time has dropped",
+        "involvement has dropped",
+        "career average",
+        "starting role",
+        "starting rhythm",
+        "starting spot",
+        "regular for",
+    )
+    technical_impact_markers = (
+        "passing",
+        "distribution",
+        "ball retention",
+        "interceptions",
+        "bottom quartile",
+        "bottom 25%",
+        "technical impact",
+        "on the ball",
+    )
+
+    if any(marker in combined for marker in role_stability_markers):
+        return ("role_stability_alert", "career:role_stability:minutes_drop")
+    if any(marker in combined for marker in technical_impact_markers):
+        return ("technical_leverage_points", "career:technical_impact")
+    if "career_phase_context" in evidence_blob:
+        return ("career_phase_signal", "career:phase_signal")
+    if "career_priorities_context" in evidence_blob:
+        return ("priority_focus", "career:priority_focus")
+
+    fallback_signal_id = _safe_text(item.get("discovery_id") or item.get("signal_id") or "career_discovery")
+    fallback_novelty_key = _safe_text(
+        item.get("novelty_key")
+        or item.get("signal_id")
+        or item.get("discovery_id")
+        or fallback_signal_id
+    )
+    return (fallback_signal_id, fallback_novelty_key)
+
+
 def _normalize_career_ai_payload(
     raw_payload: Dict[str, Any],
     *,
@@ -82,18 +154,45 @@ def _normalize_career_ai_payload(
     selected_tools: list[str],
 ) -> Dict[str, Any]:
     discoveries = []
-    for item in list(raw_payload.get("discoveries") or [])[:2]:
+    for item in list(raw_payload.get("discoveries") or [])[:_CAREER_DISCOVERY_LIMIT]:
         if not isinstance(item, dict):
             continue
-        evidence_keys = [
-            _CAREER_EVIDENCE_KEY_ALIASES.get(_safe_text(key), _safe_text(key))
-            for key in list(item.get("evidence_keys") or [])
-            if _safe_text(key)
-        ]
+        evidence_keys = []
+        for key in list(item.get("evidence_keys") or []):
+            normalized_key = _normalize_evidence_key(key)
+            if normalized_key and normalized_key not in evidence_keys:
+                evidence_keys.append(normalized_key)
+        anchor = _normalize_evidence_key(item.get("anchor"))
+        if anchor and anchor not in evidence_keys:
+            evidence_keys.append(anchor)
+        if not evidence_keys:
+            for tool_name in selected_tools:
+                fallback_key = _normalize_evidence_key(tool_name)
+                if fallback_key and fallback_key != "session_memory":
+                    evidence_keys.append(fallback_key)
+                    break
+        title = _safe_text(item.get("title") or item.get("discovery_id") or item.get("signal_id"))
+        body = _safe_text(item.get("body"))
+        if title and not body:
+            body = _safe_text(raw_payload.get("summary"))
+        signal_id, novelty_key = _career_discovery_identity(
+            {
+                **item,
+                "evidence_keys": evidence_keys,
+                "title": title,
+                "body": body,
+            }
+        )
         normalized_item = {
             **item,
             "stage": "career",
+            "discovery_id": signal_id,
+            "signal_id": signal_id,
+            "title": title or "Career discovery",
+            "body": body,
             "evidence_keys": evidence_keys,
+            "novelty_key": novelty_key,
+            "anchor": anchor or (evidence_keys[0] if evidence_keys else ""),
             "presentation_hint": _safe_text(item.get("presentation_hint") or "contextual").lower() or "contextual",
             "cta_label": _safe_text(item.get("cta_label") or "See detail"),
         }
@@ -101,12 +200,60 @@ def _normalize_career_ai_payload(
     return {
         "stage": "career",
         "scope": dict(scope),
-        "summary": _safe_text(raw_payload.get("summary")),
-        "confidence": _safe_text(raw_payload.get("confidence") or "medium").lower() or "medium",
+        "summary": _safe_text(raw_payload.get("summary") or raw_payload.get("body")),
+        "confidence": _normalize_confidence_label(raw_payload.get("confidence")),
         "discoveries": discoveries,
         "supporting_artifacts": list(selected_tools),
         "debug": dict(raw_payload.get("debug") or {}),
     }
+
+
+def _is_viable_career_analysis(raw_payload: Dict[str, Any]) -> bool:
+    """Accept normalized career analyses that carry usable discoveries, even if the raw model format is imperfect."""
+    analysis = coerce_stage_analysis(raw_payload)
+    if analysis is None or analysis.stage != "career":
+        return False
+    if analysis.confidence not in {"low", "medium", "high"}:
+        return False
+    if not analysis.discoveries or len(analysis.discoveries) > _CAREER_DISCOVERY_LIMIT:
+        return False
+    return all(
+        bool(item.title and item.body and (item.evidence_keys or item.anchor))
+        for item in analysis.discoveries
+    )
+
+
+def _coerce_viable_career_analysis(raw_payload: Dict[str, Any]) -> Optional[StageAnalysis]:
+    """Return a normalized career analysis when the parsed payload is materially usable."""
+    analysis = coerce_stage_analysis(raw_payload)
+    if analysis is None or analysis.stage != "career":
+        return None
+    if analysis.confidence not in {"low", "medium", "high"}:
+        analysis = StageAnalysis(
+            stage="career",
+            scope=dict(analysis.scope),
+            summary=analysis.summary,
+            confidence="medium",
+            discoveries=list(analysis.discoveries),
+            supporting_artifacts=list(analysis.supporting_artifacts),
+            debug=dict(analysis.debug),
+        )
+    discoveries = [
+        item
+        for item in analysis.discoveries
+        if item.title and item.body and (item.evidence_keys or item.anchor)
+    ][:_CAREER_DISCOVERY_LIMIT]
+    if not discoveries:
+        return None
+    return StageAnalysis(
+        stage="career",
+        scope=dict(analysis.scope),
+        summary=analysis.summary or discoveries[0].body,
+        confidence=analysis.confidence,
+        discoveries=discoveries,
+        supporting_artifacts=list(analysis.supporting_artifacts),
+        debug=dict(analysis.debug),
+    )
 
 
 def _discovery_similarity(left: Dict[str, Any], right: Dict[str, Any]) -> float:
@@ -165,7 +312,7 @@ def _curate_career_discoveries(analysis: StageAnalysis) -> StageAnalysis:
                 "debug": dict(analysis.debug),
             }
         ).discoveries[0]
-        for item in curated[:2]
+        for item in curated[:_CAREER_DISCOVERY_LIMIT]
     ]
     return StageAnalysis(
         stage="career",
@@ -290,8 +437,10 @@ def synthesize_career_stage_analysis(
     """Run the guarded two-step career agentic discovery flow and return a validated StageAnalysis when possible."""
     runtime_config = get_intelligence_runtime_config()
     if not runtime_config.get("career_agent_llm_enabled", False):
+        logger.info("Career agent skipped reason=llm_disabled")
         return None
     if not gemini_is_available():
+        logger.info("Career agent skipped reason=gemini_unavailable")
         return None
 
     brief_payload = ((artifacts.get("career_dashboard_brief") or {}).get("payload") or {})
@@ -368,7 +517,8 @@ def synthesize_career_stage_analysis(
                 scope=scope,
                 selected_tools=selected_tools,
             )
-        if not validate_career_stage_analysis_payload(parsed):
+        analysis = _coerce_viable_career_analysis(parsed) if isinstance(parsed, dict) else None
+        if analysis is None:
             if result.ok:
                 logger.info(
                     "Career agent invalid analysis raw model=%s payload=%s",
@@ -379,11 +529,8 @@ def synthesize_career_stage_analysis(
                 "Career agent discovery fallback model=%s status=%s valid_analysis=%s",
                 model_name,
                 result.status,
-                bool(validate_career_stage_analysis_payload(parsed)),
+                bool(analysis),
             )
-            continue
-        analysis = coerce_stage_analysis(parsed)
-        if analysis is None:
             continue
         debug = dict(analysis.debug or {})
         debug["llm_generated"] = True
