@@ -4,6 +4,7 @@
 import logging
 import json
 import re
+import time
 from difflib import SequenceMatcher
 from typing import Any
 from pathlib import Path
@@ -3138,8 +3139,8 @@ def register_player_portal_callbacks(app):
         return _render_stage_content_for_context_with_session(
             timeline_context,
             session_state,
-            prematch_stage_analysis,
             None,
+            prematch_stage_analysis,
         )
 
     @app.callback(
@@ -4088,6 +4089,7 @@ def register_career_intelligence_callbacks(app):
         Output("stage-overlay-critical-container", "children"),
         Output("stage-overlay-critical-container", "style"),
         Output("insight-session-state", "data", allow_duplicate=True),
+        Output("season-overlay-dismissed-signal", "data", allow_duplicate=True),
         Input("stage-overlay-primary-store", "data"),
         Input({"type": "stage-overlay-critical-btn", "action": ALL, "stage": ALL, "signal_id": ALL, "evidence_key": ALL}, "n_clicks"),
         State("timeline-context-store", "data"),
@@ -4104,11 +4106,11 @@ def register_career_intelligence_callbacks(app):
         active_stage = _active_overlay_stage_name(timeline_context)
 
         if not active_stage:
-            return None, {"display": "none"}, no_update
+            return None, {"display": "none"}, no_update, no_update
 
         if isinstance(triggered_id, dict) and triggered_id.get("type") == "stage-overlay-critical-btn":
             if triggered_id.get("action") != "dismiss":
-                return no_update, no_update, no_update
+                return no_update, no_update, no_update, no_update
             updated_state = dict(session_state or {})
             updated_state["t1_dismissed_this_session"] = True
             # Append to history so Insight Inbox can display it
@@ -4138,18 +4140,18 @@ def register_career_intelligence_callbacks(app):
                 str((primary_data or {}).get("stage") or active_stage or ""),
                 str((primary_data or {}).get("signal_id") or ""),
             )
-            return None, {"display": "none"}, updated_state
+            return None, {"display": "none"}, updated_state, int(time.time() * 1000)
 
         if not primary_data:
             logger.info("Stage critical overlay hidden stage=%s reason=no_signal", active_stage)
-            return None, {"display": "none"}, no_update
+            return None, {"display": "none"}, no_update, no_update
 
         logger.info(
             "Stage critical overlay rendered stage=%s signal_id=%s",
             str((primary_data or {}).get("stage") or active_stage or ""),
             str((primary_data or {}).get("signal_id") or ""),
         )
-        return render_critical_overlay(primary_data), {"display": "block"}, no_update
+        return render_critical_overlay(primary_data), {"display": "block"}, no_update, no_update
 
     # ── 7.3 T2 queue management callback ────────────────────────────────────
 
@@ -4157,6 +4159,7 @@ def register_career_intelligence_callbacks(app):
         Output("stage-overlay-contextual-container", "children"),
         Output("stage-overlay-queue-store", "data", allow_duplicate=True),
         Output("insight-session-state", "data", allow_duplicate=True),
+        Output("season-overlay-dismissed-signal", "data", allow_duplicate=True),
         Input("stage-overlay-queue-store", "data"),
         Input({"type": "stage-overlay-contextual-dismiss", "index": ALL}, "n_clicks"),
         State("timeline-context-store", "data"),
@@ -4173,9 +4176,10 @@ def register_career_intelligence_callbacks(app):
 
         queue = list(queue or [])
         updated_session = no_update
+        dismissed_signal = no_update
 
         if not active_stage:
-            return [], queue, no_update
+            return [], queue, no_update, no_update
 
         # Handle dismiss click
         if isinstance(triggered_id, dict) and triggered_id.get("type") == "stage-overlay-contextual-dismiss":
@@ -4204,6 +4208,7 @@ def register_career_intelligence_callbacks(app):
                     stage=signal_stage,
                     player_id=player_id,
                 )
+                dismissed_signal = int(time.time() * 1000)
                 logger.info(
                     "Stage non_critical overlay dismissed stage=%s signal_id=%s remaining=%s",
                     signal_stage,
@@ -4213,7 +4218,7 @@ def register_career_intelligence_callbacks(app):
 
         if not queue:
             logger.info("Stage non_critical overlay hidden stage=%s reason=queue_empty", active_stage)
-            return [], queue, updated_session
+            return [], queue, updated_session, dismissed_signal
 
         # Render only the next queued card so the stage shows one visible
         # non-critical overlay at a time, aligned with the shared dismiss flow.
@@ -4230,7 +4235,7 @@ def register_career_intelligence_callbacks(app):
             len(queue),
         )
 
-        return cards, queue, updated_session
+        return cards, queue, updated_session, dismissed_signal
 
     # ── 7.4 T2 career-context gate ──────────────────────────────────────────
 
@@ -4281,6 +4286,7 @@ def register_career_intelligence_callbacks(app):
 
     @app.callback(
         Output("insight-session-state", "data", allow_duplicate=True),
+        Output("season-overlay-dismissed-signal", "data", allow_duplicate=True),
         Input(
             {
                 "type": "stage-overlay-prominent-dismiss",
@@ -4301,7 +4307,7 @@ def register_career_intelligence_callbacks(app):
         trigger_value = ctx.triggered[0].get("value", 0) if ctx.triggered else 0
         triggered_id = ctx.triggered_id
         if not trigger_value or not isinstance(triggered_id, dict):
-            return no_update
+            return no_update, no_update
 
         updated_state = dict(session_state or {})
         history = list(updated_state.get("history", []))
@@ -4344,17 +4350,19 @@ def register_career_intelligence_callbacks(app):
             )
         updated_state["history"] = history
         logger.info("Season prominent overlay dismissed signal_id=%s", signal_id)
-        return updated_state
+        return updated_state, int(time.time() * 1000)
 
     @app.callback(
         Output("stage-content", "children", allow_duplicate=True),
-        Input("insight-session-state", "data"),
+        Input("season-overlay-dismissed-signal", "data"),
+        State("insight-session-state", "data"),
         State("timeline-context-store", "data"),
         State("season-stage-analysis-store", "data"),
         prevent_initial_call=True,
     )
-    def refresh_stage_after_overlay_session_change(session_state, timeline_context, season_stage_analysis):
-        """Refresh the active season stage when overlay dismiss history changes."""
+    def refresh_stage_after_overlay_session_change(_, session_state, timeline_context, season_stage_analysis):
+        """Refresh the active season stage only when a season overlay is actually dismissed.
+        Decoupled from insight-session-state to avoid re-renders on every overlay dispatch."""
         if not timeline_context or str(timeline_context.get("type") or "") != "career":
             return no_update
         return _render_stage_content_for_context_with_session(
